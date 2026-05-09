@@ -1,9 +1,10 @@
 package policy
 
 import (
-	"path"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // ACLAction is the verdict carried by an ACLRule.
@@ -34,9 +35,11 @@ type ACLRule struct {
 	NamespaceID string
 
 	// PathGlob, when non-empty, is a glob pattern matched against
-	// the chunk's path metadata. The implementation uses
-	// path.Match — `*` matches a path segment, `?` one character,
-	// and `**` (a non-standard extension) matches across slashes.
+	// the chunk's path metadata. Wildcards: `*` matches a single
+	// segment (no `/`), `?` one non-`/` character, `[abc]` /
+	// `[!abc]` a character class, and `**` matches across `/`.
+	// Other regex metacharacters in the pattern are treated as
+	// literals — see globMatch.
 	PathGlob string
 
 	// Action is allow or deny.
@@ -129,48 +132,144 @@ func ruleMatches(r ACLRule, attrs ChunkAttrs) bool {
 	return globMatch(r.PathGlob, attrs.Path)
 }
 
-// globMatch is a helper that supports the standard path.Match wildcards
-// (`*`, `?`, `[]`) plus a `**` extension that matches across slashes.
-// The implementation collapses `**` to a tighter regex-equivalent
-// pattern by translating to repeated path.Match calls; see tests for
-// the supported cases.
+// globMatch reports whether target satisfies the glob pattern.
+//
+// Supported metacharacters:
+//   - `**` matches any run of characters, including `/` (cross-segment).
+//   - `*`  matches any run of non-`/` characters (single segment).
+//   - `?`  matches a single non-`/` character.
+//   - `[abc]` / `[!abc]` character classes (the `!` form is rewritten
+//     to the regex `^` form).
+//
+// The pattern is translated to an anchored regular expression once
+// per process and cached; subsequent calls reuse the compiled regex.
+// All other regex metacharacters in the pattern are escaped, so
+// punctuation in real-world paths (`.`, `+`, `(`, `)`, ...) matches
+// as a literal.
+//
+// A pattern that fails to compile (e.g. an unbalanced character class
+// the translator can't repair) returns false — fail-closed for the
+// deny gate.
 func globMatch(pattern, target string) bool {
 	if pattern == "" {
 		return true
 	}
-	if !strings.Contains(pattern, "**") {
-		ok, _ := path.Match(pattern, target)
-		return ok
+	re := compileGlob(pattern)
+	if re == nil {
+		return false
 	}
-	// Split on `**`. Each segment must match somewhere (in order) in
-	// the target. The first segment must match a prefix; the last
-	// segment must match a suffix.
-	parts := strings.Split(pattern, "**")
-	cursor := 0
-	for i, p := range parts {
-		if p == "" {
+	return re.MatchString(target)
+}
+
+// globRegexCache memoizes pattern → compiled regex (or nil for
+// unparsable patterns) so each ACL rule's glob is translated at most
+// once per process. sync.Map is used because the cache is
+// write-once-per-pattern and dominated by reads on hot paths.
+var globRegexCache sync.Map // string → *regexp.Regexp
+
+func compileGlob(pattern string) *regexp.Regexp {
+	if v, ok := globRegexCache.Load(pattern); ok {
+		if re, ok := v.(*regexp.Regexp); ok {
+			return re
+		}
+		return nil
+	}
+	re, err := regexp.Compile("^" + globToRegex(pattern) + "$")
+	if err != nil {
+		globRegexCache.Store(pattern, (*regexp.Regexp)(nil))
+		return nil
+	}
+	globRegexCache.Store(pattern, re)
+	return re
+}
+
+// Sentinel placeholders for the `**` boundary forms. NUL is never a
+// legal byte in a path glob, so using it for the placeholder lets us
+// recognise tokens unambiguously in the second pass. Order of the
+// substitutions in globToRegex matters: longer/more-specific forms
+// must be replaced first so a `/**/` doesn't get split into `/**` +
+// trailing `/`.
+const (
+	tokDoubleSlash         = "\x00d\x00" // /**/  → /(?:.*/)?
+	tokDoubleSlashLeading  = "\x00l\x00" // **/   → (?:.*/)?
+	tokDoubleSlashTrailing = "\x00t\x00" // /**   → (?:/.*)?
+	tokDoubleStar          = "\x00s\x00" // **    → .*
+)
+
+// globToRegex translates a glob pattern to a regex source string
+// (without the `^`/`$` anchors). Two passes:
+//
+//  1. Replace the four `**` boundary forms with sentinel tokens so
+//     the slash-eating semantics survive the byte-level walk.
+//     `/**/` matches zero or more middle segments (so `a/**/b` hits
+//     both `a/b` and `a/x/y/b`); `**/x` matches `x` plus any nested
+//     form; `x/**` matches `x` plus any deeper form.
+//  2. Walk byte-by-byte translating tokens, single-char wildcards,
+//     and character classes. Every other byte is passed through
+//     regexp.QuoteMeta so punctuation in real paths (`.`, `+`, `(`,
+//     ...) matches as a literal.
+//
+// The algorithm is byte-level rather than rune-level because the
+// glob metacharacters are all ASCII; non-ASCII bytes pass through
+// QuoteMeta unchanged.
+func globToRegex(pattern string) string {
+	p := pattern
+	p = strings.ReplaceAll(p, "/**/", tokDoubleSlash)
+	p = strings.ReplaceAll(p, "**/", tokDoubleSlashLeading)
+	p = strings.ReplaceAll(p, "/**", tokDoubleSlashTrailing)
+	p = strings.ReplaceAll(p, "**", tokDoubleStar)
+
+	var b strings.Builder
+	b.Grow(len(p) * 2)
+	i := 0
+	for i < len(p) {
+		c := p[i]
+		if c == 0 && i+2 < len(p) && p[i+2] == 0 {
+			switch p[i+1] {
+			case 'd':
+				b.WriteString("/(?:.*/)?")
+			case 'l':
+				b.WriteString("(?:.*/)?")
+			case 't':
+				b.WriteString("(?:/.*)?")
+			case 's':
+				b.WriteString(".*")
+			}
+			i += 3
 			continue
 		}
-		if i == 0 {
-			if !strings.HasPrefix(target, p) {
-				return false
+		switch c {
+		case '*':
+			b.WriteString("[^/]*")
+			i++
+		case '?':
+			b.WriteString("[^/]")
+			i++
+		case '[':
+			// Pass-through character class. Convert leading `!` to
+			// regex negation `^`. Unclosed `[` is treated as a
+			// literal `[` so we never produce an invalid regex.
+			end := strings.IndexByte(p[i+1:], ']')
+			if end < 0 {
+				b.WriteString(`\[`)
+				i++
+				continue
 			}
-			cursor = len(p)
-			continue
-		}
-		idx := strings.Index(target[cursor:], p)
-		if idx < 0 {
-			return false
-		}
-		cursor += idx + len(p)
-		if i == len(parts)-1 && cursor != len(target) {
-			// trailing segment must hit the end
-			if !strings.HasSuffix(target, p) {
-				return false
+			class := p[i+1 : i+1+end]
+			b.WriteByte('[')
+			if strings.HasPrefix(class, "!") {
+				b.WriteByte('^')
+				class = class[1:]
 			}
+			b.WriteString(class)
+			b.WriteByte(']')
+			i += end + 2
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+			i++
 		}
 	}
-	return true
+	return b.String()
 }
 
 // SortRules returns a copy of rules sorted with deny rules first

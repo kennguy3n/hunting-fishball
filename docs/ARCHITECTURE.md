@@ -597,6 +597,10 @@ hunting-fishball/
   exposes a constant). The consumer parses keys with
   `pipeline.ParsePartitionKey` and rejects body/key mismatches as
   poison messages, defending against spoofed partition routing.
+  Single-pipe `tenant_id|source_id` keys are accepted as a one-
+  release migration aid and surfaced via
+  `ConsumerConfig.OnLegacyKey` so production can metric the rate
+  and remove the fallback once the topic drains.
 - **Backfill rate control:** A `pipeline.RateController` interface
   decouples the orchestrator from the limiter implementation.
   `pipeline.TickerRate` is the wall-clock pacer used in tests; the

@@ -145,21 +145,31 @@ func TestParsePartitionKey(t *testing.T) {
 	cases := []struct {
 		in          string
 		ok          bool
+		legacy      bool
 		tenant, src string
 	}{
-		{"tenant-a||src-1", true, "tenant-a", "src-1"},
-		{"||src-1", false, "", ""},
-		{"tenant-a||", false, "", ""},
-		// Single-pipe legacy keys are explicitly rejected so a stray
-		// `|` in a tenant/source ID can never split a partition key.
-		{"tenant-a|src-1", false, "", ""},
-		{"no-separator", false, "", ""},
-		{"", false, "", ""},
+		{"tenant-a||src-1", true, false, "tenant-a", "src-1"},
+		{"||src-1", false, false, "", ""},
+		{"tenant-a||", false, false, "", ""},
+		// Single-`|` legacy keys are accepted as a one-release
+		// migration aid (consumer.go::PartitionKeySeparator). The
+		// `legacy` flag lets production count them and rip the
+		// fallback once the topic drains.
+		{"tenant-a|src-1", true, true, "tenant-a", "src-1"},
+		{"|src-1", false, false, "", ""},
+		{"tenant-a|", false, false, "", ""},
+		{"no-separator", false, false, "", ""},
+		{"", false, false, "", ""},
 	}
 	for _, c := range cases {
 		gotT, gotS, gotOk := pipeline.ParsePartitionKey(c.in)
 		if gotOk != c.ok || gotT != c.tenant || gotS != c.src {
 			t.Fatalf("ParsePartitionKey(%q) = (%q,%q,%v) want (%q,%q,%v)", c.in, gotT, gotS, gotOk, c.tenant, c.src, c.ok)
+		}
+		gotT2, gotS2, gotLegacy, gotOk2 := pipeline.ParsePartitionKeyDetailed(c.in)
+		if gotOk2 != c.ok || gotT2 != c.tenant || gotS2 != c.src || gotLegacy != c.legacy {
+			t.Fatalf("ParsePartitionKeyDetailed(%q) = (%q,%q,legacy=%v,ok=%v) want (%q,%q,legacy=%v,ok=%v)",
+				c.in, gotT2, gotS2, gotLegacy, gotOk2, c.tenant, c.src, c.legacy, c.ok)
 		}
 	}
 }
