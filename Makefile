@@ -32,12 +32,36 @@ test:
 .PHONY: test-e2e
 test-e2e:
 	@echo "Bringing up storage plane (postgres, redis, kafka, qdrant)..."
-	docker compose up -d --wait
+	docker compose up -d --wait postgres redis kafka qdrant
 	@echo "Running e2e smoke tests..."
 	E2E_ENABLED=1 \
 	CONTEXT_ENGINE_DATABASE_URL="host=localhost user=hf password=hf dbname=hunting_fishball port=5432 sslmode=disable" \
 	CONTEXT_ENGINE_QDRANT_URL="http://localhost:6333" \
 	$(GO) test -tags=e2e -race -count=1 -timeout 5m ./tests/e2e/...
+
+.PHONY: test-integration
+test-integration:
+	@echo "Bringing up Phase 3 ML services (docling, embedding, memory) + falkordb..."
+	docker compose up -d --wait docling embedding memory falkordb
+	@echo "Running Go ↔ Python integration tests..."
+	DOCLING_TARGET=localhost:50051 \
+	EMBEDDING_TARGET=localhost:50052 \
+	MEMORY_TARGET=localhost:50053 \
+	FALKORDB_ADDR=localhost:6380 \
+	$(GO) test -tags=integration -race -count=1 -timeout 10m ./tests/integration/...
+
+.PHONY: bench
+bench:
+	$(GO) test -bench . -benchmem -benchtime=3s ./tests/benchmark/...
+
+.PHONY: services-test
+services-test:
+	@echo "Running unit tests for Python ML services..."
+	cd services && python -m pytest -q --import-mode=importlib
+
+.PHONY: services-protos
+services-protos:
+	bash services/gen_protos.sh
 
 .PHONY: vet
 vet:

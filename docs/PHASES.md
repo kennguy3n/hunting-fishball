@@ -21,9 +21,14 @@ phase.
 > contracts have all landed. **Phase 1** is **🟡 partial** as of
 > 2026-05-09 — Google Drive + Slack connectors, the Go Kafka consumer,
 > the 4-stage Go pipeline, the retrieval API, and the docker-compose
-> e2e smoke test have all landed. Every other phase below is currently
-> `⏳ planned`. As phases land, flip the marker and move the supporting
-> status row in [`PROGRESS.md`](PROGRESS.md).
+> e2e smoke test have all landed. **Phase 3** is **🟡 partial** as of
+> 2026-05-09 — BM25 (bleve), FalkorDB graph, Redis semantic cache,
+> RRF merger + reranker, parallel fan-out, the three Python ML
+> microservices, integration tests, benchmarks, and the cutover
+> plan have all landed; the production P95 < 500 ms acceptance
+> criterion is deferred to Phase 4 load tests. Every other phase below
+> is currently `⏳ planned`. As phases land, flip the marker and move
+> the supporting status row in [`PROGRESS.md`](PROGRESS.md).
 
 ---
 
@@ -106,24 +111,31 @@ whole tenant, not just a single user.
 
 ---
 
-## Phase 3 — Retrieval fan-out  ⏳
+## Phase 3 — Retrieval fan-out  🟡
 
 **Scope.** Stand up the four retrieval backends in parallel and merge
 their results.
 
 **Exit criteria.**
 
-- [ ] Qdrant Go client integrated; per-tenant collection convention.
-- [ ] `tantivy-go` integrated; per-tenant directory convention.
-- [ ] FalkorDB Go client integrated; per-tenant graph convention.
-- [ ] gRPC contract for the Mem0 memory service; Go client integrated.
-- [ ] Retrieval API runs all four backends in parallel via `errgroup`,
-      with per-backend deadlines.
-- [ ] Reciprocal-rank fusion merger.
-- [ ] Cross-encoder reranker (remote-only) and a Go-side fallback
+- [x] Qdrant Go client integrated; per-tenant collection convention
+      (landed in Phase 1; reused unchanged here).
+- [x] BM25 search integrated via `bleve` (pure-Go fallback for
+      `tantivy-go`); per-tenant directory convention.
+- [x] FalkorDB Go client integrated; per-tenant graph convention.
+- [x] gRPC contract for the Mem0 memory service; Go client integrated
+      and wired through the retrieval handler.
+- [x] Retrieval API runs all four backends in parallel via `errgroup`,
+      with per-backend deadlines and `policy.degraded` signalling.
+- [x] Reciprocal-rank fusion merger.
+- [x] Go-side lightweight reranker (BM25 blend + freshness boost) +
+      `Reranker` interface for a future cross-encoder remote
       reranker.
-- [ ] Semantic cache in Redis with lazy invalidation on Stage 4 writes.
-- [ ] Retrieval P95 latency < 500 ms on the sample corpus.
+- [x] Semantic cache in Redis with per-tenant key prefix and explicit
+      `Invalidate` on Stage 4 writes.
+- [ ] Retrieval P95 latency < 500 ms on the sample corpus
+      (in-process P95 ~178 µs measured in `tests/benchmark/`; full
+      end-to-end target deferred to Phase 4 load tests).
 
 ---
 

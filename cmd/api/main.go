@@ -5,6 +5,15 @@
 //   - Connects to Qdrant via REST (CONTEXT_ENGINE_QDRANT_URL).
 //   - Connects to the embedding gRPC service for query embedding
 //     (CONTEXT_ENGINE_EMBEDDING_TARGET).
+//
+// Phase 3 wiring (all optional — empty env var skips the backend):
+//   - Tantivy/bleve BM25 (CONTEXT_ENGINE_BM25_DIR).
+//   - FalkorDB graph + Redis semantic cache, both off the same
+//     go-redis pool (CONTEXT_ENGINE_REDIS_URL,
+//     CONTEXT_ENGINE_FALKOR_ENABLED).
+//   - Mem0 gRPC client (CONTEXT_ENGINE_MEMORY_TARGET).
+//
+// Common:
 //   - Mounts the audit-log handler under the auth middleware group.
 //   - Mounts the retrieval handler under the auth middleware group.
 //   - Listens on CONTEXT_ENGINE_LISTEN_ADDR (default :8080).
@@ -27,6 +36,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"gorm.io/driver/postgres"
@@ -37,6 +47,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/retrieval"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 	embeddingv1 "github.com/kennguy3n/hunting-fishball/proto/embedding/v1"
+	memoryv1 "github.com/kennguy3n/hunting-fishball/proto/memory/v1"
 )
 
 func main() {
@@ -89,10 +100,54 @@ func run() error {
 	}
 	queryEmbedder := &queryEmbedAdapter{e: embedder}
 
-	retrievalHandler, err := retrieval.NewHandler(retrieval.HandlerConfig{
+	handlerCfg := retrieval.HandlerConfig{
 		VectorStore: qdrant,
 		Embedder:    queryEmbedder,
-	})
+	}
+
+	// Phase 3: BM25, graph, semantic cache, Mem0. Each backend is
+	// optional — when its env var is empty the handler skips it and
+	// falls back to the Phase 1 single-stream behaviour.
+	if dir := os.Getenv("CONTEXT_ENGINE_BM25_DIR"); dir != "" {
+		bm, err := storage.NewTantivyClient(storage.TantivyConfig{RootDir: dir})
+		if err != nil {
+			return fmt.Errorf("tantivy: %w", err)
+		}
+		handlerCfg.BM25 = &retrieval.TantivyAdapter{Client: bm}
+	}
+	if redisURL := os.Getenv("CONTEXT_ENGINE_REDIS_URL"); redisURL != "" {
+		opts, perr := redis.ParseURL(redisURL)
+		if perr != nil {
+			return fmt.Errorf("redis url: %w", perr)
+		}
+		rc := redis.NewClient(opts)
+		handlerCfg.Cache, err = storage.NewSemanticCache(storage.SemanticCacheConfig{
+			Client:    rc,
+			KeyPrefix: "hf:",
+		})
+		if err != nil {
+			return fmt.Errorf("semantic cache: %w", err)
+		}
+		if os.Getenv("CONTEXT_ENGINE_FALKOR_ENABLED") == "1" {
+			falkor, ferr := storage.NewFalkorDBClient(storage.FalkorDBConfig{
+				Client: storage.FalkorDBFromRedis(rc),
+			})
+			if ferr != nil {
+				return fmt.Errorf("falkordb: %w", ferr)
+			}
+			handlerCfg.Graph = &retrieval.FalkorAdapter{Client: falkor}
+		}
+	}
+	if memTarget := os.Getenv("CONTEXT_ENGINE_MEMORY_TARGET"); memTarget != "" {
+		memConn, merr := grpc.NewClient(memTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if merr != nil {
+			return fmt.Errorf("dial memory: %w", merr)
+		}
+		defer func() { _ = memConn.Close() }()
+		handlerCfg.Memory = &memoryAdapter{c: memoryv1.NewMemoryServiceClient(memConn)}
+	}
+
+	retrievalHandler, err := retrieval.NewHandler(handlerCfg)
 	if err != nil {
 		return fmt.Errorf("retrieval handler: %w", err)
 	}
@@ -163,6 +218,41 @@ func (a *queryEmbedAdapter) EmbedQuery(ctx context.Context, tenantID, query stri
 	}
 
 	return out[0], nil
+}
+
+// memoryAdapter wraps the Mem0 gRPC client into the
+// retrieval.MemoryBackend interface, projecting SearchMemoryResult
+// records into retrieval.Match.
+type memoryAdapter struct {
+	c memoryv1.MemoryServiceClient
+}
+
+func (m *memoryAdapter) Search(ctx context.Context, tenantID, query string, k int) ([]*retrieval.Match, error) {
+	resp, err := m.c.SearchMemory(ctx, &memoryv1.SearchMemoryRequest{
+		TenantId: tenantID,
+		Query:    query,
+		TopK:     int32(k), //nolint:gosec // k is bounded by handler MaxTopK
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*retrieval.Match, 0, len(resp.GetResults()))
+	for i, r := range resp.GetResults() {
+		rec := r.GetRecord()
+		if rec == nil {
+			continue
+		}
+		out = append(out, &retrieval.Match{
+			ID:       rec.GetId(),
+			Source:   retrieval.SourceMemory,
+			Score:    r.GetScore(),
+			Rank:     i + 1,
+			TenantID: rec.GetTenantId(),
+			Text:     rec.GetContent(),
+		})
+	}
+
+	return out, nil
 }
 
 func envOr(key, def string) string {

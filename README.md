@@ -1,12 +1,18 @@
 # hunting-fishball
 
-> **Status.** Phase 0 scaffolding and Phase 1 are both in `main`
-> (🟡 partial — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live
-> checklist). Phase 1 brings the Google Drive + Slack connectors, the
-> Go Kafka consumer, the 4-stage pipeline (fetch / parse / embed /
-> store), the `POST /v1/retrieve` API, and a docker-compose CI smoke
-> test. The product thesis lives in [`docs/PROPOSAL.md`](docs/PROPOSAL.md)
-> and the target system design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> **Status.** Phases 0, 1, and 3 are in `main` (all 🟡 partial — see
+> [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live checklist).
+> Phase 1 brings the Google Drive + Slack connectors, the Go Kafka
+> consumer, the 4-stage pipeline (fetch / parse / embed / store), the
+> `POST /v1/retrieve` API, and a docker-compose CI smoke test.
+> Phase 3 brings the four-backend retrieval fan-out (vector + BM25 +
+> graph + memory), the RRF merger and lightweight reranker, the
+> Redis semantic cache, the three Python ML microservices (Docling,
+> embedding, Mem0), Go ↔ Python integration tests, throughput /
+> latency benchmarks, and the
+> [cutover plan](docs/CUTOVER.md). The product thesis lives in
+> [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target system design
+> in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 `hunting-fishball` is a privacy-preserving **knowledge & context platform** that
 unifies an organization's documents, chat history, files, and SaaS records into
@@ -189,26 +195,58 @@ make test           # = go test -race -cover ./...
 # 5. Run the end-to-end smoke test against the docker-compose stack
 make test-e2e       # = E2E_ENABLED=1 go test -tags=e2e ./tests/e2e/...
 
-# 6. Generate proto stubs (only needed when proto files change)
+# 6. (Phase 3) Run the Go ↔ Python integration tests against the ML services
+make test-integration
+
+# 7. (Phase 3) Run the throughput / latency benchmarks
+make bench
+
+# 8. Generate proto stubs (only needed when proto files change)
 make proto-gen
 
-# 7. Build the binaries
+# 9. Build the binaries
 make build          # produces ./bin/context-engine-ingest and ./bin/context-engine-api
 ```
 
 Other targets:
 
-| Target           | What it does                                  |
-|------------------|-----------------------------------------------|
-| `make test-e2e` | Bring up docker compose, run e2e smoke test  |
-| `make build`    | Build both binaries into `./bin/`             |
-| `make test`     | `go test -race -cover ./...`                  |
-| `make vet`      | `go vet ./...`                                |
-| `make fmt`      | `gofmt -s -w` over hand-written sources       |
-| `make lint`     | `golangci-lint run` (skipped if not installed)|
-| `make proto-gen`| Regenerate `*.pb.go` from `proto/**/*.proto`  |
-| `make proto-check` | Verify generated proto files are up to date|
-| `make clean`    | Remove `./bin/` and coverage artefacts        |
+| Target                  | What it does                                                |
+|-------------------------|-------------------------------------------------------------|
+| `make test`             | `go test -race -cover ./...`                                |
+| `make test-e2e`         | Bring up docker compose, run e2e smoke test                 |
+| `make test-integration` | Bring up Phase 3 ML services, run integration tests         |
+| `make services-test`    | Run Python unit tests for `services/{docling,embedding,memory}` |
+| `make services-protos`  | Regenerate Python gRPC stubs into `services/_proto/`        |
+| `make bench`            | Run pipeline + retrieval benchmarks in `tests/benchmark/`   |
+| `make build`            | Build both binaries into `./bin/`                           |
+| `make vet`              | `go vet ./...`                                              |
+| `make fmt`              | `gofmt -s -w` over hand-written sources                     |
+| `make lint`             | `golangci-lint run` (skipped if not installed)              |
+| `make proto-gen`        | Regenerate `*.pb.go` from `proto/**/*.proto`                |
+| `make proto-check`      | Verify generated proto files are up to date                 |
+| `make clean`            | Remove `./bin/` and coverage artefacts                      |
+
+### Python ML microservices (Phase 3)
+
+Three thin gRPC servers wrap the heavy Python ML libraries:
+
+```bash
+# Build & run all three behind their docker-compose service names.
+docker compose up -d docling embedding memory
+```
+
+| Service     | Port  | Wraps                                                            |
+| ----------- | ----- | ---------------------------------------------------------------- |
+| `docling`   | 50051 | [Docling](https://github.com/DS4SD/docling) document parser      |
+| `embedding` | 50052 | [sentence-transformers](https://www.sbert.net) embedding model    |
+| `memory`    | 50053 | [Mem0](https://github.com/mem0ai/mem0) persistent memory          |
+
+The Go retrieval handler picks each backend up via environment
+variables (`CONTEXT_ENGINE_BM25_DIR`, `CONTEXT_ENGINE_REDIS_URL`,
+`CONTEXT_ENGINE_FALKOR_ENABLED`, `CONTEXT_ENGINE_MEMORY_TARGET`).
+With every flag unset it gracefully degrades to the Phase 1
+vector-only behaviour. See [`docs/CUTOVER.md`](docs/CUTOVER.md) for
+the staged rollout plan.
 
 ## Project structure
 
@@ -228,19 +266,33 @@ hunting-fishball/
 │   ├── pipeline/              # 4-stage pipeline (Phase 1):
 │   │                          # consumer / coordinator / fetch / parse
 │   │                          # / embed / store
-│   ├── retrieval/             # POST /v1/retrieve handler (Phase 1)
-│   └── storage/               # Qdrant + Postgres clients (Phase 1)
+│   ├── retrieval/             # /v1/retrieve handler + parallel fan-out
+│   │                          # merger / reranker / policy filter (Phase 3)
+│   └── storage/               # Qdrant + Postgres + BM25 (bleve) +
+│                              # FalkorDB + Redis semantic cache
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
 │   └── memory/v1/             # Mem0 persistent memory service
+├── services/                  # Python ML microservices (Phase 3)
+│   ├── _proto/                # generated Python gRPC stubs
+│   ├── docling/               # Docling gRPC server + Dockerfile
+│   ├── embedding/             # sentence-transformers gRPC server
+│   ├── memory/                # Mem0 gRPC server + Dockerfile
+│   └── gen_protos.sh          # regenerates _proto/ from proto/
 ├── migrations/                # SQL migrations (audit_logs, ...)
 ├── tests/
-│   └── e2e/                   # docker-compose smoke test (//go:build e2e)
+│   ├── e2e/                   # docker-compose smoke test (//go:build e2e)
+│   ├── integration/           # Go ↔ Python gRPC tests (//go:build integration)
+│   └── benchmark/             # pipeline + retrieval benchmarks
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
-├── docker-compose.yml         # local Postgres / Redis / Kafka / Qdrant
-├── Makefile                   # build / test / lint / proto-gen / test-e2e
-└── .github/workflows/ci.yml   # CI: vet / test / lint / proto-check / e2e
+│                              # / CUTOVER
+├── docker-compose.yml         # Postgres / Redis / Kafka / Qdrant /
+│                              # FalkorDB / Docling / embedding / memory
+├── Makefile                   # build / test / lint / proto-gen /
+│                              # test-e2e / test-integration / bench
+└── .github/workflows/ci.yml   # CI: vet / test / lint / proto-check /
+                               # e2e / services-unit / integration
 ```
 
 The full target architecture (including phases that have not yet

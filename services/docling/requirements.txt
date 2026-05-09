@@ -1,0 +1,5 @@
+# Phase 3 Docling gRPC microservice runtime deps.
+grpcio==1.80.0
+grpcio-tools==1.80.0
+protobuf>=6.0.0,<8.0.0
+docling>=2.13.0,<3

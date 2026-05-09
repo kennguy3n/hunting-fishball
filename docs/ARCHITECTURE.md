@@ -470,22 +470,43 @@ hunting-fishball/
 │   │                          # consumer / coordinator / fetch / parse
 │   │                          # / embed / store
 │   ├── retrieval/             # POST /v1/retrieve handler (Phase 1)
+│   │                          # + parallel fan-out merger / reranker
+│   │                          # / policy filter (Phase 3:
+│   │                          # merger.go, reranker.go,
+│   │                          # storage_adapter.go)
 │   └── storage/               # Qdrant + Postgres storage clients
-│                              # (Phase 1)
+│                              # (Phase 1) + BM25 (tantivy.go),
+│                              # FalkorDB (falkordb.go), Redis
+│                              # semantic cache (redis_cache.go)
+│                              # (Phase 3)
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
 │   └── memory/v1/             # Mem0 persistent memory service
+├── services/                  # Python ML microservices (Phase 3)
+│   ├── _proto/                # generated Python gRPC stubs
+│   ├── docling/               # Docling gRPC server + Dockerfile
+│   ├── embedding/             # sentence-transformers gRPC server
+│   ├── memory/                # Mem0 gRPC server + Dockerfile
+│   └── gen_protos.sh          # regenerates _proto/ from proto/
 ├── pkg/                       # public shared types (reserved)
 ├── migrations/
 │   └── 001_audit_log.sql      # audit_logs table + indexes
 ├── tests/
-│   └── e2e/                   # docker-compose smoke test
-│                              # (build tag: //go:build e2e)
-├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
-├── docker-compose.yml         # local dev: Postgres / Redis / Kafka / Qdrant
-├── Makefile                   # build / test / vet / lint / proto-gen / test-e2e
-├── .github/workflows/ci.yml   # CI: vet / test / lint / proto-gen / e2e
+│   ├── e2e/                   # docker-compose smoke test
+│   │                          # (build tag: //go:build e2e)
+│   ├── integration/           # Go ↔ Python gRPC integration tests
+│   │                          # (build tag: //go:build integration)
+│   └── benchmark/             # pipeline + retrieval benchmarks
+├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES /
+│                              # PROGRESS / CUTOVER
+├── docker-compose.yml         # local dev: Postgres / Redis / Kafka /
+│                              # Qdrant / FalkorDB / Docling /
+│                              # embedding / memory
+├── Makefile                   # build / test / vet / lint / proto-gen /
+│                              # test-e2e / test-integration / bench
+├── .github/workflows/ci.yml   # CI: vet / test / lint / proto-gen /
+│                              # e2e / services-unit / integration
 ├── go.mod
 └── go.sum
 ```
@@ -520,3 +541,26 @@ hunting-fishball/
   `insecure.NewCredentials()` for in-cluster traffic; the pipeline
   embedder also exposes a `RemoteEmbedder` interface so external
   embedding APIs can plug in behind per-tenant policy.
+
+### Tech choices added in Phase 3
+
+- **BM25 search:** `github.com/blevesearch/bleve/v2` — pure-Go full
+  text index. We chose `bleve` over `tantivy-go` because the latter
+  requires a Rust toolchain at build time, which violates the "Go
+  binary, no native deps" invariant. The BM25 client is wrapped
+  behind a small interface so the backend can swap to `tantivy-go`
+  later without changing the retrieval handler.
+- **Graph traversal:** `github.com/FalkorDB/falkordb-go` (FalkorDB is
+  a Redis module that speaks GRAPH.* commands). One graph per
+  tenant, named after the tenant id.
+- **Redis client / semantic cache:** `github.com/redis/go-redis/v9`.
+  Cache key is a SHA-256 over `(tenant_id, channel_id,
+  query_embedding, scope_hash)` with a per-tenant key prefix; tests
+  use `github.com/alicebob/miniredis/v2` for an in-process Redis.
+- **Errgroup fan-out:** `golang.org/x/sync/errgroup` with a per-call
+  context derived from a per-backend deadline; backend errors are
+  logged and surfaced as `policy.degraded`, never as a 5xx.
+- **Python ML services:** `grpcio` + `grpcio-tools` for the gRPC
+  server, `docling` for parsing, `sentence-transformers` for
+  embeddings, and `mem0ai` for memory. Each service is a thin gRPC
+  shim over the upstream library.

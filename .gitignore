@@ -39,3 +39,13 @@ coverage.html
 
 # Local docker-compose volumes
 /.data/
+
+# Python ML microservices
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Generated Python gRPC stubs
+/services/_proto/
