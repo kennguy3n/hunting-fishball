@@ -46,6 +46,14 @@ type ConsumerConfig struct {
 	// CommitTimeout caps the time the consumer waits for a Stage 4
 	// completion signal before continuing. Defaults to 30s.
 	CommitTimeout time.Duration
+
+	// OnLegacyKey, when non-nil, is invoked once per consumed message
+	// whose Kafka partition key used the deprecated single-`|`
+	// separator. Production wires this to a metric counter so the
+	// legacy fallback in ParsePartitionKey can be removed once the
+	// topic drains. The hook fires after decode succeeds; misrouted
+	// or malformed legacy keys still go to the DLQ.
+	OnLegacyKey func(ctx context.Context, evt IngestEvent)
 }
 
 // DLQProducer is the narrow contract the consumer needs for DLQ
@@ -204,7 +212,7 @@ func (c *Consumer) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.C
 			if !ok {
 				return nil
 			}
-			evt, err := decodeEvent(msg)
+			evt, legacyKey, err := decodeEvent(msg)
 			if err != nil {
 				// Malformed envelope → straight to DLQ; commit the
 				// offset so we don't re-loop on the poison message.
@@ -212,6 +220,9 @@ func (c *Consumer) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.C
 				sess.MarkMessage(msg, "")
 
 				continue
+			}
+			if legacyKey && c.cfg.OnLegacyKey != nil {
+				c.cfg.OnLegacyKey(sess.Context(), evt)
 			}
 			doneCh := state.register(evt)
 			if err := c.cfg.Coordinator.Submit(sess.Context(), evt); err != nil {
@@ -236,12 +247,13 @@ func (c *Consumer) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.C
 // markDone signals the pending entry for the (topic, partition) of evt.
 // The lookup key MUST match the key partitionState.register uses; both
 // include SourceID because the Kafka partition key is
-// `tenant_id|source_id` and two different sources under the same tenant
-// can land on different partitions while still sharing a DocumentID
-// (e.g. both have a file named `readme.md`). Without SourceID in the
-// key, completing one event would falsely signal the other partition's
-// pending entry and ConsumeClaim would commit before Stage 4 actually
-// finished — leading to message loss on consumer restart.
+// `tenant_id||source_id` (see PartitionKey) and two different sources
+// under the same tenant can land on different partitions while still
+// sharing a DocumentID (e.g. both have a file named `readme.md`).
+// Without SourceID in the key, completing one event would falsely
+// signal the other partition's pending entry and ConsumeClaim would
+// commit before Stage 4 actually finished — leading to message loss
+// on consumer restart.
 func (c *Consumer) markDone(_ context.Context, evt IngestEvent, _ error) {
 	key := pendingKey(evt)
 	c.pending.Range(func(_, v any) bool {
@@ -282,7 +294,7 @@ func (c *Consumer) publishDLQ(evt IngestEvent, err error) {
 
 	msg := &sarama.ProducerMessage{
 		Topic: c.cfg.DLQTopic,
-		Key:   sarama.StringEncoder(strings.TrimSpace(evt.TenantID + "|" + evt.SourceID)),
+		Key:   sarama.StringEncoder(strings.TrimSpace(PartitionKey(evt.TenantID, evt.SourceID))),
 		Value: sarama.ByteEncoder(body),
 	}
 	_, _, _ = c.cfg.DLQProducer.SendMessage(msg)
@@ -337,24 +349,108 @@ func (c *Consumer) partitionState(topic string, partition int32) *partitionState
 }
 
 // decodeEvent parses a Kafka message body into an IngestEvent. The
-// wire format is JSON; the Key is parsed as `tenant_id|source_id` per
-// ARCHITECTURE.md §3.2 to derive the partition.
-func decodeEvent(msg *sarama.ConsumerMessage) (IngestEvent, error) {
+// wire format is JSON; the Key is parsed as `tenant_id||source_id`
+// (see PartitionKey) per ARCHITECTURE.md §3.2 to derive the partition.
+//
+// The body's tenant_id/source_id MUST match the key — a mismatch is
+// treated as a poison message so a misrouted producer can't smuggle
+// an event onto another tenant's partition. When the body is missing
+// tenant_id / source_id but the key is present, the key acts as a
+// fallback.
+//
+// The second return value is true when the key used the deprecated
+// single-`|` separator (see ParsePartitionKey). Callers surface this
+// to ConsumerConfig.OnLegacyKey for metric counting; the value is
+// never an error condition on its own.
+func decodeEvent(msg *sarama.ConsumerMessage) (IngestEvent, bool, error) {
 	var evt IngestEvent
 	if err := json.Unmarshal(msg.Value, &evt); err != nil {
-		return IngestEvent{}, fmt.Errorf("unmarshal event: %w", err)
-	}
-	if evt.TenantID == "" || evt.DocumentID == "" {
-		return evt, fmt.Errorf("missing tenant_id or document_id")
+		return IngestEvent{}, false, fmt.Errorf("unmarshal event: %w", err)
 	}
 
-	return evt, nil
+	var legacyKey bool
+	if len(msg.Key) > 0 {
+		keyTenant, keySource, legacy, ok := ParsePartitionKeyDetailed(string(msg.Key))
+		if !ok {
+			return evt, false, fmt.Errorf("malformed partition key: %q", msg.Key)
+		}
+		legacyKey = legacy
+		if evt.TenantID == "" {
+			evt.TenantID = keyTenant
+		} else if evt.TenantID != keyTenant {
+			return evt, false, fmt.Errorf("tenant_id mismatch: key=%q body=%q", keyTenant, evt.TenantID)
+		}
+		if evt.SourceID == "" {
+			evt.SourceID = keySource
+		} else if evt.SourceID != keySource {
+			return evt, false, fmt.Errorf("source_id mismatch: key=%q body=%q", keySource, evt.SourceID)
+		}
+	}
+
+	if evt.TenantID == "" || evt.DocumentID == "" {
+		return evt, legacyKey, fmt.Errorf("missing tenant_id or document_id")
+	}
+
+	return evt, legacyKey, nil
 }
+
+// PartitionKeySeparator is the on-wire separator between tenant and
+// source IDs in Kafka partition keys. The doubled `||` form is the
+// product spec; producers MUST emit it. The single-`|` form is a
+// one-release migration aid (see ParsePartitionKey) so in-flight
+// messages produced by the prior shape don't go to DLQ during a
+// rolling deploy.
+const PartitionKeySeparator = "||"
+
+// legacyPartitionKeySeparator is the deprecated single-pipe form
+// accepted by ParsePartitionKey on the consume path only. New
+// producers always use PartitionKeySeparator.
+const legacyPartitionKeySeparator = "|"
 
 // PartitionKey returns the Kafka partition key the producer should
 // stamp on each event so the sticky-assignment consumer keeps per-
 // (tenant, source) ordering. Exposed for callers (e.g. connectors)
 // that publish events.
 func PartitionKey(tenantID, sourceID string) string {
-	return tenantID + "|" + sourceID
+	return tenantID + PartitionKeySeparator + sourceID
+}
+
+// ParsePartitionKey is the inverse of PartitionKey. Returns
+// (tenantID, sourceID, true) on a well-formed key, or ("", "", false)
+// otherwise. The doubled `||` separator is preferred; a single `|`
+// is accepted as a deprecated legacy form (see
+// ParsePartitionKeyDetailed for callers that need to distinguish
+// the two). A missing source_id is rejected under both shapes — the
+// admin source-management surface always emits both halves.
+func ParsePartitionKey(key string) (string, string, bool) {
+	t, s, _, ok := ParsePartitionKeyDetailed(key)
+	return t, s, ok
+}
+
+// ParsePartitionKeyDetailed is ParsePartitionKey plus a `legacy`
+// flag set when the key used the deprecated single-`|` separator.
+// Callers (decodeEvent) forward the flag to ConsumerConfig.OnLegacyKey
+// so production can record a counter and decide when to drop the
+// fallback.
+func ParsePartitionKeyDetailed(key string) (string, string, bool, bool) {
+	if i := strings.Index(key, PartitionKeySeparator); i >= 0 {
+		tenant := key[:i]
+		source := key[i+len(PartitionKeySeparator):]
+		if tenant == "" || source == "" {
+			return "", "", false, false
+		}
+		return tenant, source, false, true
+	}
+	// Legacy single-`|` fallback. We never split on `|` if the
+	// preferred `||` separator is present anywhere in the key,
+	// because the strings.Index check above would have hit first.
+	if i := strings.Index(key, legacyPartitionKeySeparator); i >= 0 {
+		tenant := key[:i]
+		source := key[i+len(legacyPartitionKeySeparator):]
+		if tenant == "" || source == "" {
+			return "", "", false, false
+		}
+		return tenant, source, true, true
+	}
+	return "", "", false, false
 }

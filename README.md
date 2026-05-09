@@ -1,18 +1,27 @@
 # hunting-fishball
 
-> **Status.** Phases 0, 1, and 3 are in `main` (all 🟡 partial — see
+> **Status.** Phases 0, 1, 2, 3, and 4 are in `main` (all 🟡 partial — see
 > [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live checklist).
 > Phase 1 brings the Google Drive + Slack connectors, the Go Kafka
 > consumer, the 4-stage pipeline (fetch / parse / embed / store), the
 > `POST /v1/retrieve` API, and a docker-compose CI smoke test.
+> **Phase 2** brings the admin source-management API
+> (`internal/admin/`), per-tenant Kafka partition-key routing, the
+> backfill-vs-steady pipeline (`pipeline.IngestEvent.SyncMode`), the
+> per-source Redis token-bucket rate limiter, source-health tracking,
+> and the forget-on-removal worker.
 > Phase 3 brings the four-backend retrieval fan-out (vector + BM25 +
 > graph + memory), the RRF merger and lightweight reranker, the
 > Redis semantic cache, the three Python ML microservices (Docling,
 > embedding, Mem0), Go ↔ Python integration tests, throughput /
 > latency benchmarks, and the
-> [cutover plan](docs/CUTOVER.md). The product thesis lives in
-> [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target system design
-> in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> [cutover plan](docs/CUTOVER.md). **Phase 4** brings the policy
+> framework (`internal/policy/`): privacy modes
+> (`no-ai`/`local-only`/`local-api`/`hybrid`/`remote`),
+> allow/deny ACL evaluation, and recipient policy — all wired into
+> the retrieval handler via a `PolicyResolver` port. The product
+> thesis lives in [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target
+> system design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 `hunting-fishball` is a privacy-preserving **knowledge & context platform** that
 unifies an organization's documents, chat history, files, and SaaS records into
@@ -263,11 +272,20 @@ hunting-fishball/
 │   ├── credential/            # AES-256-GCM envelope encryption
 │   ├── audit/                 # audit_logs model + repository + Kafka
 │   │                          # outbox + Gin handler
+│   ├── admin/                 # Phase 2: source-management API,
+│   │                          # per-source Redis rate limiter,
+│   │                          # source-health tracker, forget worker
+│   ├── policy/                # Phase 4: privacy modes, allow/deny
+│   │                          # ACL, recipient policy
 │   ├── pipeline/              # 4-stage pipeline (Phase 1):
 │   │                          # consumer / coordinator / fetch / parse
-│   │                          # / embed / store
+│   │                          # / embed / store. Phase 2 adds
+│   │                          # producer.go (partition-key routing) +
+│   │                          # backfill.go (paced initial sync)
 │   ├── retrieval/             # /v1/retrieve handler + parallel fan-out
 │   │                          # merger / reranker / policy filter (Phase 3)
+│   │                          # + Phase 4 PolicyResolver wiring
+│   │                          # (policy_snapshot.go)
 │   └── storage/               # Qdrant + Postgres + BM25 (bleve) +
 │                              # FalkorDB + Redis semantic cache
 ├── proto/

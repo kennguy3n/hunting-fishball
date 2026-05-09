@@ -194,7 +194,30 @@ type IngestEvent struct {
 	// HTTP fetch entirely. Useful for Slack messages and other
 	// already-in-memory payloads.
 	InlineContent []byte `json:"inline_content,omitempty"`
+
+	// SyncMode marks the event as a backfill or steady-state ingest.
+	// The coordinator paces backfill events so they don't starve the
+	// steady-state stream. Empty defaults to steady.
+	SyncMode SyncMode `json:"sync_mode,omitempty"`
 }
+
+// SyncMode classifies an IngestEvent as backfill (initial seed of a
+// newly-connected source) or steady-state (live updates from
+// Subscribe webhooks). The coordinator paces backfill events through
+// a separate token bucket so they don't starve the steady-state
+// stream — see internal/pipeline/coordinator.go and
+// internal/pipeline/backfill.go.
+type SyncMode string
+
+const (
+	// SyncModeSteady is the default. Steady-state events are
+	// scheduled at the connector's natural rate.
+	SyncModeSteady SyncMode = "steady"
+	// SyncModeBackfill marks events emitted by the backfill
+	// orchestrator. The coordinator throttles them to a configurable
+	// docs/sec budget.
+	SyncModeBackfill SyncMode = "backfill"
+)
 
 // IdempotencyKey returns the (tenant_id, document_id, content_hash)
 // triple the coordinator and the storage worker key idempotency on.

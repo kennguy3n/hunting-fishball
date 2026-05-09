@@ -41,15 +41,25 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 2 — B2B Admin Source Management
 
-**Status.** ⏳ planned
+**Status.** 🟡 partial | ~100%
 
-- [ ] Admin portal flows for connect / pause / re-scope / remove
-- [ ] Per-tenant Kafka topic routing keyed on `tenant_id || source_id`
-- [ ] Org-wide sync pipeline runs through the Go context engine
-- [ ] Per-source quota + rate-limit enforcement at the platform backend
-- [ ] Sync health (last-success, lag, error counts) surfaced in admin UI
-- [ ] Forget-on-removal worker — fenced lease prevents re-add races
-- [ ] Connector lifecycle events emitted to audit log
+- [x] Admin portal flows for connect / pause / re-scope / remove
+      (`internal/admin/source_handler.go`)
+- [x] Per-tenant Kafka topic routing keyed on `tenant_id || source_id`
+      (`internal/pipeline/producer.go`,
+      `internal/pipeline/consumer.go::ParsePartitionKey`)
+- [x] Org-wide sync pipeline runs through the Go context engine
+      (`internal/pipeline/backfill.go` distinguishes `backfill`
+      vs `steady` via `IngestEvent.SyncMode`)
+- [x] Per-source quota + rate-limit enforcement at the platform
+      backend (`internal/admin/ratelimit.go`, Redis token bucket)
+- [x] Sync health (last-success, lag, error counts) surfaced in
+      admin UI (`internal/admin/health.go`,
+      `migrations/003_source_health.sql`)
+- [x] Forget-on-removal worker — fenced lease prevents re-add races
+      (`internal/admin/forget_worker.go`)
+- [x] Connector lifecycle events emitted to audit log
+      (`internal/audit/model.go::Action*`)
 
 ## Phase 3 — Retrieval fan-out
 
@@ -73,16 +83,22 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 4 — Policy framework + simulator + privacy strip
 
-**Status.** ⏳ planned
+**Status.** 🟡 partial | ~30%
 
-- [ ] Tenant- and channel-scoped privacy mode
-- [ ] Allow / deny lists (source / namespace / path glob)
-- [ ] Recipient policy (channel / skill)
+- [x] Tenant- and channel-scoped privacy mode
+      (`internal/policy/privacy_mode.go`,
+      `internal/policy/EffectiveMode` returns the stricter of the two)
+- [x] Allow / deny lists (source / namespace / path glob)
+      (`internal/policy/acl.go`,
+      `internal/retrieval/policy_snapshot.go::applyPolicySnapshot`)
+- [x] Recipient policy (channel / skill)
+      (`internal/policy/recipient.go`, gated in
+      `internal/retrieval/handler.go` after merge + rerank)
 - [ ] What-if simulator
 - [ ] Data-flow diff in simulator
 - [ ] Conflict detection in simulator
 - [ ] Drafts isolated; explicit promotion audited
-- [ ] `privacy_label` returned on every retrieval row
+- [x] `privacy_label` returned on every retrieval row
 - [ ] Privacy strip in admin portal, desktop, and mobile
 
 ## Phase 5 — On-device knowledge core integration
@@ -201,12 +217,30 @@ ships, the matrix is empty. Each row records:
 
 | Connector | Identity | Documents | Webhooks | Delta | Provisioning | Status |
 |---|---|---|---|---|---|---|
-| _(empty until Phase 1)_ | | | | | | |
+| Google Drive | ❌ | ✅ | ❌ (poll) | ✅ (`changes.list` cursor) | ❌ | 🟡 Phase 1 |
+| Slack        | ✅ (workspace users) | ✅ (channels + threads) | ✅ (Events API) | ✅ (`oldest`/`latest` cursor) | ❌ | 🟡 Phase 1 |
 
 ---
 
 ## Changelog
 
+- 2026-05-09: Phase 2 partial (~100%) + Phase 4 partial (~30%):
+  admin source-management API surface (`internal/admin/`,
+  `migrations/002_sources.sql`, `migrations/003_source_health.sql`),
+  per-tenant Kafka producer with partition-key routing
+  (`internal/pipeline/producer.go`,
+  `internal/pipeline/consumer.go::ParsePartitionKey`), backfill
+  vs steady-state pipeline orchestrator with paced rate control
+  (`internal/pipeline/backfill.go`, `IngestEvent.SyncMode`), per-source
+  Redis token-bucket rate limiter (`internal/admin/ratelimit.go`),
+  source-health tracking (`internal/admin/health.go`,
+  `migrations/003_source_health.sql`), forget-on-removal worker with
+  fenced lease (`internal/admin/forget_worker.go`), connector
+  lifecycle audit actions (`internal/audit/model.go`), policy
+  framework (`internal/policy/privacy_mode.go`,
+  `internal/policy/acl.go`, `internal/policy/recipient.go`,
+  `migrations/004_policy.sql`) wired into the retrieval handler via
+  `internal/retrieval/policy_snapshot.go`.
 - 2026-05-09: Phase 3 partial — Go retrieval API completion (BM25 via
   bleve, FalkorDB graph traversal, Redis semantic cache,
   RRF merger + lightweight reranker, parallel fan-out with per-backend

@@ -42,6 +42,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
 	"github.com/kennguy3n/hunting-fishball/internal/retrieval"
@@ -159,6 +160,22 @@ func run() error {
 	api := r.Group("/", authPlaceholder)
 	audit.NewHandler(auditRepo).Register(api)
 	retrievalHandler.Register(api)
+
+	// Admin source-management surface (Phase 2). The handler mounts
+	// POST/GET/PATCH/DELETE under /v1/admin/sources and tolerates a
+	// nil PolicyResolver / EventEmitter for the bare-bones config —
+	// production wiring fills those in.
+	sourceRepo := admin.NewSourceRepository(db)
+	healthRepo := admin.NewHealthRepository(db, admin.DefaultThresholds)
+	adminHandler, err := admin.NewHandler(admin.HandlerConfig{
+		Repo:   sourceRepo,
+		Audit:  auditRepo,
+		Health: healthRepo,
+	})
+	if err != nil {
+		return fmt.Errorf("admin handler: %w", err)
+	}
+	adminHandler.Register(api)
 
 	srv := &http.Server{Addr: listenAddr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)

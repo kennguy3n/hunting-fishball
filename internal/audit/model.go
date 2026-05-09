@@ -27,6 +27,12 @@ type Action string
 const (
 	ActionConnectorRegistered Action = "connector.registered"
 	ActionConnectorConnected  Action = "connector.connected"
+	ActionSourceConnected     Action = "source.connected"
+	ActionSourcePaused        Action = "source.paused"
+	ActionSourceResumed       Action = "source.resumed"
+	ActionSourceReScoped      Action = "source.re_scoped"
+	ActionSourceSyncStarted   Action = "source.sync_started"
+	ActionChunkIndexed        Action = "chunk.indexed"
 	ActionSourceSynced        Action = "source.synced"
 	ActionSourcePurged        Action = "source.purged"
 	ActionRetrievalQueried    Action = "retrieval.queried"

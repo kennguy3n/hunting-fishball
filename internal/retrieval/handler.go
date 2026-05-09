@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
+	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
 
@@ -105,6 +106,11 @@ type HandlerConfig struct {
 	// DefaultPrivacyMode is the channel privacy mode used when the
 	// request doesn't supply one. Defaults to "internal".
 	DefaultPrivacyMode string
+
+	// PolicyResolver loads the (tenant, channel) policy snapshot
+	// before fan-out. nil → permissive default (Phase 1/3
+	// privacy-label filter only).
+	PolicyResolver PolicyResolver
 }
 
 // Handler serves the retrieval HTTP API.
@@ -144,6 +150,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if cfg.PolicyFilter == nil {
 		cfg.PolicyFilter = NewPolicyFilter(PolicyConfig{})
 	}
+	if cfg.PolicyResolver == nil {
+		cfg.PolicyResolver = noopPolicyResolver{}
+	}
 
 	return &Handler{cfg: cfg}, nil
 }
@@ -167,6 +176,12 @@ type RetrieveRequest struct {
 	// filter drops chunks whose privacy_label exceeds this. Defaults
 	// to HandlerConfig.DefaultPrivacyMode when empty.
 	PrivacyMode string `json:"privacy_mode,omitempty"`
+
+	// SkillID is the calling skill ("summarizer", "qa-bot", ...).
+	// Used by the recipient policy to gate which downstream
+	// consumers may receive the result. Empty disables the
+	// recipient gate (legacy callers).
+	SkillID string `json:"skill_id,omitempty"`
 }
 
 // RetrieveHit is one entry in the response.
@@ -247,6 +262,31 @@ func (h *Handler) retrieve(c *gin.Context) {
 		privacyMode = h.cfg.DefaultPrivacyMode
 	}
 
+	channelIDForPolicy := firstNonEmpty(req.Channels)
+	snapshot, perr := h.cfg.PolicyResolver.Resolve(c.Request.Context(), tenantID, channelIDForPolicy)
+	if perr != nil {
+		// Fail closed: a resolver failure must not silently widen
+		// the policy. Return zero hits with the safest privacy mode.
+		c.JSON(http.StatusServiceUnavailable, RetrieveResponse{
+			Hits: []RetrieveHit{},
+			Policy: RetrievePolicy{
+				PrivacyMode:  string(policy.PrivacyModeNoAI),
+				BlockedCount: 0,
+			},
+		})
+		return
+	}
+	// Privacy mode is admin-controlled. When the resolver populated
+	// EffectiveMode it is the source of truth — even when the
+	// effective mode is more permissive than the caller's request.
+	// The request-supplied PrivacyMode (or HandlerConfig
+	// .DefaultPrivacyMode) is only a fallback for environments
+	// without a resolver wired in (the noop resolver leaves
+	// EffectiveMode empty).
+	if snapshot.EffectiveMode != "" {
+		privacyMode = string(snapshot.EffectiveMode)
+	}
+
 	vec, err := h.cfg.Embedder.EmbedQuery(c.Request.Context(), tenantID, req.Query)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "embed failed"})
@@ -255,16 +295,30 @@ func (h *Handler) retrieve(c *gin.Context) {
 	}
 
 	channelID := firstNonEmpty(req.Channels)
-	scopeHash := scopeHashFor(req, topK)
+	scopeHash := scopeHashFor(req, topK, privacyMode)
 
 	// Cache short-circuit. A cache hit serves the response without
 	// any fan-out (ARCHITECTURE.md §4.4). On error the handler
 	// degrades to a fan-out — a stale cache should never take
 	// retrieval offline.
+	//
+	// The Phase 4 privacy-label PolicyFilter, ACL, and recipient
+	// gates are re-evaluated on the cache-hit path because the
+	// cache TTL is minutes-long: a policy change between write and
+	// read must NOT serve content the new policy denies. Note that
+	// scopeHashFor already keys on the resolved privacyMode, so a
+	// post-resolver mode change writes to a fresh slot — but until
+	// that slot is populated, the prior slot can still hand out
+	// matches from the more permissive mode. Re-running the gates
+	// here closes that window without having to invalidate.
 	if h.cfg.Cache != nil {
 		cached, cerr := h.cfg.Cache.Get(c.Request.Context(), tenantID, channelID, vec, scopeHash)
 		if cerr == nil && cached != nil {
-			c.JSON(http.StatusOK, responseFromCache(cached, privacyMode, topK))
+			filtered, blockedByPrivacy := filterCachedByPrivacyMode(cached, h.cfg.PolicyFilter, privacyMode)
+			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
+			resp := responseFromCache(filtered, privacyMode, topK)
+			resp.Policy.BlockedCount = blockedByPrivacy + blockedByACL + blockedByRecipient
+			c.JSON(http.StatusOK, resp)
 
 			return
 		}
@@ -281,6 +335,12 @@ func (h *Handler) retrieve(c *gin.Context) {
 	}
 
 	pres := h.cfg.PolicyFilter.Apply(reranked, privacyMode)
+	// Phase 4: ACL + recipient gate. The snapshot's ACL drops chunks
+	// the tenant has explicitly excluded; the recipient policy gates
+	// the calling skill.
+	postPolicy, blockedByACL, blockedByRecipient := applyPolicySnapshot(pres.Allowed, snapshot, req.SkillID)
+	pres.Allowed = postPolicy
+	pres.BlockedCount += blockedByACL + blockedByRecipient
 	if len(pres.Allowed) > topK {
 		pres.Allowed = pres.Allowed[:topK]
 	}
@@ -593,9 +653,25 @@ func appliedSources(streams [][]*Match) []string {
 // topK is part of the scope: a topK=5 request must NOT serve from a
 // topK=100 entry (would return more rows than asked) and a topK=100
 // request must NOT serve from a topK=5 entry (would return fewer
-// rows than asked). Bump this hash whenever request fields that
-// affect the result set are added.
-func scopeHashFor(req RetrieveRequest, topK int) string {
+// rows than asked).
+//
+// SkillID is part of the scope so a skill denied by recipient policy
+// can never be served a cached response originally produced for an
+// allowed skill — without the SkillID component, two requests with
+// different SkillIDs but identical query/channel/topK would share a
+// cache slot and bypass the recipient gate.
+//
+// privacyMode is the *resolved* effective mode (post-PolicyResolver),
+// NOT req.PrivacyMode. Hashing the raw request field would let two
+// requests with the same req.PrivacyMode but different resolver-
+// determined effective modes (e.g. after an admin tightens the
+// tenant policy from "remote" to "local-only") share a cache slot —
+// stale entries from the more permissive mode would keep serving
+// until the TTL expired. The resolved mode closes that window.
+//
+// Bump this hash whenever request fields that affect the result set
+// are added.
+func scopeHashFor(req RetrieveRequest, topK int, privacyMode string) string {
 	h := sha256.New()
 	for _, v := range req.Sources {
 		_, _ = h.Write([]byte(v))
@@ -612,7 +688,9 @@ func scopeHashFor(req RetrieveRequest, topK int) string {
 		_, _ = h.Write([]byte{0})
 	}
 	_, _ = h.Write([]byte("|privacy|"))
-	_, _ = h.Write([]byte(req.PrivacyMode))
+	_, _ = h.Write([]byte(privacyMode))
+	_, _ = h.Write([]byte("|skill|"))
+	_, _ = h.Write([]byte(req.SkillID))
 	_, _ = h.Write([]byte("|topk|"))
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(topK))

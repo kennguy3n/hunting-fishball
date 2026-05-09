@@ -21,14 +21,22 @@ phase.
 > contracts have all landed. **Phase 1** is **🟡 partial** as of
 > 2026-05-09 — Google Drive + Slack connectors, the Go Kafka consumer,
 > the 4-stage Go pipeline, the retrieval API, and the docker-compose
-> e2e smoke test have all landed. **Phase 3** is **🟡 partial** as of
-> 2026-05-09 — BM25 (bleve), FalkorDB graph, Redis semantic cache,
-> RRF merger + reranker, parallel fan-out, the three Python ML
-> microservices, integration tests, benchmarks, and the cutover
-> plan have all landed; the production P95 < 500 ms acceptance
-> criterion is deferred to Phase 4 load tests. Every other phase below
-> is currently `⏳ planned`. As phases land, flip the marker and move
-> the supporting status row in [`PROGRESS.md`](PROGRESS.md).
+> e2e smoke test have all landed. **Phase 2** is **🟡 partial** as of
+> 2026-05-09 — admin source-management API, per-tenant partition-key
+> routing, backfill-vs-steady pipeline, per-source rate limiting,
+> source-health tracking, forget-on-removal worker, and connector
+> lifecycle audit events have all landed. **Phase 3** is **🟡 partial**
+> as of 2026-05-09 — BM25 (bleve), FalkorDB graph, Redis semantic
+> cache, RRF merger + reranker, parallel fan-out, the three Python ML
+> microservices, integration tests, benchmarks, and the cutover plan
+> have all landed; the production P95 < 500 ms acceptance criterion is
+> deferred to Phase 4 load tests. **Phase 4** is **🟡 partial** as of
+> 2026-05-09 — privacy modes (`no-ai`/`local-only`/`local-api`/
+> `hybrid`/`remote`), allow/deny lists, and recipient policy have
+> landed; the policy simulator and privacy-strip clients are still
+> outstanding. Every other phase below is currently `⏳ planned`. As
+> phases land, flip the marker and move the supporting status row in
+> [`PROGRESS.md`](PROGRESS.md).
 
 ---
 
@@ -83,7 +91,7 @@ service-account is in).
 
 ---
 
-## Phase 2 — B2B Admin Source Management  ⏳
+## Phase 2 — B2B Admin Source Management  🟡
 
 **Scope.** Multi-tenant source management for B2B administrators. Wire the
 **org-wide sync pipeline through the Go context engine (Kafka)** so that
@@ -92,22 +100,27 @@ whole tenant, not just a single user.
 
 **Exit criteria.**
 
-- [ ] Admin portal flows for connecting / pausing / re-scoping / removing
-      a source, all multi-tenant.
-- [ ] Per-tenant Kafka topic routing keyed on `tenant_id || source_id`.
-- [ ] Org-wide sync pipeline runs through the **Go context engine**
+- [x] Admin portal flows for connecting / pausing / re-scoping / removing
+      a source, all multi-tenant (`internal/admin/source_handler.go`).
+- [x] Per-tenant Kafka topic routing keyed on `tenant_id || source_id`
+      (`internal/pipeline/producer.go`,
+      `internal/pipeline/consumer.go::ParsePartitionKey`).
+- [x] Org-wide sync pipeline runs through the **Go context engine**
       (replacing any earlier single-user shortcut). The Go consumer
-      handles backfill paced separately from steady-state.
-- [ ] Per-source quota + rate-limit enforcement at the platform backend
-      *before* the connector contacts the external API.
-- [ ] Sync health surfaced in the admin portal (last-success, lag,
-      error counts) per source per namespace.
-- [ ] Forget-on-removal worker drops all derived chunks / embeddings /
+      handles backfill paced separately from steady-state
+      (`internal/pipeline/backfill.go`, `IngestEvent.SyncMode`).
+- [x] Per-source quota + rate-limit enforcement at the platform backend
+      *before* the connector contacts the external API
+      (`internal/admin/ratelimit.go`, Redis token bucket).
+- [x] Sync health surfaced in the admin portal (last-success, lag,
+      error counts) per source per namespace
+      (`internal/admin/health.go`, `migrations/003_source_health.sql`).
+- [x] Forget-on-removal worker drops all derived chunks / embeddings /
       graph nodes / memory entries, with fenced lease so re-add doesn't
-      race with deletion.
-- [ ] Connector lifecycle events (`source.connected`,
+      race with deletion (`internal/admin/forget_worker.go`).
+- [x] Connector lifecycle events (`source.connected`,
       `source.sync_started`, `chunk.indexed`, `source.purged`) emitted
-      to the audit log.
+      to the audit log (`internal/audit/model.go`).
 
 ---
 
@@ -139,21 +152,27 @@ their results.
 
 ---
 
-## Phase 4 — Policy framework + simulator + privacy strip  ⏳
+## Phase 4 — Policy framework + simulator + privacy strip  🟡
 
 **Scope.** Privacy mode, allow / deny lists, recipient policy, and the
 policy simulator. Privacy strip surfaces in every client.
 
 **Exit criteria.**
 
-- [ ] Tenant- and channel-scoped privacy mode (`local-only`, `local-api`,
-      `hybrid`, `remote`, `no-ai`).
-- [ ] Allow / deny lists by source / namespace / path glob.
-- [ ] Recipient policy by channel / skill.
+- [x] Tenant- and channel-scoped privacy mode (`local-only`, `local-api`,
+      `hybrid`, `remote`, `no-ai`)
+      (`internal/policy/privacy_mode.go`, `EffectiveMode` returns the
+      stricter of (tenantMode, channelMode)).
+- [x] Allow / deny lists by source / namespace / path glob
+      (`internal/policy/acl.go`,
+      `internal/retrieval/policy_snapshot.go::applyPolicySnapshot`).
+- [x] Recipient policy by channel / skill
+      (`internal/policy/recipient.go`, gated in
+      `internal/retrieval/handler.go` after merge + rerank).
 - [ ] Policy simulator: what-if retrieval, data-flow diff, conflict
       detection.
 - [ ] Drafts isolated from live; explicit promotion is an audited event.
-- [ ] `privacy_label` returned on every retrieval row.
+- [x] `privacy_label` returned on every retrieval row.
 - [ ] Privacy strip rendered in admin portal, B2B desktop, and at least
       one mobile platform.
 
