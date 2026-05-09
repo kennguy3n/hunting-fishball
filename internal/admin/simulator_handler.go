@@ -182,7 +182,10 @@ func (h *SimulatorHandler) promoteDraft(c *gin.Context) {
 		return
 	}
 	var req PromoteDraftRequest
-	if c.Request.ContentLength > 0 {
+	// `ContentLength != 0` (rather than `> 0`) so chunked-encoded
+	// bodies — which Go reports as `ContentLength = -1` — are still
+	// parsed instead of silently dropped.
+	if c.Request.ContentLength != 0 {
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 			return
@@ -234,7 +237,11 @@ func (h *SimulatorHandler) rejectDraft(c *gin.Context) {
 		return
 	}
 	var req RejectDraftRequest
-	if c.Request.ContentLength > 0 {
+	// `ContentLength != 0` (rather than `> 0`) so chunked-encoded
+	// bodies — which Go reports as `ContentLength = -1` — are still
+	// parsed instead of silently dropped (which would lose the
+	// human-readable rejection reason from the audit trail).
+	if c.Request.ContentLength != 0 {
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 			return

@@ -10,6 +10,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // DraftStatus is the lifecycle marker on a policy_drafts row. The
@@ -305,8 +306,16 @@ func (r *DraftRepository) transition(ctx context.Context, tx *gorm.DB, tenantID,
 	if tenantID == "" || id == "" {
 		return nil, ErrDraftNotFound
 	}
+	// SELECT … FOR UPDATE inside the caller's transaction
+	// serialises concurrent Promote/Reject calls on the same row.
+	// Without it two callers could both observe status='draft',
+	// both pass the guard below, and both run apply()+Save —
+	// double-promoting the snapshot and emitting duplicate
+	// audit events. SQLite (used in tests) tolerates the locking
+	// clause as a no-op; Postgres acquires a row lock until commit.
 	var d Draft
 	err := tx.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("tenant_id = ? AND id = ?", tenantID, id).
 		First(&d).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {

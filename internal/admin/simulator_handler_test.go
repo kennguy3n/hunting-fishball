@@ -534,5 +534,80 @@ func TestSimulatorHandler_NewSimulatorHandler_Validation(t *testing.T) {
 	}
 }
 
+// TestSimulatorHandler_RejectDraft_ChunkedBodyParsesReason is the
+// regression test for the second Devin Review finding on PR #6.
+// When a client sends the rejection reason via chunked transfer
+// encoding, Go's http.Request reports ContentLength = -1. The
+// pre-fix gate `ContentLength > 0` therefore skipped JSON binding
+// and the rejection reason silently dropped — leaving the audit
+// trail without the human-readable cause. The fix flips the gate
+// to `ContentLength != 0`, which preserves the empty-body skip
+// path while letting unknown-length bodies through to the JSON
+// decoder.
+func TestSimulatorHandler_RejectDraft_ChunkedBodyParsesReason(t *testing.T) {
+	t.Parallel()
+	store := newFakeDraftStore()
+	prom := &fakePromotion{}
+	r := newSimulatorRouter(t, store, prom, &fakeSimulator{}, &fakeAudit{}, "tenant-a")
+
+	body := admin.RejectDraftRequest{Reason: "out-of-date"}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/policy/drafts/d-1/reject", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	// Simulate chunked transfer encoding: net/http parses an
+	// inbound chunked request into ContentLength=-1, so we
+	// emulate that on the synthetic request directly.
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	if prom.rejectCall != 1 {
+		t.Fatalf("RejectDraft calls: %d", prom.rejectCall)
+	}
+	var got policy.Draft
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.RejectReason != "out-of-date" {
+		t.Fatalf("RejectReason dropped, got %q", got.RejectReason)
+	}
+}
+
+// TestSimulatorHandler_PromoteDraft_ChunkedBodyParsesNote covers the
+// matching gate inside promoteDraft. The promote path doesn't yet
+// surface the optional note in the response, but a corrupt JSON
+// payload should still surface as 400 even on chunked-encoded
+// requests — this asserts that bodies with ContentLength = -1 reach
+// the binder instead of being silently swallowed.
+func TestSimulatorHandler_PromoteDraft_ChunkedBodyParsesNote(t *testing.T) {
+	t.Parallel()
+	store := newFakeDraftStore()
+	prom := &fakePromotion{}
+	r := newSimulatorRouter(t, store, prom, &fakeSimulator{}, &fakeAudit{}, "tenant-a")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/policy/drafts/d-1/promote", bytes.NewReader([]byte("{not json")))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 from chunked malformed body, got %d body=%s", w.Code, w.Body.String())
+	}
+	if prom.promoteCall != 0 {
+		t.Fatalf("PromoteDraft must not be called when bind fails, got %d", prom.promoteCall)
+	}
+}
+
 // silence unused imports in case the test file is shrunk.
 var _ = errors.New

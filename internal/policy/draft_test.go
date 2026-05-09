@@ -3,13 +3,45 @@ package policy_test
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"github.com/kennguy3n/hunting-fishball/internal/policy"
 )
+
+// captureLogger records every SQL statement gorm executes so a test
+// can assert on the on-the-wire query (e.g. that a SELECT carries
+// `FOR UPDATE`). Mirrors the LogMode no-op pattern from gorm's
+// internal logger so it integrates without changing log levels.
+type captureLogger struct {
+	mu      sync.Mutex
+	queries []string
+}
+
+func (c *captureLogger) LogMode(_ logger.LogLevel) logger.Interface { return c }
+func (c *captureLogger) Info(_ context.Context, _ string, _ ...any)  {}
+func (c *captureLogger) Warn(_ context.Context, _ string, _ ...any)  {}
+func (c *captureLogger) Error(_ context.Context, _ string, _ ...any) {}
+func (c *captureLogger) Trace(_ context.Context, _ time.Time, fc func() (string, int64), _ error) {
+	sql, _ := fc()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.queries = append(c.queries, sql)
+}
+
+func (c *captureLogger) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.queries))
+	copy(out, c.queries)
+	return out
+}
 
 // sqliteDraftSchema is a SQLite-compatible mirror of
 // migrations/005_policy_drafts.sql. Production uses Postgres types
@@ -232,5 +264,76 @@ func TestDraftRepository_Create_RejectsInvalid(t *testing.T) {
 	d := &policy.Draft{Status: policy.DraftStatusDraft} // missing ID + tenant
 	if err := repo.Create(ctx, d); err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+// TestDraftRepository_MarkPromoted_UsesSelectForUpdate is the
+// regression test for the TOCTOU race that Devin Review caught on
+// PR #6. The transition() helper reads the row, checks
+// status='draft', then writes the promoted state. Without
+// `SELECT … FOR UPDATE`, two concurrent Postgres transactions at
+// the default READ COMMITTED isolation could both pass the
+// status check, both call apply()+Save(), and both emit a
+// policy.promoted audit row — so the live snapshot would be
+// re-applied a second time and the audit feed would carry a
+// duplicate entry. The fix attaches clause.Locking{Strength:
+// "UPDATE"} to the SELECT so the second transaction blocks until
+// the first commits, then sees status='promoted' and bails with
+// ErrDraftTerminal.
+//
+// We exercise the real MarkPromoted code path against an
+// in-memory SQLite db, but explicitly delete the SQLite dialect's
+// no-op override of the FOR clause builder so gorm renders the
+// default "FOR UPDATE" SQL we asked for via clause.Locking. We
+// then capture every emitted statement via a gorm.Logger and
+// assert the SELECT against policy_drafts carries FOR UPDATE.
+// Without this dialect tweak SQLite would silently strip the
+// locking clause and the test could not catch a regression in
+// transition().
+func TestDraftRepository_MarkPromoted_UsesSelectForUpdate(t *testing.T) {
+	t.Parallel()
+
+	cap := &captureLogger{}
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: cap})
+	if err != nil {
+		t.Fatalf("gorm.Open: %v", err)
+	}
+	if err := db.Exec(sqliteDraftSchema).Error; err != nil {
+		t.Fatalf("apply schema: %v", err)
+	}
+	// Drop the SQLite dialect's no-op FOR clause builder so the
+	// default clause.Locking renderer runs and emits "FOR UPDATE"
+	// — matching what Postgres does in production.
+	delete(db.Config.ClauseBuilders, "FOR")
+	repo := policy.NewDraftRepository(db)
+	ctx := context.Background()
+
+	d := policy.NewDraft("tenant-a", "", "ken", policy.PolicySnapshot{})
+	if err := repo.Create(ctx, d); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// SQLite parses "FOR UPDATE" as a syntax error, but gorm
+	// builds + logs the SQL via the captureLogger before
+	// dispatching the query, so the rendered statement is in the
+	// captureLogger by the time MarkPromoted returns. The error
+	// is expected and intentionally ignored.
+	_, _ = repo.MarkPromoted(ctx, db, "tenant-a", d.ID, "actor-1")
+
+	// Walk every captured SQL statement and confirm the SELECT
+	// against policy_drafts carries the FOR UPDATE clause. Match
+	// case-insensitively so a future driver-style flip (e.g.
+	// gorm rendering "for update") doesn't silently regress us.
+	var sawLockedSelect bool
+	for _, q := range cap.snapshot() {
+		upper := strings.ToUpper(q)
+		if strings.Contains(upper, "SELECT") &&
+			strings.Contains(upper, "POLICY_DRAFTS") &&
+			strings.Contains(upper, "FOR UPDATE") {
+			sawLockedSelect = true
+			break
+		}
+	}
+	if !sawLockedSelect {
+		t.Fatalf("expected SELECT … FOR UPDATE on policy_drafts, captured queries: %v", cap.snapshot())
 	}
 }
