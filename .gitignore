@@ -1,0 +1,41 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+context-engine-ingest
+context-engine-api
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Vendor (we use modules, not vendor)
+/vendor/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Coverage
+coverage.out
+coverage.html
+*.coverprofile
+
+# Local env / secrets
+.env
+.env.local
+.env.*.local
+
+# Build / cache directories
+/build/
+/.cache/
+
+# Generated docs
+/docs/api/generated/
+
+# Local docker-compose volumes
+/.data/

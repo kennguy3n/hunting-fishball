@@ -16,13 +16,15 @@ phase.
 | 🟡 partial | Some exit criteria met; gaps tracked in `PROGRESS.md` |
 | ⏳ planned | Not yet started |
 
-> **All phases below are currently `⏳ planned`** — this is a greenfield
-> project. As phases land, flip the marker and move the supporting status
-> row in [`PROGRESS.md`](PROGRESS.md).
+> Phase 0 is **🟡 partial** as of 2026-05-09 — the connector contract,
+> registry, credential encryption, audit log primitives, and gRPC proto
+> contracts have all landed. Every other phase below is currently `⏳
+> planned`. As phases land, flip the marker and move the supporting
+> status row in [`PROGRESS.md`](PROGRESS.md).
 
 ---
 
-## Phase 0 — Connector contract, registry, audit primitives  ⏳
+## Phase 0 — Connector contract, registry, audit primitives  🟡
 
 **Scope.** Define the `SourceConnector` interface and the global registry;
 every binary that needs source connectors imports the provider packages
@@ -31,17 +33,17 @@ platform backend.
 
 **Exit criteria.**
 
-- [ ] `SourceConnector` interface with `Validate / Connect / ListNamespaces /
+- [x] `SourceConnector` interface with `Validate / Connect / ListNamespaces /
       ListDocuments / FetchDocument / Subscribe / Disconnect`.
-- [ ] Optional `DeltaSyncer`, `WebhookReceiver`, `Provisioner` interfaces.
-- [ ] Process-global registry with `RegisterSourceConnector` /
+- [x] Optional `DeltaSyncer`, `WebhookReceiver`, `Provisioner` interfaces.
+- [x] Process-global registry with `RegisterSourceConnector` /
       `GetSourceConnector` (mirror of the platform backend's connector
       factory).
-- [ ] AES-GCM credential encryption reused from the platform backend.
-- [ ] Blank-import side-effects in the connector binaries that need
+- [x] AES-GCM credential encryption reused from the platform backend.
+- [x] Blank-import side-effects in the connector binaries that need
       registration.
-- [ ] Audit-log Postgres table + outbox into Kafka.
-- [ ] Audit log surfaced in the admin portal API.
+- [x] Audit-log Postgres table + outbox into Kafka.
+- [x] Audit log surfaced in the admin portal API.
 
 ---
 

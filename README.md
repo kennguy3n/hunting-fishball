@@ -1,9 +1,10 @@
 # hunting-fishball
 
-> **Status:** Greenfield. Interfaces, schema, and clients are still being defined.
-> See [`docs/PROGRESS.md`](docs/PROGRESS.md) for what is and is not built yet,
-> [`docs/PROPOSAL.md`](docs/PROPOSAL.md) for the product thesis, and
-> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the system design.
+> **Status.** Phase 0 scaffolding is in `main` (🟡 partial — see
+> [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live checklist). Phase 1
+> connectors and the end-to-end pipeline are still planned. The product
+> thesis lives in [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target
+> system design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 `hunting-fishball` is a privacy-preserving **knowledge & context platform** that
 unifies an organization's documents, chat history, files, and SaaS records into
@@ -164,6 +165,72 @@ semantic-cache key (query embedding + scope hash).
 
 For the long-form rationale on language choice and retrieval-layer mapping,
 see [`docs/PROPOSAL.md` §3.1](docs/PROPOSAL.md#31-context-engine-language-choice).
+
+---
+
+## Quick start
+
+```bash
+# 1. Clone
+git clone https://github.com/kennguy3n/hunting-fishball.git
+cd hunting-fishball
+
+# 2. Install Go dependencies (Go 1.25+ required)
+go mod download
+
+# 3. Bring up the local storage plane (Postgres / Redis / Kafka / Qdrant)
+docker compose up -d
+
+# 4. Run the test suite
+make test           # = go test -race -cover ./...
+
+# 5. Generate proto stubs (only needed when proto files change)
+make proto-gen
+
+# 6. Build the binaries
+make build          # produces ./bin/context-engine-ingest and ./bin/context-engine-api
+```
+
+Other targets:
+
+| Target          | What it does                                  |
+|-----------------|-----------------------------------------------|
+| `make build`    | Build both binaries into `./bin/`             |
+| `make test`     | `go test -race -cover ./...`                  |
+| `make vet`      | `go vet ./...`                                |
+| `make fmt`      | `gofmt -s -w` over hand-written sources       |
+| `make lint`     | `golangci-lint run` (skipped if not installed)|
+| `make proto-gen`| Regenerate `*.pb.go` from `proto/**/*.proto`  |
+| `make proto-check` | Verify generated proto files are up to date|
+| `make clean`    | Remove `./bin/` and coverage artefacts        |
+
+## Project structure
+
+```
+hunting-fishball/
+├── cmd/
+│   ├── ingest/                # context-engine-ingest binary entry point
+│   └── api/                   # context-engine-api    binary entry point
+├── internal/
+│   ├── connector/             # SourceConnector interface, optional
+│   │                          # interfaces, process-global registry
+│   ├── credential/            # AES-256-GCM envelope encryption
+│   └── audit/                 # audit_logs model + repository + Kafka
+│                              # outbox + Gin handler
+├── proto/
+│   ├── docling/v1/            # Python Docling parsing service
+│   ├── embedding/v1/          # Python embedding service
+│   └── memory/v1/             # Mem0 persistent memory service
+├── migrations/                # SQL migrations (audit_logs, ...)
+├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
+├── docker-compose.yml         # local Postgres / Redis / Kafka / Qdrant
+├── Makefile                   # build / test / lint / proto-gen
+└── .github/workflows/ci.yml   # CI: vet / test / lint / proto-check
+```
+
+The full target architecture (including phases that have not yet
+landed) is documented in
+[`docs/ARCHITECTURE.md` §9](docs/ARCHITECTURE.md#9-directory-structure).
 
 ---
 

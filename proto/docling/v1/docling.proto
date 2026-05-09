@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package docling.v1;
+
+option go_package = "github.com/kennguy3n/hunting-fishball/proto/docling/v1;doclingv1";
+
+// DoclingService wraps the Python Docling document parser. The Go context
+// engine calls ParseDocument from Stage 2 (Parse) of the ingestion
+// pipeline.
+service DoclingService {
+  rpc ParseDocument(ParseDocumentRequest) returns (ParseDocumentResponse);
+}
+
+// BlockType classifies a parsed block. Mirrors Docling's coarse block
+// taxonomy.
+enum BlockType {
+  BLOCK_TYPE_UNSPECIFIED = 0;
+  BLOCK_TYPE_PARAGRAPH   = 1;
+  BLOCK_TYPE_HEADING     = 2;
+  BLOCK_TYPE_LIST_ITEM   = 3;
+  BLOCK_TYPE_TABLE       = 4;
+  BLOCK_TYPE_FIGURE      = 5;
+  BLOCK_TYPE_CAPTION     = 6;
+  BLOCK_TYPE_CODE        = 7;
+  BLOCK_TYPE_FOOTNOTE    = 8;
+}
+
+// TableCell is a single cell inside a parsed table.
+message TableCell {
+  int32  row_index    = 1;
+  int32  col_index    = 2;
+  int32  row_span     = 3;
+  int32  col_span     = 4;
+  string text         = 5;
+  bool   is_header    = 6;
+}
+
+// ParsedBlock is one logical block extracted from the document. The Go
+// pipeline groups blocks into chunks before embedding.
+message ParsedBlock {
+  string             block_id      = 1;
+  string             text          = 2;
+  BlockType          type          = 3;
+  int32              heading_level = 4;
+  repeated TableCell table_cells   = 5;
+  string             image_caption = 6;
+  int32              page_number   = 7;
+  int32              position      = 8;
+}
+
+// DocumentStructure carries document-level metadata Docling extracts
+// (title, author, language, page count, ...).
+message DocumentStructure {
+  string title       = 1;
+  string author      = 2;
+  string language    = 3;
+  int32  page_count  = 4;
+  string outline_md  = 5; // Optional Markdown outline
+  map<string, string> metadata = 6;
+}
+
+message ParseDocumentRequest {
+  string              tenant_id    = 1;
+  string              document_id  = 2;
+  bytes               content      = 3;
+  string              content_type = 4;
+  map<string, string> metadata     = 5;
+}
+
+message ParseDocumentResponse {
+  repeated ParsedBlock blocks    = 1;
+  DocumentStructure    structure = 2;
+}

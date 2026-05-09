@@ -442,3 +442,59 @@ The retrieval API never silently returns an empty result for a
 degradation. It returns the best result set it could compute, with a
 `policy.degraded` flag and a structured `policy.applied` list explaining
 which backends contributed.
+
+---
+
+## 9. Directory structure
+
+The code layout below is what the Phase 0 scaffolding lands. Each
+package has a single owner contract (interface + tests) so future phases
+can grow inside the same tree without restructuring.
+
+```
+hunting-fishball/
+├── cmd/
+│   ├── ingest/                # context-engine-ingest binary entry point
+│   └── api/                   # context-engine-api    binary entry point
+├── internal/
+│   ├── connector/             # SourceConnector interface, optional
+│   │                          # interfaces (DeltaSyncer / WebhookReceiver /
+│   │                          # Provisioner), process-global registry
+│   ├── credential/            # AES-256-GCM envelope encryption for
+│   │                          # connector credentials
+│   ├── audit/                 # AuditLog model, repository (transactional
+│   │                          # outbox), Kafka outbox poller, Gin handler
+│   ├── pipeline/              # (Phase 1) pipeline coordinator
+│   ├── retrieval/             # (Phase 3) retrieval API
+│   └── storage/               # (Phase 1+) storage clients
+├── proto/
+│   ├── docling/v1/            # Python Docling parsing service
+│   ├── embedding/v1/          # Python embedding service
+│   └── memory/v1/             # Mem0 persistent memory service
+├── pkg/                       # public shared types (reserved)
+├── migrations/
+│   └── 001_audit_log.sql      # audit_logs table + indexes
+├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
+├── docker-compose.yml         # local dev: Postgres / Redis / Kafka / Qdrant
+├── Makefile                   # build / test / vet / lint / proto-gen
+├── .github/workflows/ci.yml   # CI: vet / test / lint / proto-gen check
+├── go.mod
+└── go.sum
+```
+
+### Tech choices realised in Phase 0
+
+- **Web framework:** `github.com/gin-gonic/gin` (matches `ai-agent-platform`).
+- **ORM:** `gorm.io/gorm` with `gorm.io/driver/postgres` in production
+  and `github.com/glebarez/sqlite` in repository tests.
+- **Kafka client:** `github.com/IBM/sarama` (the user-stated default in the
+  Phase 0 scope).
+- **gRPC:** `google.golang.org/grpc` and `google.golang.org/protobuf`.
+- **ULIDs:** `github.com/oklog/ulid/v2`.
+- **Crypto:** `crypto/aes` + `crypto/cipher` from the standard library;
+  the envelope format mirrors the wire format used by
+  `ai-platform-backend-go/pkg/crypto/encryption` so payloads stay
+  cross-compatible.
+- **Observability:** `go.opentelemetry.io/otel` is wired through go.mod
+  but not yet instrumented; instrumentation lands in Phase 1 alongside
+  the pipeline.

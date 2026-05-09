@@ -1,0 +1,30 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+  exclusions:
+    rules:
+      # Generated proto files: don't lint.
+      - path: '\.pb\.go$'
+        linters: [unused, govet, staticcheck, errcheck, ineffassign]
+      - path: '_grpc\.pb\.go$'
+        linters: [unused, govet, staticcheck, errcheck, ineffassign]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes: ["github.com/kennguy3n/hunting-fishball"]
