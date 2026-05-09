@@ -30,11 +30,14 @@ phase.
 > cache, RRF merger + reranker, parallel fan-out, the three Python ML
 > microservices, integration tests, benchmarks, and the cutover plan
 > have all landed; the production P95 < 500 ms acceptance criterion is
-> deferred to Phase 4 load tests. **Phase 4** is **🟡 partial** as of
+> deferred to Phase 8 load tests. **Phase 4** is **🟡 partial** as of
 > 2026-05-09 — privacy modes (`no-ai`/`local-only`/`local-api`/
-> `hybrid`/`remote`), allow/deny lists, and recipient policy have
-> landed; the policy simulator and privacy-strip clients are still
-> outstanding. Every other phase below is currently `⏳ planned`. As
+> `hybrid`/`remote`), allow/deny lists, recipient policy, the policy
+> simulator (what-if + data-flow diff + conflict detection), draft
+> isolation with audited promotion, the GORM-backed live store, and
+> privacy-strip enrichment of retrieval responses have all landed; the
+> client-side privacy-strip render lands with the B2B/B2C UIs in
+> Phase 6. Every other phase below is currently `⏳ planned`. As
 > phases land, flip the marker and move the supporting status row in
 > [`PROGRESS.md`](PROGRESS.md).
 
@@ -148,7 +151,7 @@ their results.
       `Invalidate` on Stage 4 writes.
 - [ ] Retrieval P95 latency < 500 ms on the sample corpus
       (in-process P95 ~178 µs measured in `tests/benchmark/`; full
-      end-to-end target deferred to Phase 4 load tests).
+      end-to-end target deferred to Phase 8 load tests).
 
 ---
 
@@ -169,12 +172,24 @@ policy simulator. Privacy strip surfaces in every client.
 - [x] Recipient policy by channel / skill
       (`internal/policy/recipient.go`, gated in
       `internal/retrieval/handler.go` after merge + rerank).
-- [ ] Policy simulator: what-if retrieval, data-flow diff, conflict
-      detection.
-- [ ] Drafts isolated from live; explicit promotion is an audited event.
+- [x] Policy simulator: what-if retrieval, data-flow diff, conflict
+      detection (`internal/policy/simulator.go`,
+      `internal/policy/simulator_diff.go`,
+      `internal/policy/simulator_conflict.go`; admin HTTP surface in
+      `internal/admin/simulator_handler.go`).
+- [x] Drafts isolated from live; explicit promotion is an audited event
+      (`internal/policy/draft.go`, `migrations/005_policy_drafts.sql`,
+      `internal/policy/promotion.go`,
+      `internal/policy/live_store.go`; promotion emits
+      `policy.promoted` / `policy.rejected` audit events transactionally
+      with the live-table writes).
 - [x] `privacy_label` returned on every retrieval row.
+- [x] Privacy strip enrichment in retrieval response
+      (`internal/retrieval/privacy_strip.go`; every `RetrieveHit`
+      carries a structured `privacy_strip`).
 - [ ] Privacy strip rendered in admin portal, B2B desktop, and at least
-      one mobile platform.
+      one mobile platform (server-side enrichment shipped; client-side
+      render tracked under Phase 6).
 
 ---
 

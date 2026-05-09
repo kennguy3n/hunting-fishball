@@ -17,10 +17,15 @@
 > latency benchmarks, and the
 > [cutover plan](docs/CUTOVER.md). **Phase 4** brings the policy
 > framework (`internal/policy/`): privacy modes
-> (`no-ai`/`local-only`/`local-api`/`hybrid`/`remote`),
-> allow/deny ACL evaluation, and recipient policy — all wired into
-> the retrieval handler via a `PolicyResolver` port. The product
-> thesis lives in [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target
+> (`no-ai`/`local-only`/`local-api`/`hybrid`/`remote`), allow/deny
+> ACL evaluation, and recipient policy — all wired into the retrieval
+> handler via a `PolicyResolver` port — plus the policy simulator
+> (what-if retrieval, data-flow diff, conflict detection), draft
+> isolation with audited promotion (`policy.promoted` /
+> `policy.rejected` audit events), and structured `privacy_strip`
+> enrichment on every retrieval row. The admin HTTP surface lives at
+> `/v1/admin/policy/{drafts,simulate,conflicts}`. The product thesis
+> lives in [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target
 > system design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 `hunting-fishball` is a privacy-preserving **knowledge & context platform** that
@@ -275,8 +280,16 @@ hunting-fishball/
 │   ├── admin/                 # Phase 2: source-management API,
 │   │                          # per-source Redis rate limiter,
 │   │                          # source-health tracker, forget worker
+│   │                          # + Phase 4 simulator_handler.go
+│   │                          # (/v1/admin/policy/...)
 │   ├── policy/                # Phase 4: privacy modes, allow/deny
-│   │                          # ACL, recipient policy
+│   │                          # ACL, recipient policy + Phase 4
+│   │                          # simulator (snapshot.go, simulator.go,
+│   │                          # simulator_diff.go,
+│   │                          # simulator_conflict.go), draft store
+│   │                          # (draft.go), promotion FSM
+│   │                          # (promotion.go), GORM live store
+│   │                          # (live_store.go)
 │   ├── pipeline/              # 4-stage pipeline (Phase 1):
 │   │                          # consumer / coordinator / fetch / parse
 │   │                          # / embed / store. Phase 2 adds
@@ -285,7 +298,9 @@ hunting-fishball/
 │   ├── retrieval/             # /v1/retrieve handler + parallel fan-out
 │   │                          # merger / reranker / policy filter (Phase 3)
 │   │                          # + Phase 4 PolicyResolver wiring
-│   │                          # (policy_snapshot.go)
+│   │                          # (policy_snapshot.go) + Phase 4
+│   │                          # privacy strip enrichment
+│   │                          # (privacy_strip.go)
 │   └── storage/               # Qdrant + Postgres + BM25 (bleve) +
 │                              # FalkorDB + Redis semantic cache
 ├── proto/
@@ -333,6 +348,8 @@ landed) is documented in
 - [`docs/PROGRESS.md`](docs/PROGRESS.md) — checklist of what is built, what is
   in progress, and what is planned, including the Context Engine migration
   tasks.
+- [`docs/CUTOVER.md`](docs/CUTOVER.md) — cutover plan and rollback procedure
+  for the Python → Go context engine migration.
 
 ---
 
@@ -347,6 +364,19 @@ landed) is documented in
   Architectural changes land here *before* the code change in the relevant
   service repository (`ai-agent-platform`, `ai-agent-context-engine`,
   `ai-agent-desktop`, `knowledge`, etc.).
+- **CI lanes.** CI is split into a fast lane and a full lane (see
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+  - **Fast lane** (gofmt, vet, golangci-lint, race+cover unit tests, build,
+    Python services unit tests) runs on every PR push and is required for
+    merge. Branch protection should require the `Required CI (fast lane)`
+    aggregator check.
+  - **Full lane** (proto-gen check, e2e smoke against the docker-compose
+    stack, Go ↔ Python integration with the heavy ML images) runs on:
+    push to `main`, PRs labelled `full-ci` (or `run-integration` for the
+    integration job only), the nightly `27 6 * * *` cron, and manual
+    `workflow_dispatch`. Add the label when a PR touches the storage
+    plane, the gRPC contracts, or anything else that the fast lane can't
+    cover.
 ---
 
 ## Related repositories

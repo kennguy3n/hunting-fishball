@@ -199,6 +199,12 @@ type RetrieveHit struct {
 	Connector    string         `json:"connector,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	Sources      []string       `json:"sources,omitempty"`
+
+	// PrivacyStrip is the structured privacy disclosure clients
+	// render for the user. The handler builds it from the chunk's
+	// privacy_label and the resolved PolicySnapshot. Phase 4
+	// addition.
+	PrivacyStrip PrivacyStrip `json:"privacy_strip"`
 }
 
 // RetrievePolicy summarises the policy decisions made during fan-out.
@@ -318,6 +324,14 @@ func (h *Handler) retrieve(c *gin.Context) {
 			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
 			resp.Policy.BlockedCount = blockedByPrivacy + blockedByACL + blockedByRecipient
+			// Cached hits carry the same PrivacyStrip enrichment as
+			// fresh hits — caching only the strip would
+			// double-count if the live policy changes between
+			// writes. We rebuild the strip from the resolved
+			// snapshot at serve time.
+			for i := range resp.Hits {
+				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
+			}
 			c.JSON(http.StatusOK, resp)
 
 			return
@@ -355,7 +369,9 @@ func (h *Handler) retrieve(c *gin.Context) {
 		},
 	}
 	for _, m := range pres.Allowed {
-		resp.Hits = append(resp.Hits, hitFromMatch(m))
+		hit := hitFromMatch(m)
+		hit.PrivacyStrip = BuildPrivacyStrip(m, snapshot)
+		resp.Hits = append(resp.Hits, hit)
 	}
 
 	// Cache the merged + reranked + filtered response. Errors are

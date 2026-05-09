@@ -45,6 +45,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
+	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/retrieval"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 	embeddingv1 "github.com/kennguy3n/hunting-fishball/proto/embedding/v1"
@@ -176,6 +177,54 @@ func run() error {
 		return fmt.Errorf("admin handler: %w", err)
 	}
 	adminHandler.Register(api)
+
+	// Phase 4 simulator + draft policy surface. The Promoter wires
+	// the GORM-backed live store (writes the live policy tables in
+	// migrations/004_policy.sql) to the draft repo so promote =
+	// "make live look exactly like this draft, atomically". The
+	// Simulator runs against a noop LiveResolver until the GORM-
+	// backed resolver lands; the draft side of the diff is fully
+	// functional today and the live side reports an empty result
+	// set, which is the safest default.
+	draftRepo := policy.NewDraftRepository(db)
+	liveStore := policy.NewLiveStoreGORM(db)
+	promoter, err := policy.NewPromoter(policy.PromotionConfig{
+		Drafts:    draftRepo,
+		LiveStore: liveStore,
+		Audit:     auditRepo,
+	})
+	if err != nil {
+		return fmt.Errorf("policy promoter: %w", err)
+	}
+	simulator, err := policy.NewSimulator(policy.SimulatorConfig{
+		LiveResolver: policy.ResolverFunc(func(_ context.Context, _, _ string) (policy.PolicySnapshot, error) {
+			return policy.PolicySnapshot{}, nil
+		}),
+		Retriever: func(_ context.Context, _ policy.SimRetrieveRequest, _ policy.PolicySnapshot) ([]policy.RetrieveHit, error) {
+			// The retrieval-backed simulator path lands in a
+			// follow-up — wiring the full retrieval handler as
+			// the simulator's Retriever would create a back-
+			// edge from cmd/api/main.go's existing retrieval
+			// handler into the policy package. Until the
+			// simulator-internal retrieval port is split out,
+			// the API surface is mounted but returns empty
+			// hits.
+			return []policy.RetrieveHit{}, nil
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("policy simulator: %w", err)
+	}
+	simHandler, err := admin.NewSimulatorHandler(admin.SimulatorConfig{
+		Drafts:    draftRepo,
+		Promotion: promoter,
+		Simulator: simulator,
+		Audit:     auditRepo,
+	})
+	if err != nil {
+		return fmt.Errorf("simulator handler: %w", err)
+	}
+	simHandler.Register(api)
 
 	srv := &http.Server{Addr: listenAddr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)

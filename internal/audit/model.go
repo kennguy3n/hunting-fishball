@@ -38,6 +38,9 @@ const (
 	ActionRetrievalQueried    Action = "retrieval.queried"
 	ActionPolicyEdited        Action = "policy.edited"
 	ActionPolicyApplied       Action = "policy.applied"
+	ActionPolicyDrafted       Action = "policy.drafted"
+	ActionPolicyPromoted      Action = "policy.promoted"
+	ActionPolicyRejected      Action = "policy.rejected"
 	ActionAuditRead           Action = "audit.read"
 )
 
