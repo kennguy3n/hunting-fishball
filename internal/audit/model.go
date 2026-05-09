@@ -44,15 +44,16 @@ type AuditLog struct {
 	ID string `gorm:"type:char(26);primaryKey;column:id" json:"id"`
 
 	// TenantID is the multi-tenant scope. Every read query must include
-	// `tenant_id = ?` — enforced at the handler layer, indexed here.
-	TenantID string `gorm:"type:char(26);not null;column:tenant_id;index:idx_audit_tenant_created,priority:1" json:"tenant_id"`
+	// `tenant_id = ?` — enforced at the handler layer. Indexes that
+	// include this column live in migrations/001_audit_log.sql.
+	TenantID string `gorm:"type:char(26);not null;column:tenant_id" json:"tenant_id"`
 
 	// ActorID is the ULID of the user / member / service account that
 	// caused the event. May be empty for system-generated events.
-	ActorID string `gorm:"type:char(26);column:actor_id;index:idx_audit_tenant_actor,priority:2" json:"actor_id,omitempty"`
+	ActorID string `gorm:"type:char(26);column:actor_id" json:"actor_id,omitempty"`
 
 	// Action names the event ("source.synced", "retrieval.queried", ...).
-	Action Action `gorm:"type:varchar(64);not null;column:action;index:idx_audit_tenant_action,priority:2" json:"action"`
+	Action Action `gorm:"type:varchar(64);not null;column:action" json:"action"`
 
 	// ResourceType classifies the target ("source", "policy",
 	// "retrieval-call").
@@ -74,12 +75,17 @@ type AuditLog struct {
 	// CreatedAt is the wall-clock time the row was inserted. The ULID
 	// embeds a timestamp too, but having a real column simplifies the
 	// retention sweep query.
-	CreatedAt time.Time `gorm:"not null;default:now();column:created_at;index:idx_audit_tenant_created,priority:2,sort:desc" json:"created_at"`
+	CreatedAt time.Time `gorm:"not null;default:now();column:created_at" json:"created_at"`
 
 	// PublishedAt is set by the outbox poller after the row has been
 	// published to Kafka. Nil means "still pending publish".
-	PublishedAt *time.Time `gorm:"column:published_at;index:idx_audit_unpublished,where:published_at IS NULL" json:"-"`
+	PublishedAt *time.Time `gorm:"column:published_at" json:"-"`
 }
+
+// Indexes for this table are defined in migrations/001_audit_log.sql,
+// which is the single source of truth for the audit_logs schema.
+// The model deliberately omits GORM `index:` tags so AutoMigrate cannot
+// drift from the migration.
 
 // TableName overrides the default GORM pluralization.
 func (AuditLog) TableName() string { return "audit_logs" }

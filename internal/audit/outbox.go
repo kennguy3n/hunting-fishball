@@ -84,7 +84,11 @@ func (o *Outbox) Run(ctx context.Context) error {
 
 	for {
 		drained, err := o.RunOnce(ctx)
-		if err != nil && !errors.Is(err, context.Canceled) {
+		// If ctx is done, treat any error as expected shutdown and let the
+		// select below return the canonical ctx.Err(). This covers both
+		// context.Canceled and context.DeadlineExceeded, plus driver-specific
+		// surfacing (e.g. SQLite's "interrupted").
+		if err != nil && ctx.Err() == nil {
 			return err
 		}
 		if drained >= o.cfg.BatchSize {
