@@ -339,11 +339,35 @@ func (c *Consumer) partitionState(topic string, partition int32) *partitionState
 // decodeEvent parses a Kafka message body into an IngestEvent. The
 // wire format is JSON; the Key is parsed as `tenant_id|source_id` per
 // ARCHITECTURE.md §3.2 to derive the partition.
+//
+// The body's tenant_id/source_id MUST match the key — a mismatch is
+// treated as a poison message so a misrouted producer can't smuggle
+// an event onto another tenant's partition. When the body is missing
+// tenant_id / source_id but the key is present, the key acts as a
+// fallback.
 func decodeEvent(msg *sarama.ConsumerMessage) (IngestEvent, error) {
 	var evt IngestEvent
 	if err := json.Unmarshal(msg.Value, &evt); err != nil {
 		return IngestEvent{}, fmt.Errorf("unmarshal event: %w", err)
 	}
+
+	if len(msg.Key) > 0 {
+		keyTenant, keySource, ok := ParsePartitionKey(string(msg.Key))
+		if !ok {
+			return evt, fmt.Errorf("malformed partition key: %q", msg.Key)
+		}
+		if evt.TenantID == "" {
+			evt.TenantID = keyTenant
+		} else if evt.TenantID != keyTenant {
+			return evt, fmt.Errorf("tenant_id mismatch: key=%q body=%q", keyTenant, evt.TenantID)
+		}
+		if evt.SourceID == "" {
+			evt.SourceID = keySource
+		} else if evt.SourceID != keySource {
+			return evt, fmt.Errorf("source_id mismatch: key=%q body=%q", keySource, evt.SourceID)
+		}
+	}
+
 	if evt.TenantID == "" || evt.DocumentID == "" {
 		return evt, fmt.Errorf("missing tenant_id or document_id")
 	}
@@ -357,4 +381,22 @@ func decodeEvent(msg *sarama.ConsumerMessage) (IngestEvent, error) {
 // that publish events.
 func PartitionKey(tenantID, sourceID string) string {
 	return tenantID + "|" + sourceID
+}
+
+// ParsePartitionKey is the inverse of PartitionKey. Returns
+// (tenantID, sourceID, true) on a well-formed key, or ("", "", false)
+// otherwise. A missing source_id (legacy producers) is rejected — the
+// admin source-management surface always emits both halves.
+func ParsePartitionKey(key string) (string, string, bool) {
+	for i := 0; i < len(key); i++ {
+		if key[i] == '|' {
+			tenant := key[:i]
+			source := key[i+1:]
+			if tenant == "" || source == "" {
+				return "", "", false
+			}
+			return tenant, source, true
+		}
+	}
+	return "", "", false
 }

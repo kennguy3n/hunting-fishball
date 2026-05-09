@@ -466,14 +466,29 @@ hunting-fishball/
 │   │                          # connector credentials
 │   ├── audit/                 # AuditLog model, repository (transactional
 │   │                          # outbox), Kafka outbox poller, Gin handler
+│   ├── admin/                 # Phase 2: source-management API
+│   │                          # (handler / repo / model), per-source
+│   │                          # Redis token-bucket rate limiter,
+│   │                          # source-health tracker, forget-on-
+│   │                          # removal worker
+│   ├── policy/                # Phase 4: privacy modes
+│   │                          # (privacy_mode.go), allow / deny ACLs
+│   │                          # (acl.go), recipient policy
+│   │                          # (recipient.go) — wired into
+│   │                          # internal/retrieval via
+│   │                          # policy_snapshot.go
 │   ├── pipeline/              # 4-stage pipeline (Phase 1):
 │   │                          # consumer / coordinator / fetch / parse
-│   │                          # / embed / store
+│   │                          # / embed / store. Phase 2 added
+│   │                          # producer.go (per-tenant partition-key
+│   │                          # routing) + backfill.go (paced
+│   │                          # initial sync, IngestEvent.SyncMode)
 │   ├── retrieval/             # POST /v1/retrieve handler (Phase 1)
 │   │                          # + parallel fan-out merger / reranker
 │   │                          # / policy filter (Phase 3:
 │   │                          # merger.go, reranker.go,
-│   │                          # storage_adapter.go)
+│   │                          # storage_adapter.go) + Phase 4 policy
+│   │                          # snapshot resolver (policy_snapshot.go)
 │   └── storage/               # Qdrant + Postgres storage clients
 │                              # (Phase 1) + BM25 (tantivy.go),
 │                              # FalkorDB (falkordb.go), Redis
@@ -491,7 +506,12 @@ hunting-fishball/
 │   └── gen_protos.sh          # regenerates _proto/ from proto/
 ├── pkg/                       # public shared types (reserved)
 ├── migrations/
-│   └── 001_audit_log.sql      # audit_logs table + indexes
+│   ├── 001_audit_log.sql      # audit_logs table + indexes
+│   ├── 002_sources.sql        # Phase 2 sources table + indexes
+│   ├── 003_source_health.sql  # Phase 2 source_health table
+│   └── 004_policy.sql         # Phase 4 tenant_policies +
+│                              # channel_policies + policy_acl_rules
+│                              # + recipient_policies tables
 ├── tests/
 │   ├── e2e/                   # docker-compose smoke test
 │   │                          # (build tag: //go:build e2e)
@@ -564,3 +584,54 @@ hunting-fishball/
   server, `docling` for parsing, `sentence-transformers` for
   embeddings, and `mem0ai` for memory. Each service is a thin gRPC
   shim over the upstream library.
+
+### Tech choices added in Phase 2
+
+- **Source-management API:** Gin handlers in `internal/admin/`
+  scoped under the auth middleware group. The `SourceRepository`
+  uses GORM against Postgres in production and the in-memory
+  `glebarez/sqlite` driver in tests.
+- **Per-tenant Kafka routing:** Sarama `SyncProducer` with
+  partition keys of the form `tenant_id|source_id`. The consumer
+  parses keys with `pipeline.ParsePartitionKey` and rejects
+  body/key mismatches as poison messages, defending against
+  spoofed partition routing.
+- **Backfill rate control:** A `pipeline.RateController` interface
+  decouples the orchestrator from the limiter implementation.
+  `pipeline.TickerRate` is the wall-clock pacer used in tests; the
+  production wiring uses `admin.BoundController` over the Redis
+  token bucket.
+- **Per-source rate limiter:** Atomic Lua token bucket in Redis
+  keyed by `(tenant_id, source_id)`. Loaded once via `ScriptLoad`
+  with a `Eval` fallback for `NOSCRIPT` after a Redis flush.
+- **Source-health tracking:** A separate `source_health` Postgres
+  table (one row per (tenant_id, source_id)) keeps `last_success_at`,
+  `last_failure_at`, `lag`, `error_count`, and a derived `status`
+  column. `admin.DeriveStatus` computes the status from configurable
+  thresholds.
+- **Forget-on-removal worker:** A Redis `SET NX EX` fenced lease
+  prevents concurrent forget-job runs from racing a re-add. The
+  worker fans out to a list of `ForgetSweeper` implementations (one
+  per storage tier) so per-backend cleanup logic stays in the
+  storage layer.
+
+### Tech choices added in Phase 4
+
+- **Privacy modes:** `internal/policy/privacy_mode.go` defines a
+  total order over `no-ai` < `local-only` < `local-api` <
+  `hybrid` < `remote`. `EffectiveMode` returns the stricter of
+  (tenantMode, channelMode); unknown modes fail closed (treated
+  as more strict than the strictest known mode).
+- **Allow / deny ACL evaluator:** `internal/policy/acl.go` evaluates
+  rules with deny-over-allow precedence. Rules can match by
+  source ID, namespace ID, or path glob (with a `**`
+  cross-segment extension on top of `path.Match`).
+- **Recipient policy:** Per-(tenant, channel) allow/deny list of
+  downstream skill consumers. `RecipientPolicy.IsAllowed` defaults
+  open or closed according to the channel's
+  `recipient_default` column.
+- **Retrieval wiring:** `internal/retrieval/policy_snapshot.go`
+  defines a `PolicyResolver` port and `PolicySnapshot` carrier;
+  the handler resolves the snapshot before fan-out (failing
+  closed on error) and applies ACL + recipient gates after the
+  existing `PolicyFilter` runs.

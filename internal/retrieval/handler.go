@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
+	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
 
@@ -105,6 +106,11 @@ type HandlerConfig struct {
 	// DefaultPrivacyMode is the channel privacy mode used when the
 	// request doesn't supply one. Defaults to "internal".
 	DefaultPrivacyMode string
+
+	// PolicyResolver loads the (tenant, channel) policy snapshot
+	// before fan-out. nil → permissive default (Phase 1/3
+	// privacy-label filter only).
+	PolicyResolver PolicyResolver
 }
 
 // Handler serves the retrieval HTTP API.
@@ -144,6 +150,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if cfg.PolicyFilter == nil {
 		cfg.PolicyFilter = NewPolicyFilter(PolicyConfig{})
 	}
+	if cfg.PolicyResolver == nil {
+		cfg.PolicyResolver = noopPolicyResolver{}
+	}
 
 	return &Handler{cfg: cfg}, nil
 }
@@ -167,6 +176,12 @@ type RetrieveRequest struct {
 	// filter drops chunks whose privacy_label exceeds this. Defaults
 	// to HandlerConfig.DefaultPrivacyMode when empty.
 	PrivacyMode string `json:"privacy_mode,omitempty"`
+
+	// SkillID is the calling skill ("summarizer", "qa-bot", ...).
+	// Used by the recipient policy to gate which downstream
+	// consumers may receive the result. Empty disables the
+	// recipient gate (legacy callers).
+	SkillID string `json:"skill_id,omitempty"`
 }
 
 // RetrieveHit is one entry in the response.
@@ -247,6 +262,28 @@ func (h *Handler) retrieve(c *gin.Context) {
 		privacyMode = h.cfg.DefaultPrivacyMode
 	}
 
+	channelIDForPolicy := firstNonEmpty(req.Channels)
+	snapshot, perr := h.cfg.PolicyResolver.Resolve(c.Request.Context(), tenantID, channelIDForPolicy)
+	if perr != nil {
+		// Fail closed: a resolver failure must not silently widen
+		// the policy. Return zero hits with the safest privacy mode.
+		c.JSON(http.StatusServiceUnavailable, RetrieveResponse{
+			Hits: []RetrieveHit{},
+			Policy: RetrievePolicy{
+				PrivacyMode:  string(policy.PrivacyModeNoAI),
+				BlockedCount: 0,
+			},
+		})
+		return
+	}
+	// EffectiveMode wins over the request-supplied mode when the
+	// resolver populated one — privacy mode is admin-controlled, not
+	// caller-controlled. The request-supplied PrivacyMode is kept as
+	// a fallback for environments without a resolver wired in.
+	if snapshot.EffectiveMode != "" && snapshot.EffectiveMode != policy.PrivacyModeRemote {
+		privacyMode = string(snapshot.EffectiveMode)
+	}
+
 	vec, err := h.cfg.Embedder.EmbedQuery(c.Request.Context(), tenantID, req.Query)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "embed failed"})
@@ -281,6 +318,12 @@ func (h *Handler) retrieve(c *gin.Context) {
 	}
 
 	pres := h.cfg.PolicyFilter.Apply(reranked, privacyMode)
+	// Phase 4: ACL + recipient gate. The snapshot's ACL drops chunks
+	// the tenant has explicitly excluded; the recipient policy gates
+	// the calling skill.
+	postPolicy, blockedByACL, blockedByRecipient := applyPolicySnapshot(pres.Allowed, snapshot, req.SkillID)
+	pres.Allowed = postPolicy
+	pres.BlockedCount += blockedByACL + blockedByRecipient
 	if len(pres.Allowed) > topK {
 		pres.Allowed = pres.Allowed[:topK]
 	}
