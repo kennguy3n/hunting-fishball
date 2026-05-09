@@ -54,10 +54,14 @@ func TestRateLimiter_AllowsBurstUpToCapacity(t *testing.T) {
 
 func TestRateLimiter_Refills(t *testing.T) {
 	t.Parallel()
-	// Choose a fast refill (50/s) so the test sleeps briefly. The
-	// limiter timestamps from Go (time.Now), so wall-clock sleeps
-	// drive the refill arithmetic.
-	rl, _, _ := newLimiter(t, admin.RateLimit{Capacity: 1, RefillPerSecond: 50})
+	// Refill window is intentionally wide (250 ms / token) so neither
+	// inter-call scheduling jitter on the second Allow nor the post-
+	// sleep Allow lands inside the same bucket as a noise spike.
+	// Earlier tunings (50/s = 20 ms window) flaked under -race on slow
+	// runners because t.Parallel + race instrumentation pushes call
+	// gaps past the refill window, so the throttled assertion fired
+	// against an already-refilled bucket.
+	rl, _, _ := newLimiter(t, admin.RateLimit{Capacity: 1, RefillPerSecond: 4})
 	ctx := context.Background()
 	if ok, _, _ := rl.Allow(ctx, "t", "s"); !ok {
 		t.Fatal("first call must succeed")
@@ -65,7 +69,7 @@ func TestRateLimiter_Refills(t *testing.T) {
 	if ok, _, _ := rl.Allow(ctx, "t", "s"); ok {
 		t.Fatal("second call must throttle")
 	}
-	time.Sleep(50 * time.Millisecond) // > 1/50s
+	time.Sleep(350 * time.Millisecond) // > 250 ms refill window
 	ok, _, err := rl.Allow(ctx, "t", "s")
 	if err != nil {
 		t.Fatalf("Allow after refill: %v", err)
