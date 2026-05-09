@@ -91,11 +91,10 @@ func normalisePrivacyMode(s string) (PrivacyMode, bool) {
 
 // rankOf returns the strictness rank of m. Strictest (NoAI) → 0;
 // least strict (Remote) → len-1; unknown → -1. EffectiveMode treats
-// unknown as "defer to the other input" (and falls back to NoAI when
-// both are unknown), so the only path by which an unknown mode can
-// widen policy is when the other input is *also* unknown — which
-// already collapses to NoAI. Callers outside EffectiveMode must do
-// their own < 0 check before using the result as an index.
+// any unknown input as stricter than the strictest known mode, so an
+// unknown tenant or channel collapses the effective policy to NoAI.
+// Callers outside EffectiveMode must do their own < 0 check before
+// using the result as an index.
 func rankOf(m PrivacyMode) int {
 	for i, om := range orderedModes {
 		if om == m {
@@ -106,24 +105,18 @@ func rankOf(m PrivacyMode) int {
 }
 
 // EffectiveMode returns the stricter of (tenantMode, channelMode).
-// When either input is unknown, the function returns the other
-// (defaulting to NoAI when both are unknown). This guarantees
-// fail-closed semantics: an unknown channel can never widen the
-// tenant's policy.
+// Any unknown input is treated as stricter than every known mode and
+// collapses the result to NoAI — a typo or migration error in either
+// row can never widen policy beyond the most restrictive setting.
 func EffectiveMode(tenantMode, channelMode PrivacyMode) PrivacyMode {
 	tIdx, cIdx := rankOf(tenantMode), rankOf(channelMode)
-	switch {
-	case tIdx < 0 && cIdx < 0:
+	if tIdx < 0 || cIdx < 0 {
 		return PrivacyModeNoAI
-	case tIdx < 0:
-		return channelMode
-	case cIdx < 0:
-		return tenantMode
-	case tIdx <= cIdx:
-		return tenantMode
-	default:
-		return channelMode
 	}
+	if tIdx <= cIdx {
+		return tenantMode
+	}
+	return channelMode
 }
 
 // AllowsAtLeast reports whether `actual` is at least as permissive

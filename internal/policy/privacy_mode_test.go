@@ -27,14 +27,20 @@ func TestEffectiveMode_PicksStricter(t *testing.T) {
 
 func TestEffectiveMode_UnknownFailsClosed(t *testing.T) {
 	t.Parallel()
-	if got := policy.EffectiveMode("", ""); got != policy.PrivacyModeNoAI {
-		t.Fatalf("both empty → expected NoAI, got %q", got)
+	cases := []struct {
+		name            string
+		tenant, channel policy.PrivacyMode
+	}{
+		{"both empty", "", ""},
+		{"unknown tenant + Remote channel", policy.PrivacyMode("rogue"), policy.PrivacyModeRemote},
+		{"unknown tenant + LocalOnly channel", policy.PrivacyMode("rogue"), policy.PrivacyModeLocalOnly},
+		{"NoAI tenant + unknown channel", policy.PrivacyModeNoAI, policy.PrivacyMode("rogue")},
+		{"Remote tenant + unknown channel", policy.PrivacyModeRemote, policy.PrivacyMode("rogue")},
 	}
-	if got := policy.EffectiveMode(policy.PrivacyMode("rogue"), policy.PrivacyModeRemote); got != policy.PrivacyModeRemote {
-		t.Fatalf("unknown tenant + Remote channel → expected Remote (the only valid input wins), got %q", got)
-	}
-	if got := policy.EffectiveMode(policy.PrivacyModeNoAI, policy.PrivacyMode("rogue")); got != policy.PrivacyModeNoAI {
-		t.Fatalf("NoAI tenant + unknown channel → expected NoAI, got %q", got)
+	for _, c := range cases {
+		if got := policy.EffectiveMode(c.tenant, c.channel); got != policy.PrivacyModeNoAI {
+			t.Errorf("%s: EffectiveMode(%q,%q)=%q want %q", c.name, c.tenant, c.channel, got, policy.PrivacyModeNoAI)
+		}
 	}
 }
 
