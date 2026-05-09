@@ -187,17 +187,22 @@ func (w *ForgetWorker) Run(ctx context.Context, job ForgetJob) error {
 	}
 
 	if w.cfg.Audit != nil {
-		_ = w.cfg.Audit.Create(ctx, &audit.AuditLog{
-			TenantID:     job.TenantID,
-			ActorID:      job.Actor,
-			Action:       audit.ActionSourcePurged,
-			ResourceType: "source",
-			ResourceID:   job.SourceID,
-			Metadata: audit.JSONMap{
+		// audit.NewAuditLog mints a ULID and stamps CreatedAt; a bare
+		// struct literal would fail audit.Repository.Create's Validate
+		// step (missing ID), and the swallowed error would silently
+		// drop every source.purged event in production.
+		_ = w.cfg.Audit.Create(ctx, audit.NewAuditLog(
+			job.TenantID,
+			job.Actor,
+			audit.ActionSourcePurged,
+			"source",
+			job.SourceID,
+			audit.JSONMap{
 				"phase":     "completed",
 				"source_id": job.SourceID,
 			},
-		})
+			"",
+		))
 	}
 	return nil
 }

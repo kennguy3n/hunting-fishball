@@ -22,13 +22,23 @@ func init() {
 }
 
 // fakeAudit captures admin lifecycle events so tests can assert
-// audit.Action emission.
+// audit.Action emission. Create runs the same Validate() check the
+// production repository does, so an admin path that builds an
+// AuditLog without an ID — as forget_worker.go did before
+// devin-ai-integration[bot] flagged it — fails the test instead of
+// silently passing through a slice append.
 type fakeAudit struct {
 	mu   sync.Mutex
 	logs []*audit.AuditLog
 }
 
 func (f *fakeAudit) Create(_ context.Context, log *audit.AuditLog) error {
+	if log == nil {
+		return errors.New("fakeAudit: nil log")
+	}
+	if err := log.Validate(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logs = append(f.logs, log)

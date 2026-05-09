@@ -8,11 +8,31 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/glebarez/sqlite"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 
 	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
 )
+
+// sqliteAuditSchema mirrors migrations/001_audit_log.sql in
+// SQLite-compatible types so the forget worker can exercise the
+// real audit.Repository (including its Validate() path) end-to-end.
+const sqliteAuditSchema = `
+CREATE TABLE audit_logs (
+    id            TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL,
+    actor_id      TEXT,
+    action        TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id   TEXT,
+    metadata      TEXT NOT NULL DEFAULT '{}',
+    trace_id      TEXT,
+    created_at    DATETIME NOT NULL,
+    published_at  DATETIME
+);
+`
 
 // recordingSweeper captures (tenant, source) pairs forwarded to it.
 type recordingSweeper struct {
@@ -92,6 +112,25 @@ func TestForgetWorker_RunsAllSweepersAndMarksRemoved(t *testing.T) {
 	}
 	if a := ad.actions(); len(a) != 1 || a[0] != audit.ActionSourcePurged {
 		t.Fatalf("audit actions: %v", a)
+	}
+	if len(ad.logs) != 1 {
+		t.Fatalf("expected one audit log, got %d", len(ad.logs))
+	}
+	emitted := ad.logs[0]
+	// Without a ULID the production audit.Repository would reject the
+	// row in Validate() and the swallowed error would silently drop
+	// every source.purged event.
+	if emitted.ID == "" {
+		t.Fatal("audit log missing ID — would be dropped by Repository.Validate()")
+	}
+	if emitted.TenantID != "tenant-a" || emitted.ResourceID != srcID || emitted.ResourceType != "source" {
+		t.Fatalf("audit log fields: tenant=%q resource=%q resource_type=%q", emitted.TenantID, emitted.ResourceID, emitted.ResourceType)
+	}
+	if emitted.CreatedAt.IsZero() {
+		t.Fatal("audit log CreatedAt is zero")
+	}
+	if err := emitted.Validate(); err != nil {
+		t.Fatalf("audit log fails Validate(): %v", err)
 	}
 }
 
@@ -217,5 +256,69 @@ func TestForgetWorker_ReleaseDoesNotEvictForeignLease(t *testing.T) {
 	}
 	if got != stolen {
 		t.Fatalf("foreign lease overwritten: %q", got)
+	}
+}
+
+// TestForgetWorker_AuditEventPersistsThroughRealRepository wires the
+// worker to a real audit.Repository (against SQLite) so a regression
+// where forget_worker constructs &audit.AuditLog{...} without an ID
+// would surface as a missing source.purged row, not a swallowed error.
+// This is the end-to-end version of the regression that
+// devin-ai-integration[bot] flagged: the in-process fakeAudit covers
+// the unit-test surface, but List() against the real Repository is
+// what proves the production audit trail keeps working.
+func TestForgetWorker_AuditEventPersistsThroughRealRepository(t *testing.T) {
+	t.Parallel()
+
+	auditDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("gorm.Open: %v", err)
+	}
+	if err := auditDB.Exec(sqliteAuditSchema).Error; err != nil {
+		t.Fatalf("apply audit schema: %v", err)
+	}
+	auditRepo := audit.NewRepository(auditDB)
+
+	repo, _ := newSQLiteSourceRepo(t)
+	mr := miniredis.RunT(t)
+	rc := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rc.Close() })
+
+	w, err := admin.NewForgetWorker(admin.ForgetWorkerConfig{
+		Repo:     repo,
+		Sweepers: []admin.ForgetSweeper{&recordingSweeper{}},
+		Lease:    rc,
+		LeaseTTL: time.Minute,
+		Audit:    auditRepo,
+	})
+	if err != nil {
+		t.Fatalf("NewForgetWorker: %v", err)
+	}
+
+	srcID := seedRemoving(t, repo, "tenant-a", "google-drive")
+	if err := w.Run(context.Background(), admin.ForgetJob{
+		TenantID: "tenant-a",
+		SourceID: srcID,
+		Actor:    "actor-1",
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	res, err := auditRepo.List(context.Background(), audit.ListFilter{
+		TenantID: "tenant-a",
+		Actions:  []audit.Action{audit.ActionSourcePurged},
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(res.Items) != 1 {
+		t.Fatalf("expected 1 source.purged row, got %d", len(res.Items))
+	}
+	row := res.Items[0]
+	if row.ID == "" {
+		t.Fatal("persisted audit row has empty ID")
+	}
+	if row.ResourceID != srcID || row.ResourceType != "source" {
+		t.Fatalf("unexpected audit row: %+v", row)
 	}
 }
