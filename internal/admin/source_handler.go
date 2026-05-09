@@ -169,8 +169,7 @@ func (h *Handler) patch(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	patch := UpdatePatch{Status: req.Status, Scopes: req.Scopes}
-	updated, err := h.cfg.Repo.Update(c.Request.Context(), tenantID, id, patch)
+	updated, err := h.cfg.Repo.Update(c.Request.Context(), tenantID, id, UpdatePatch(req))
 	if errors.Is(err, ErrSourceNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
 		return
