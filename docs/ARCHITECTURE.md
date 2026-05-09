@@ -470,13 +470,25 @@ hunting-fishball/
 │   │                          # (handler / repo / model), per-source
 │   │                          # Redis token-bucket rate limiter,
 │   │                          # source-health tracker, forget-on-
-│   │                          # removal worker
+│   │                          # removal worker. Phase 4 added
+│   │                          # simulator_handler.go which mounts
+│   │                          # /v1/admin/policy/{drafts,simulate,
+│   │                          # conflicts}
 │   ├── policy/                # Phase 4: privacy modes
 │   │                          # (privacy_mode.go), allow / deny ACLs
 │   │                          # (acl.go), recipient policy
 │   │                          # (recipient.go) — wired into
 │   │                          # internal/retrieval via
-│   │                          # policy_snapshot.go
+│   │                          # policy_snapshot.go. Phase 4
+│   │                          # simulator: snapshot.go (port +
+│   │                          # PolicySnapshot.Clone), simulator.go
+│   │                          # (what-if), simulator_diff.go
+│   │                          # (data-flow diff), simulator_conflict.go
+│   │                          # (conflict detection), draft.go +
+│   │                          # promotion.go (audited promotion FSM),
+│   │                          # live_store.go (transactional GORM
+│   │                          # writes to migrations/004_policy.sql
+│   │                          # tables)
 │   ├── pipeline/              # 4-stage pipeline (Phase 1):
 │   │                          # consumer / coordinator / fetch / parse
 │   │                          # / embed / store. Phase 2 added
@@ -489,6 +501,8 @@ hunting-fishball/
 │   │                          # merger.go, reranker.go,
 │   │                          # storage_adapter.go) + Phase 4 policy
 │   │                          # snapshot resolver (policy_snapshot.go)
+│   │                          # + Phase 4 privacy strip enrichment
+│   │                          # (privacy_strip.go)
 │   └── storage/               # Qdrant + Postgres storage clients
 │                              # (Phase 1) + BM25 (tantivy.go),
 │                              # FalkorDB (falkordb.go), Redis
@@ -509,9 +523,11 @@ hunting-fishball/
 │   ├── 001_audit_log.sql      # audit_logs table + indexes
 │   ├── 002_sources.sql        # Phase 2 sources table + indexes
 │   ├── 003_source_health.sql  # Phase 2 source_health table
-│   └── 004_policy.sql         # Phase 4 tenant_policies +
-│                              # channel_policies + policy_acl_rules
-│                              # + recipient_policies tables
+│   ├── 004_policy.sql         # Phase 4 tenant_policies +
+│   │                          # channel_policies + policy_acl_rules
+│   │                          # + recipient_policies tables
+│   └── 005_policy_drafts.sql  # Phase 4 policy_drafts table
+│                              # (JSONB payload + status FSM)
 ├── tests/
 │   ├── e2e/                   # docker-compose smoke test
 │   │                          # (build tag: //go:build e2e)
@@ -640,3 +656,77 @@ hunting-fishball/
   the handler resolves the snapshot before fan-out (failing
   closed on error) and applies ACL + recipient gates after the
   existing `PolicyFilter` runs.
+
+### Tech choices added in Phase 4 (simulator)
+
+- **Snapshot package home:** `internal/policy/snapshot.go` is the
+  canonical home of `PolicySnapshot` and the `PolicyResolver`
+  port; `internal/retrieval/policy_snapshot.go` keeps a type
+  alias so the retrieval handler does not have to import the
+  policy package's transitive deps. The snapshot exposes
+  `Clone()` so the simulator can run draft policy through the
+  retrieval pipeline without aliasing the live cache.
+- **What-if simulator:** `internal/policy/simulator.go` runs
+  retrieval twice — once with the live `PolicySnapshot` and once
+  with the draft — through the same `RetrieverFunc`, then diffs
+  the two hit lists into `Added` / `Removed` / `Changed`
+  (privacy-label flips). The `Retriever` is a narrow port so
+  tests can plug in a fake corpus and the production wiring can
+  later forward to the real retrieval handler.
+- **Data-flow diff:** `internal/policy/simulator_diff.go`
+  aggregates hits by `privacy_label` to compute the per-tier
+  count delta and a human-readable summary
+  ("draft routes 12% more matches through 'remote'"). The
+  summary's tie-breaker prefers tiers where `Live > 0` so
+  brand-new buckets do not collapse the percentage to a raw
+  count and hide the policy intent.
+- **Conflict detection:** `internal/policy/simulator_conflict.go`
+  surfaces three categories before promotion:
+  `privacy_mode_override` (channel weaker than tenant),
+  `acl_overlap` (deny+allow on the same path glob), and
+  `recipient_contradiction` (channel allows a skill the tenant
+  denies). Conflicts have `error` or `warning` severity and a
+  deterministic order so admin-portal renders are stable across
+  reads.
+- **Draft policy store:** `internal/policy/draft.go` (table
+  `policy_drafts`, migration
+  `migrations/005_policy_drafts.sql`) is a per-tenant repository
+  with a `draft → promoted | rejected` status FSM. Drafts are
+  isolated from the live `PolicyResolver` — the resolver never
+  reads from the drafts table — so an in-progress edit cannot
+  leak into retrieval. `Get` / `MarkPromoted` / `MarkRejected`
+  scope by `tenant_id` and return `ErrDraftNotFound` on a tenant
+  mismatch, denying cross-tenant access without leaking the row's
+  existence.
+- **Audited promotion:** `internal/policy/promotion.go` is the
+  promotion FSM. `PromoteDraft` runs conflict detection
+  (blocks on any error-severity conflict), applies the snapshot
+  to the live tables via the `LiveStore` port, marks the draft
+  promoted, and emits a `policy.promoted` audit event — all in
+  the same `*gorm.DB` transaction so partial failure leaves the
+  draft in `draft` and the live tables untouched. `RejectDraft`
+  is the rejection counterpart.
+- **GORM live store:** `internal/policy/live_store.go` is the
+  production `LiveStore`. It writes the live policy tables in
+  `migrations/004_policy.sql` (`tenant_policies`,
+  `channel_policies`, `policy_acl_rules`, `recipient_policies`)
+  inside the supplied transaction. Wipe-and-replace semantics on
+  the rule tables make a draft the desired-state representation:
+  promote = "make live look exactly like this draft", with no
+  diff-and-merge ambiguity.
+- **Admin HTTP surface:** `internal/admin/simulator_handler.go`
+  mounts the policy endpoints under `/v1/admin/policy/`:
+  `POST/GET /drafts`, `GET /drafts/:id`,
+  `POST /drafts/:id/promote|reject`, `POST /simulate`,
+  `POST /simulate/diff`, `POST /conflicts`. The handler is
+  written against narrow ports (`DraftStore`, `PromotionService`,
+  `SimulatorEngine`) so tests can run with in-memory fakes.
+- **Privacy strip enrichment:** `internal/retrieval/privacy_strip.go`
+  builds a structured `PrivacyStrip` (`mode`, `processed_where`,
+  `model_tier`, `data_sources`, `policy_applied`) from the
+  resolved `PolicySnapshot` and the chunk's `privacy_label`. The
+  retrieval handler attaches the strip to every `RetrieveHit`
+  on both the fresh and cached paths; the strip is rebuilt at
+  serve time from the live snapshot rather than cached, so a
+  policy change between cache write and read does not surface a
+  stale disclosure.

@@ -7,33 +7,18 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
 
-// PolicySnapshot captures every policy decision the retrieval
-// handler needs for one (tenant, channel) at request time. The
-// resolver loads it from Postgres (or an in-process cache); the
-// handler treats it as immutable.
-type PolicySnapshot struct {
-	// EffectiveMode is the strict-of (tenantMode, channelMode). The
-	// retrieval handler passes its string form to the existing
-	// privacy-label PolicyFilter.
-	EffectiveMode policy.PrivacyMode
+// PolicySnapshot is the per-(tenant, channel) policy carrier the
+// retrieval handler reads before fan-out. The canonical type lives
+// in internal/policy so the simulator (Phase 4) can build, diff,
+// and promote snapshots without importing retrieval. Retrieval
+// re-exports the type via this alias to keep existing call sites
+// compiling unchanged.
+type PolicySnapshot = policy.PolicySnapshot
 
-	// ACL is the per-(tenant, channel) allow/deny list. nil → no
-	// ACL installed (default-allow).
-	ACL *policy.AllowDenyList
-
-	// Recipient is the per-(tenant, channel) recipient policy. nil
-	// → default-allow for every skill.
-	Recipient *policy.RecipientPolicy
-}
-
-// PolicyResolver resolves a PolicySnapshot for a (tenant, channel)
-// pair. Implementations live in cmd/api/main.go (Postgres-backed) or
-// in tests (in-memory). When the resolver returns an error, the
-// handler MUST fail closed — return zero hits with PrivacyMode set
-// to NoAI — rather than silently widening the policy.
-type PolicyResolver interface {
-	Resolve(ctx context.Context, tenantID, channelID string) (PolicySnapshot, error)
-}
+// PolicyResolver mirrors policy.PolicyResolver. The alias lets the
+// retrieval handler keep its existing port name while sharing the
+// underlying interface with the policy simulator.
+type PolicyResolver = policy.PolicyResolver
 
 // applyPolicySnapshot filters allowed against the snapshot's ACL +
 // recipient policy. Returns (kept, blockedByACL, blockedByRecipient).

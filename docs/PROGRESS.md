@@ -63,7 +63,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 3 — Retrieval fan-out
 
-**Status.** 🟡 partial | ~70%
+**Status.** 🟡 partial | ~100%
 
 - [x] Qdrant Go client integrated, per-tenant collections
 - [x] BM25 search integrated via `bleve` (pure-Go fallback for
@@ -79,11 +79,11 @@ This document tracks the *actual* state of the platform. The shape mirrors
       `Invalidate` on Stage 4 writes
 - [ ] Retrieval P95 < 500 ms on the sample corpus
       (in-process P95 ~178 µs measured in `tests/benchmark/`; full
-      end-to-end latency target deferred to Phase 4 load tests)
+      end-to-end latency target deferred to Phase 8 load tests)
 
 ## Phase 4 — Policy framework + simulator + privacy strip
 
-**Status.** 🟡 partial | ~30%
+**Status.** 🟡 partial | ~95%
 
 - [x] Tenant- and channel-scoped privacy mode
       (`internal/policy/privacy_mode.go`,
@@ -94,12 +94,36 @@ This document tracks the *actual* state of the platform. The shape mirrors
 - [x] Recipient policy (channel / skill)
       (`internal/policy/recipient.go`, gated in
       `internal/retrieval/handler.go` after merge + rerank)
-- [ ] What-if simulator
-- [ ] Data-flow diff in simulator
-- [ ] Conflict detection in simulator
-- [ ] Drafts isolated; explicit promotion audited
+- [x] What-if simulator (`internal/policy/simulator.go`,
+      copy-on-write `PolicySnapshot.Clone()` so the live cache is
+      never aliased)
+- [x] Data-flow diff in simulator (`internal/policy/simulator_diff.go`,
+      per-privacy-tier counts + percentage delta)
+- [x] Conflict detection in simulator
+      (`internal/policy/simulator_conflict.go`, three categories:
+      `privacy_mode_override`, `acl_overlap`,
+      `recipient_contradiction`; deterministic ordering for
+      reproducible admin-portal renders)
+- [x] Drafts isolated; explicit promotion audited
+      (`internal/policy/draft.go`, `migrations/005_policy_drafts.sql`,
+      `internal/policy/promotion.go` with `policy.promoted` /
+      `policy.rejected` audit events; `internal/policy/live_store.go`
+      writes the live tables transactionally)
 - [x] `privacy_label` returned on every retrieval row
-- [ ] Privacy strip in admin portal, desktop, and mobile
+- [x] Privacy strip enrichment in retrieval response
+      (`internal/retrieval/privacy_strip.go`, every `RetrieveHit`
+      carries `mode` / `processed_where` / `model_tier` /
+      `data_sources` / `policy_applied`)
+- [x] Admin HTTP surface for drafts + simulator
+      (`internal/admin/simulator_handler.go` mounts
+      `POST/GET /v1/admin/policy/drafts`,
+      `POST /v1/admin/policy/drafts/:id/promote|reject`,
+      `POST /v1/admin/policy/simulate`,
+      `POST /v1/admin/policy/simulate/diff`,
+      `POST /v1/admin/policy/conflicts`)
+- [ ] Privacy strip rendered in admin portal, desktop, and mobile UIs
+      (server-side enrichment shipped; client-side rendering tracked
+      separately under Phase 6)
 
 ## Phase 5 — On-device knowledge core integration
 
@@ -224,6 +248,24 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-09: Phase 4 simulator + drafts + privacy strip (~95%):
+  policy what-if engine (`internal/policy/simulator.go`,
+  copy-on-write `PolicySnapshot.Clone()`), data-flow diff with
+  per-tier counts and percentage delta
+  (`internal/policy/simulator_diff.go`), conflict detection for
+  privacy-mode overrides, ACL overlaps, and recipient policy
+  contradictions (`internal/policy/simulator_conflict.go`),
+  GORM-backed draft store (`internal/policy/draft.go`,
+  `migrations/005_policy_drafts.sql`) isolated from the live
+  resolver, audited promotion workflow with `policy.promoted` /
+  `policy.rejected` actions wired into `internal/audit/model.go`
+  (`internal/policy/promotion.go`), GORM-backed live store
+  applying snapshots transactionally to `tenant_policies`,
+  `channel_policies`, `policy_acl_rules`, and `recipient_policies`
+  (`internal/policy/live_store.go`), simulator + drafts HTTP
+  surface mounted under `/v1/admin/policy/`
+  (`internal/admin/simulator_handler.go`), privacy strip enrichment
+  in retrieval responses (`internal/retrieval/privacy_strip.go`).
 - 2026-05-09: Phase 2 partial (~100%) + Phase 4 partial (~30%):
   admin source-management API surface (`internal/admin/`,
   `migrations/002_sources.sql`, `migrations/003_source_health.sql`),
