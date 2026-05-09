@@ -254,7 +254,15 @@ func TestCoordinator_DeleteEvent(t *testing.T) {
 
 	store := &fakeStore{}
 	cfg := newFastConfig(
+		// Mirror the real Fetcher: reject envelopes that have no
+		// FetchURL/InlineContent. Delete/purge events carry neither, so
+		// any path that still calls Fetch for them ends in the DLQ —
+		// which surfaces the regression caught by Devin Review #3212906604.
 		fakeFetch{fn: func(_ context.Context, evt IngestEvent) (*Document, error) {
+			if evt.FetchURL == "" && len(evt.InlineContent) == 0 {
+				return nil, ErrPoisonMessage
+			}
+
 			return &Document{TenantID: evt.TenantID, DocumentID: evt.DocumentID}, nil
 		}},
 		fakeParse{fn: func(_ context.Context, _ *Document) ([]Block, error) { return nil, errors.New("must not parse") }},
@@ -277,6 +285,9 @@ func TestCoordinator_DeleteEvent(t *testing.T) {
 	}
 	if len(store.deleted) != 1 || store.deleted[0] != "d" {
 		t.Fatalf("deleted: %+v", store.deleted)
+	}
+	if got := c.Metrics.DLQ.Load(); got != 0 {
+		t.Fatalf("delete event reached DLQ (count=%d) — Stage 1 must bypass Fetch", got)
 	}
 }
 

@@ -171,6 +171,24 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				if !ok {
 					return nil
 				}
+				// Delete and purge events have no bytes to fetch — the
+				// production Fetcher would reject them as poison. Build
+				// a minimal Document and forward straight to Stage 2,
+				// which already routes those Kinds to Stage 4.
+				if se.evt.Kind == EventDocumentDeleted || se.evt.Kind == EventPurge {
+					doc := &Document{
+						TenantID:   se.evt.TenantID,
+						SourceID:   se.evt.SourceID,
+						DocumentID: se.evt.DocumentID,
+					}
+					select {
+					case <-gctx.Done():
+						return nil
+					case c.stage2 <- stagedItem{evt: se.evt, doc: doc}:
+					}
+
+					continue
+				}
 				doc, err := c.runWithRetry(gctx, "fetch", func(rc context.Context) (any, error) {
 					return c.cfg.Fetch.FetchEvent(rc, se.evt)
 				})

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
@@ -170,6 +171,52 @@ func TestSlack_ListDocuments(t *testing.T) {
 	}
 	if len(ids) != 2 {
 		t.Fatalf("ids: %+v", ids)
+	}
+}
+
+// TestSlack_ListDocuments_LimitRespectsCaller verifies that the
+// connector forwards the caller's PageSize to Slack as `limit`
+// verbatim instead of clamping it upward. Regression coverage for the
+// original maxInt(opts.PageSize, 100) bug, which would silently turn a
+// caller-supplied 10 into 100.
+func TestSlack_ListDocuments_LimitRespectsCaller(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		size int
+		want string
+	}{
+		{"caller below default", 10, "10"},
+		{"caller above default", 250, "250"},
+		{"zero falls back to default", 0, "100"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got atomic.Value
+			mux := http.NewServeMux()
+			mux.HandleFunc("/auth.test", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"ok":true,"team_id":"T1"}`))
+			})
+			mux.HandleFunc("/conversations.history", func(w http.ResponseWriter, r *http.Request) {
+				got.Store(r.URL.Query().Get("limit"))
+				_, _ = w.Write([]byte(`{"ok":true,"messages":[],"has_more":false}`))
+			})
+			srv := newSlackServer(t, mux)
+			s := newSlackConnector(srv)
+			conn, _ := s.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+			it, err := s.ListDocuments(context.Background(), conn, connector.Namespace{ID: "C1"}, connector.ListOpts{PageSize: tc.size})
+			if err != nil {
+				t.Fatalf("ListDocuments: %v", err)
+			}
+			defer func() { _ = it.Close() }()
+			for it.Next(context.Background()) {
+			}
+			if g, _ := got.Load().(string); g != tc.want {
+				t.Fatalf("limit: got %q want %q", g, tc.want)
+			}
+		})
 	}
 }
 

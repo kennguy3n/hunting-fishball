@@ -162,6 +162,50 @@ func TestGoogleDrive_ListDocuments_Pagination(t *testing.T) {
 	}
 }
 
+// TestGoogleDrive_ListDocuments_PageSizeRespectsCaller verifies that
+// the connector forwards the caller's PageSize to Drive verbatim
+// instead of clamping it upward. Regression coverage for the original
+// maxInt(opts.PageSize, 100) bug, which would silently turn a
+// caller-supplied 10 into 100.
+func TestGoogleDrive_ListDocuments_PageSizeRespectsCaller(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		size int
+		want string
+	}{
+		{"caller below default", 10, "10"},
+		{"caller above default", 250, "250"},
+		{"zero falls back to default", 0, "100"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got atomic.Value
+			mux := http.NewServeMux()
+			mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
+			mux.HandleFunc("/files", func(w http.ResponseWriter, r *http.Request) {
+				got.Store(r.URL.Query().Get("pageSize"))
+				_, _ = w.Write([]byte(`{"files":[]}`))
+			})
+			srv := newDriveServer(t, mux)
+			g := newDriveConnector(srv)
+			conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+			it, err := g.ListDocuments(context.Background(), conn, connector.Namespace{ID: "my-drive"}, connector.ListOpts{PageSize: tc.size})
+			if err != nil {
+				t.Fatalf("ListDocuments: %v", err)
+			}
+			defer func() { _ = it.Close() }()
+			for it.Next(context.Background()) {
+			}
+			if g, _ := got.Load().(string); g != tc.want {
+				t.Fatalf("pageSize: got %q want %q", g, tc.want)
+			}
+		})
+	}
+}
+
 func TestGoogleDrive_FetchDocument(t *testing.T) {
 	t.Parallel()
 

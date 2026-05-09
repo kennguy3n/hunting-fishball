@@ -239,7 +239,7 @@ func (it *docIterator) Close() error { return nil }
 func (it *docIterator) fetchPage(ctx context.Context) bool {
 	q := url.Values{}
 	q.Set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,size,version)")
-	q.Set("pageSize", strconv.Itoa(maxInt(it.opts.PageSize, 100)))
+	q.Set("pageSize", strconv.Itoa(pageOr(it.opts.PageSize, 100)))
 	q.Set("orderBy", "modifiedTime desc")
 	if it.cursor != "" {
 		q.Set("pageToken", it.cursor)
@@ -506,12 +506,17 @@ func (g *Connector) do(ctx context.Context, conn *connection, method, path strin
 	return resp, nil
 }
 
-func maxInt(a, b int) int {
-	if a > b {
-		return a
+// pageOr returns v when the caller supplied a positive page size and
+// otherwise falls back to the connector default. ListOpts.PageSize
+// documents "zero means connector default", so this must NOT clamp
+// caller-supplied values upward — that would silently override the
+// caller's preference.
+func pageOr(v, def int) int {
+	if v > 0 {
+		return v
 	}
 
-	return b
+	return def
 }
 
 // jsonReader is a small helper for tests that need to construct a body
