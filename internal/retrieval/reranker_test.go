@@ -44,9 +44,11 @@ func TestLinearReranker_BlendsBM25Score(t *testing.T) {
 		FreshnessWeight: 0,
 	})
 	now := time.Now()
+	// Score is the merger's RRF output. OriginalScore preserves the
+	// source-specific BM25 score the reranker should blend in.
 	matches := []*retrieval.Match{
-		{ID: "a", Source: retrieval.SourceBM25, Sources: []string{retrieval.SourceBM25}, Score: 10, IngestedAt: now},
-		{ID: "b", Source: retrieval.SourceVector, Sources: []string{retrieval.SourceVector}, Score: 1, IngestedAt: now},
+		{ID: "a", Source: retrieval.SourceBM25, Sources: []string{retrieval.SourceBM25}, Score: 0.05, OriginalScore: 10, IngestedAt: now},
+		{ID: "b", Source: retrieval.SourceVector, Sources: []string{retrieval.SourceVector}, Score: 0.05, IngestedAt: now},
 	}
 	out, err := rer.Rerank(context.Background(), "q", matches)
 	if err != nil {
@@ -55,6 +57,44 @@ func TestLinearReranker_BlendsBM25Score(t *testing.T) {
 	if out[0].ID != "a" {
 		t.Fatalf("BM25 hit should top: %v", []string{out[0].ID, out[1].ID})
 	}
+}
+
+// TestLinearReranker_BM25WeightUsesOriginalScore exercises the
+// regression where the reranker read Match.Score (overwritten by the
+// merger with the RRF sum) instead of Match.OriginalScore. After the
+// fix, a BM25-sourced match with a strong OriginalScore but a weaker
+// RRF rank can outrank a match that benefits only from RRF.
+func TestLinearReranker_BM25WeightUsesOriginalScore(t *testing.T) {
+	t.Parallel()
+
+	rer := retrieval.NewLinearReranker(retrieval.LinearRerankerConfig{
+		FusionWeight:    0.6,
+		BM25Weight:      0.3,
+		FreshnessWeight: 0,
+	})
+	now := time.Now()
+	// `lex` has a slightly weaker RRF score (the merger output) but a
+	// strong BM25 OriginalScore — the reranker must lift it above
+	// `vec`, whose RRF lead is small enough that BM25Weight overcomes
+	// it. This is the exact scenario the bug masked: pre-fix, the
+	// reranker would have read m.Score (the RRF value) twice and
+	// `vec` would have stayed on top.
+	matches := []*retrieval.Match{
+		{ID: "vec", Source: retrieval.SourceVector, Sources: []string{retrieval.SourceVector}, Score: 0.04, IngestedAt: now},
+		{ID: "lex", Source: retrieval.SourceBM25, Sources: []string{retrieval.SourceBM25}, Score: 0.03, OriginalScore: 8, IngestedAt: now},
+	}
+	out, err := rer.Rerank(context.Background(), "q", matches)
+	if err != nil {
+		t.Fatalf("Rerank: %v", err)
+	}
+	if out[0].ID != "lex" {
+		t.Fatalf("high-BM25 match should outrank vector-only match; got %v", []string{out[0].ID, out[1].ID})
+	}
+
+	// Sanity check: if OriginalScore were ignored (i.e., the bug were
+	// still present), `vec` would win, since FusionWeight*0.04 >
+	// FusionWeight*0.03. The test failing without the fix is a
+	// stronger signal than any explicit numeric assertion.
 }
 
 func TestLinearReranker_DefaultsAreSane(t *testing.T) {

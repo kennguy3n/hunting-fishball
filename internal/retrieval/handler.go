@@ -14,6 +14,7 @@ package retrieval
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -254,7 +255,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 	}
 
 	channelID := firstNonEmpty(req.Channels)
-	scopeHash := scopeHashFor(req)
+	scopeHash := scopeHashFor(req, topK)
 
 	// Cache short-circuit. A cache hit serves the response without
 	// any fan-out (ARCHITECTURE.md §4.4). On error the handler
@@ -263,7 +264,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 	if h.cfg.Cache != nil {
 		cached, cerr := h.cfg.Cache.Get(c.Request.Context(), tenantID, channelID, vec, scopeHash)
 		if cerr == nil && cached != nil {
-			c.JSON(http.StatusOK, responseFromCache(cached, privacyMode))
+			c.JSON(http.StatusOK, responseFromCache(cached, privacyMode, topK))
 
 			return
 		}
@@ -500,15 +501,23 @@ func hitFromMatch(m *Match) RetrieveHit {
 
 // responseFromCache projects a cached entry into the public response
 // shape, stamping policy.cache_hit so clients can render the badge.
-func responseFromCache(c *storage.CachedResult, privacyMode string) RetrieveResponse {
+// The result is sliced to topK as a defense-in-depth — scopeHashFor
+// already keys the cache on topK, but a stale entry written by an
+// older binary (or a future schema bump) must never violate the API
+// contract.
+func responseFromCache(c *storage.CachedResult, privacyMode string, topK int) RetrieveResponse {
+	hits := c.Hits
+	if topK > 0 && len(hits) > topK {
+		hits = hits[:topK]
+	}
 	out := RetrieveResponse{
-		Hits: make([]RetrieveHit, 0, len(c.Hits)),
+		Hits: make([]RetrieveHit, 0, len(hits)),
 		Policy: RetrievePolicy{
 			CacheHit:    true,
 			PrivacyMode: privacyMode,
 		},
 	}
-	for _, h := range c.Hits {
+	for _, h := range hits {
 		out.Hits = append(out.Hits, RetrieveHit{
 			ID:           h.ID,
 			Score:        h.Score,
@@ -580,7 +589,13 @@ func appliedSources(streams [][]*Match) []string {
 
 // scopeHashFor produces a stable hash over the request fields that
 // affect the retrieval scope. Same hash → same cache key.
-func scopeHashFor(req RetrieveRequest) string {
+//
+// topK is part of the scope: a topK=5 request must NOT serve from a
+// topK=100 entry (would return more rows than asked) and a topK=100
+// request must NOT serve from a topK=5 entry (would return fewer
+// rows than asked). Bump this hash whenever request fields that
+// affect the result set are added.
+func scopeHashFor(req RetrieveRequest, topK int) string {
 	h := sha256.New()
 	for _, v := range req.Sources {
 		_, _ = h.Write([]byte(v))
@@ -598,6 +613,10 @@ func scopeHashFor(req RetrieveRequest) string {
 	}
 	_, _ = h.Write([]byte("|privacy|"))
 	_, _ = h.Write([]byte(req.PrivacyMode))
+	_, _ = h.Write([]byte("|topk|"))
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(topK))
+	_, _ = h.Write(buf[:])
 
 	return hex.EncodeToString(h.Sum(nil))
 }

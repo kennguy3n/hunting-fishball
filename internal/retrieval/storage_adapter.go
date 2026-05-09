@@ -26,13 +26,14 @@ func (a *TantivyAdapter) Search(ctx context.Context, tenantID, q string, k int) 
 	out := make([]*Match, 0, len(hits))
 	for i, h := range hits {
 		out = append(out, &Match{
-			ID:         h.ID,
-			Source:     SourceBM25,
-			Score:      h.Score,
-			Rank:       i + 1,
-			DocumentID: h.DocumentID,
-			Title:      h.Title,
-			Text:       h.Text,
+			ID:            h.ID,
+			Source:        SourceBM25,
+			Score:         h.Score,
+			OriginalScore: h.Score,
+			Rank:          i + 1,
+			DocumentID:    h.DocumentID,
+			Title:         h.Title,
+			Text:          h.Text,
 		})
 	}
 

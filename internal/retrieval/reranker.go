@@ -78,10 +78,10 @@ func NewLinearReranker(cfg LinearRerankerConfig) *LinearReranker {
 // Rerank re-scores matches in-place and returns them descending.
 //
 // The reranker treats each Match's Score (set by the merger to the
-// RRF score) as the base ranking signal; if any contributing source
-// supplied a BM25 score on the Match (the handler stamps it before
-// merging), the reranker blends it in. Freshness is a soft bonus
-// that decays exponentially.
+// RRF score) as the base ranking signal; the BM25 stream's
+// OriginalScore is blended in via BM25Weight so a strong lexical
+// match is rewarded beyond its rank contribution. Freshness is a
+// soft bonus that decays exponentially.
 func (r *LinearReranker) Rerank(ctx context.Context, _ string, matches []*Match) ([]*Match, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -91,9 +91,12 @@ func (r *LinearReranker) Rerank(ctx context.Context, _ string, matches []*Match)
 		if m == nil {
 			continue
 		}
+		// Read the original BM25 score (preserved by the merger via
+		// Match.OriginalScore). Falling back to Score here would
+		// double-count RRF since the merger overwrites Score.
 		bm25 := float32(0)
 		if hasSource(m, SourceBM25) {
-			bm25 = m.Score
+			bm25 = m.OriginalScore
 		}
 		freshness := freshnessTerm(m.IngestedAt, now, r.cfg.FreshnessHalfLifeHours)
 		// We blend on a copy of the RRF score so re-running the

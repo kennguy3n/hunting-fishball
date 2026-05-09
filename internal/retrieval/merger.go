@@ -48,7 +48,22 @@ type Match struct {
 	// Score is the source-specific score (cosine similarity, BM25
 	// score, etc). Used by the reranker; the merger uses rank, not
 	// score.
+	//
+	// NOTE: the merger zeroes out Score and replaces it with the
+	// fused RRF score. If you need the source's original score
+	// after the merger has run, read OriginalScore.
 	Score float32
+
+	// OriginalScore preserves the source-specific score from the
+	// contributing backend before the merger overwrites Score with
+	// the RRF sum. The reranker reads this when blending the BM25
+	// signal so BM25Weight scales the actual BM25 relevance score
+	// rather than the merger's fused score.
+	//
+	// Currently populated for SourceBM25 only. If a future backend
+	// (e.g., a cross-encoder rescorer) needs its original score
+	// preserved, set OriginalScore in its adapter.
+	OriginalScore float32
 
 	// Rank is the 1-based rank of the match within its source list.
 	// The merger uses Rank when supplied; if Rank is 0, the merger
@@ -143,6 +158,12 @@ func (m *Merger) Merge(streams ...[]*Match) []*Match {
 			}
 			existing.Score += contribution
 			existing.Sources = appendUnique(existing.Sources, hit.Source)
+			// Preserve the contributing backend's original score so
+			// the reranker can blend it back in. Today only BM25
+			// uses this — see Match.OriginalScore.
+			if hit.OriginalScore != 0 && existing.OriginalScore == 0 {
+				existing.OriginalScore = hit.OriginalScore
+			}
 			// Keep the richest provenance: the first non-empty value
 			// from any stream wins.
 			fillMissing(existing, hit)

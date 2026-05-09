@@ -77,21 +77,29 @@ type fakeCache struct {
 	getErr   error
 	setErr   error
 
-	getCalls int32
-	setCalls int32
-	lastSet  *storage.CachedResult
+	getCalls    int32
+	setCalls    int32
+	lastSet     *storage.CachedResult
+	lastSetHash string
+	getHashes   []string
+	setHashes   []string
 }
 
-func (f *fakeCache) Get(_ context.Context, _ string, _ string, _ []float32, _ string) (*storage.CachedResult, error) {
+func (f *fakeCache) Get(_ context.Context, _ string, _ string, _ []float32, scopeHash string) (*storage.CachedResult, error) {
 	atomic.AddInt32(&f.getCalls, 1)
+	f.mu.Lock()
+	f.getHashes = append(f.getHashes, scopeHash)
+	f.mu.Unlock()
 
 	return f.getValue, f.getErr
 }
 
-func (f *fakeCache) Set(_ context.Context, _ string, _ string, _ []float32, _ string, r *storage.CachedResult, _ time.Duration) error {
+func (f *fakeCache) Set(_ context.Context, _ string, _ string, _ []float32, scopeHash string, r *storage.CachedResult, _ time.Duration) error {
 	atomic.AddInt32(&f.setCalls, 1)
 	f.mu.Lock()
 	f.lastSet = r
+	f.lastSetHash = scopeHash
+	f.setHashes = append(f.setHashes, scopeHash)
 	f.mu.Unlock()
 
 	return f.setErr
@@ -339,6 +347,85 @@ func TestFanout_CacheGetError_FallsBackToFanout(t *testing.T) {
 	}
 	if len(got.Hits) != 1 || got.Hits[0].ID != "chunk-1" {
 		t.Fatalf("hits: %v", topNIDs(got.Hits))
+	}
+}
+
+// TestFanout_CacheKey_DiffersByTopK exercises the regression where
+// scopeHashFor omitted topK, letting a topK=5 request poison or be
+// served by a topK=100 cache entry. Two requests with identical
+// inputs except topK must produce distinct scope hashes.
+func TestFanout_CacheKey_DiffersByTopK(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeCache{}
+	vs := &fakeVectorStore{
+		hits: []storage.QdrantHit{{ID: "chunk-1", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}}},
+	}
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore: vs,
+		Embedder:    &fakeEmbedder{vec: []float32{1}},
+		Cache:       cache,
+	})
+	r := newRouter(t, h, "tenant-a")
+
+	w1 := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "secret"})
+	if w1.Code != http.StatusOK {
+		t.Fatalf("topK=5 status: %d", w1.Code)
+	}
+	w2 := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 100, PrivacyMode: "secret"})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("topK=100 status: %d", w2.Code)
+	}
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if len(cache.setHashes) != 2 {
+		t.Fatalf("setHashes: %v", cache.setHashes)
+	}
+	if cache.setHashes[0] == cache.setHashes[1] {
+		t.Fatalf("scope hash must differ by topK; both = %q", cache.setHashes[0])
+	}
+	if len(cache.getHashes) != 2 || cache.getHashes[0] == cache.getHashes[1] {
+		t.Fatalf("Get scope hash must differ by topK: %v", cache.getHashes)
+	}
+}
+
+// TestFanout_CacheHit_RespectsTopK exercises the defensive slice in
+// responseFromCache: even if a stale entry from an older binary slips
+// through with more hits than topK, we never return more than topK.
+func TestFanout_CacheHit_RespectsTopK(t *testing.T) {
+	t.Parallel()
+
+	cached := &storage.CachedResult{
+		Hits: []storage.CachedHit{
+			{ID: "c-1", Score: 0.9, TenantID: "tenant-a"},
+			{ID: "c-2", Score: 0.8, TenantID: "tenant-a"},
+			{ID: "c-3", Score: 0.7, TenantID: "tenant-a"},
+			{ID: "c-4", Score: 0.6, TenantID: "tenant-a"},
+			{ID: "c-5", Score: 0.5, TenantID: "tenant-a"},
+		},
+	}
+	cache := &fakeCache{getValue: cached}
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore: &fakeVectorStore{},
+		Embedder:    &fakeEmbedder{vec: []float32{1}},
+		Cache:       cache,
+	})
+	r := newRouter(t, h, "tenant-a")
+	w := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 2, PrivacyMode: "secret"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d", w.Code)
+	}
+	var got retrieval.RetrieveResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if !got.Policy.CacheHit {
+		t.Fatalf("expected cache hit")
+	}
+	if len(got.Hits) != 2 {
+		t.Fatalf("topK=2 must trim cached hits, got %d: %v", len(got.Hits), topNIDs(got.Hits))
+	}
+	if got.Hits[0].ID != "c-1" || got.Hits[1].ID != "c-2" {
+		t.Fatalf("trim should preserve order: %v", topNIDs(got.Hits))
 	}
 }
 

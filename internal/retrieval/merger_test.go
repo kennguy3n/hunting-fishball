@@ -142,6 +142,33 @@ func TestMerger_PreservesProvenanceFromAnyStream(t *testing.T) {
 	}
 }
 
+// TestMerger_PreservesBM25OriginalScore guards the contract relied on
+// by the reranker: even though Merge zeroes Score and rewrites it with
+// the RRF sum, the BM25 stream's source-specific score is preserved
+// on Match.OriginalScore so BM25Weight can blend in the actual
+// lexical signal rather than the fused score.
+func TestMerger_PreservesBM25OriginalScore(t *testing.T) {
+	t.Parallel()
+
+	merger := retrieval.NewMerger(retrieval.MergerConfig{K: 60})
+	merged := merger.Merge(
+		[]*retrieval.Match{{ID: "a", Source: retrieval.SourceVector, Score: 0.95}},
+		[]*retrieval.Match{{ID: "a", Source: retrieval.SourceBM25, Score: 7.5, OriginalScore: 7.5}},
+	)
+	if len(merged) != 1 {
+		t.Fatalf("merged: %d", len(merged))
+	}
+	if math.Abs(float64(merged[0].OriginalScore-7.5)) > 1e-6 {
+		t.Fatalf("OriginalScore = %v; want 7.5", merged[0].OriginalScore)
+	}
+	// Score must reflect the RRF sum (1/61 + 1/61 = 2/61) — i.e.,
+	// OriginalScore is preserved separately, not folded into Score.
+	want := float32(2.0 / 61)
+	if math.Abs(float64(merged[0].Score-want)) > 1e-5 {
+		t.Fatalf("Score = %v; want %v", merged[0].Score, want)
+	}
+}
+
 func TestMerger_StableTieBreaking(t *testing.T) {
 	t.Parallel()
 
