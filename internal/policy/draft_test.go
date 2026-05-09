@@ -24,7 +24,7 @@ type captureLogger struct {
 	queries []string
 }
 
-func (c *captureLogger) LogMode(_ logger.LogLevel) logger.Interface { return c }
+func (c *captureLogger) LogMode(_ logger.LogLevel) logger.Interface  { return c }
 func (c *captureLogger) Info(_ context.Context, _ string, _ ...any)  {}
 func (c *captureLogger) Warn(_ context.Context, _ string, _ ...any)  {}
 func (c *captureLogger) Error(_ context.Context, _ string, _ ...any) {}
@@ -304,7 +304,7 @@ func TestDraftRepository_MarkPromoted_UsesSelectForUpdate(t *testing.T) {
 	// Drop the SQLite dialect's no-op FOR clause builder so the
 	// default clause.Locking renderer runs and emits "FOR UPDATE"
 	// — matching what Postgres does in production.
-	delete(db.Config.ClauseBuilders, "FOR")
+	delete(db.ClauseBuilders, "FOR")
 	repo := policy.NewDraftRepository(db)
 	ctx := context.Background()
 

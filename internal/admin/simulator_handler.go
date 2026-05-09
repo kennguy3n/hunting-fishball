@@ -391,8 +391,8 @@ func (h *SimulatorHandler) detectConflicts(c *gin.Context) {
 	}
 	conflicts := policy.DetectConflicts(snap)
 	c.JSON(http.StatusOK, gin.H{
-		"conflicts": conflicts,
-		"has_error": policy.HasErrors(conflicts),
+		"conflicts":  conflicts,
+		"has_error":  policy.HasErrors(conflicts),
 		"checked_at": time.Now().UTC(),
 	})
 }

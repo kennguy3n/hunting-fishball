@@ -62,12 +62,12 @@ type Draft struct {
 	// back to TEXT but the round-trip semantics match.
 	Payload DraftPayload `gorm:"type:jsonb;not null;default:'{}';column:payload" json:"payload"`
 
-	Status      DraftStatus `gorm:"type:varchar(16);not null;default:'draft';column:status" json:"status"`
-	CreatedBy   string      `gorm:"column:created_by" json:"created_by,omitempty"`
-	CreatedAt   time.Time   `gorm:"not null;default:now();column:created_at" json:"created_at"`
-	PromotedAt  *time.Time  `gorm:"column:promoted_at" json:"promoted_at,omitempty"`
-	PromotedBy  string      `gorm:"column:promoted_by" json:"promoted_by,omitempty"`
-	RejectReason string     `gorm:"column:reject_reason" json:"reject_reason,omitempty"`
+	Status       DraftStatus `gorm:"type:varchar(16);not null;default:'draft';column:status" json:"status"`
+	CreatedBy    string      `gorm:"column:created_by" json:"created_by,omitempty"`
+	CreatedAt    time.Time   `gorm:"not null;default:now();column:created_at" json:"created_at"`
+	PromotedAt   *time.Time  `gorm:"column:promoted_at" json:"promoted_at,omitempty"`
+	PromotedBy   string      `gorm:"column:promoted_by" json:"promoted_by,omitempty"`
+	RejectReason string      `gorm:"column:reject_reason" json:"reject_reason,omitempty"`
 }
 
 // TableName overrides the default GORM pluralisation.
@@ -82,10 +82,11 @@ type DraftPayload struct {
 // MarshalJSON marshals the inner snapshot directly so the JSONB
 // column round-trips as `{"snapshot":...}`.
 func (p DraftPayload) MarshalJSON() ([]byte, error) {
-	type wire struct {
-		Snapshot PolicySnapshot `json:"snapshot"`
-	}
-	return json.Marshal(wire{Snapshot: p.Snapshot})
+	// `wire` mirrors DraftPayload exactly so we can convert
+	// without copying field-by-field; it exists solely to break
+	// the json.Marshal → DraftPayload.MarshalJSON recursion.
+	type wire DraftPayload
+	return json.Marshal(wire(p))
 }
 
 // UnmarshalJSON unmarshals the inner snapshot.

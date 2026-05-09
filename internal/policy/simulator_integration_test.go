@@ -35,8 +35,6 @@ import (
 // keeps the allow but adds a deny for drive/secret/**, which should
 // drop the third chunk from the result set.
 
-type integrationCorpus struct{}
-
 type integrationChunk struct {
 	id, path, label string
 	score           float32
