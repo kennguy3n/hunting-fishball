@@ -90,16 +90,20 @@ func metadataString(m map[string]any, key string) (string, bool) {
 	return s, ok
 }
 
-// noopPolicyResolver returns a permissive snapshot for every
+// noopPolicyResolver returns an empty snapshot for every
 // (tenant, channel). Used as the default when cmd/api hasn't wired a
 // resolver — the platform still enforces the privacy-label
-// PolicyFilter.
+// PolicyFilter against the request-supplied mode.
 type noopPolicyResolver struct{}
 
-// Resolve always returns an empty snapshot (no ACL, no recipient
-// policy, mode = Remote so any privacy label passes). The handler
-// keeps falling back to its DefaultPrivacyMode when EffectiveMode
-// is empty.
+// Resolve returns an empty snapshot. Leaving EffectiveMode unset
+// signals to the handler that no admin-controlled mode is available,
+// so it falls back to the request's PrivacyMode (or
+// HandlerConfig.DefaultPrivacyMode). Once a real PolicyResolver is
+// wired in, its EffectiveMode is the source of truth.
 func (noopPolicyResolver) Resolve(_ context.Context, _, _ string) (PolicySnapshot, error) {
-	return PolicySnapshot{EffectiveMode: policy.PrivacyModeRemote}, nil
+	return PolicySnapshot{}, nil
 }
+
+// Compile-time assertion that the noop resolver satisfies the port.
+var _ PolicyResolver = noopPolicyResolver{}

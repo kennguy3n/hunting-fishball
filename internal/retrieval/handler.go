@@ -276,11 +276,14 @@ func (h *Handler) retrieve(c *gin.Context) {
 		})
 		return
 	}
-	// EffectiveMode wins over the request-supplied mode when the
-	// resolver populated one — privacy mode is admin-controlled, not
-	// caller-controlled. The request-supplied PrivacyMode is kept as
-	// a fallback for environments without a resolver wired in.
-	if snapshot.EffectiveMode != "" && snapshot.EffectiveMode != policy.PrivacyModeRemote {
+	// Privacy mode is admin-controlled. When the resolver populated
+	// EffectiveMode it is the source of truth — even when the
+	// effective mode is more permissive than the caller's request.
+	// The request-supplied PrivacyMode (or HandlerConfig
+	// .DefaultPrivacyMode) is only a fallback for environments
+	// without a resolver wired in (the noop resolver leaves
+	// EffectiveMode empty).
+	if snapshot.EffectiveMode != "" {
 		privacyMode = string(snapshot.EffectiveMode)
 	}
 

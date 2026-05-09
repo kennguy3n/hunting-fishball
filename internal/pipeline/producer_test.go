@@ -147,10 +147,13 @@ func TestParsePartitionKey(t *testing.T) {
 		ok          bool
 		tenant, src string
 	}{
-		{"tenant-a|src-1", true, "tenant-a", "src-1"},
-		{"|src-1", false, "", ""},
-		{"tenant-a|", false, "", ""},
-		{"no-pipe", false, "", ""},
+		{"tenant-a||src-1", true, "tenant-a", "src-1"},
+		{"||src-1", false, "", ""},
+		{"tenant-a||", false, "", ""},
+		// Single-pipe legacy keys are explicitly rejected so a stray
+		// `|` in a tenant/source ID can never split a partition key.
+		{"tenant-a|src-1", false, "", ""},
+		{"no-separator", false, "", ""},
 		{"", false, "", ""},
 	}
 	for _, c := range cases {

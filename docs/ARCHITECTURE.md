@@ -592,10 +592,11 @@ hunting-fishball/
   uses GORM against Postgres in production and the in-memory
   `glebarez/sqlite` driver in tests.
 - **Per-tenant Kafka routing:** Sarama `SyncProducer` with
-  partition keys of the form `tenant_id|source_id`. The consumer
-  parses keys with `pipeline.ParsePartitionKey` and rejects
-  body/key mismatches as poison messages, defending against
-  spoofed partition routing.
+  partition keys of the form `tenant_id||source_id` (the doubled
+  `||` separator is the on-wire spec; `pipeline.PartitionKey`
+  exposes a constant). The consumer parses keys with
+  `pipeline.ParsePartitionKey` and rejects body/key mismatches as
+  poison messages, defending against spoofed partition routing.
 - **Backfill rate control:** A `pipeline.RateController` interface
   decouples the orchestrator from the limiter implementation.
   `pipeline.TickerRate` is the wall-clock pacer used in tests; the

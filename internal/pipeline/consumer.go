@@ -236,12 +236,13 @@ func (c *Consumer) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.C
 // markDone signals the pending entry for the (topic, partition) of evt.
 // The lookup key MUST match the key partitionState.register uses; both
 // include SourceID because the Kafka partition key is
-// `tenant_id|source_id` and two different sources under the same tenant
-// can land on different partitions while still sharing a DocumentID
-// (e.g. both have a file named `readme.md`). Without SourceID in the
-// key, completing one event would falsely signal the other partition's
-// pending entry and ConsumeClaim would commit before Stage 4 actually
-// finished — leading to message loss on consumer restart.
+// `tenant_id||source_id` (see PartitionKey) and two different sources
+// under the same tenant can land on different partitions while still
+// sharing a DocumentID (e.g. both have a file named `readme.md`).
+// Without SourceID in the key, completing one event would falsely
+// signal the other partition's pending entry and ConsumeClaim would
+// commit before Stage 4 actually finished — leading to message loss
+// on consumer restart.
 func (c *Consumer) markDone(_ context.Context, evt IngestEvent, _ error) {
 	key := pendingKey(evt)
 	c.pending.Range(func(_, v any) bool {
@@ -282,7 +283,7 @@ func (c *Consumer) publishDLQ(evt IngestEvent, err error) {
 
 	msg := &sarama.ProducerMessage{
 		Topic: c.cfg.DLQTopic,
-		Key:   sarama.StringEncoder(strings.TrimSpace(evt.TenantID + "|" + evt.SourceID)),
+		Key:   sarama.StringEncoder(strings.TrimSpace(PartitionKey(evt.TenantID, evt.SourceID))),
 		Value: sarama.ByteEncoder(body),
 	}
 	_, _, _ = c.cfg.DLQProducer.SendMessage(msg)
@@ -337,8 +338,8 @@ func (c *Consumer) partitionState(topic string, partition int32) *partitionState
 }
 
 // decodeEvent parses a Kafka message body into an IngestEvent. The
-// wire format is JSON; the Key is parsed as `tenant_id|source_id` per
-// ARCHITECTURE.md §3.2 to derive the partition.
+// wire format is JSON; the Key is parsed as `tenant_id||source_id`
+// (see PartitionKey) per ARCHITECTURE.md §3.2 to derive the partition.
 //
 // The body's tenant_id/source_id MUST match the key — a mismatch is
 // treated as a poison message so a misrouted producer can't smuggle
@@ -375,12 +376,18 @@ func decodeEvent(msg *sarama.ConsumerMessage) (IngestEvent, error) {
 	return evt, nil
 }
 
+// PartitionKeySeparator is the on-wire separator between tenant and
+// source IDs in Kafka partition keys. The doubled `||` form is the
+// product spec — a single `|` is reserved for legacy migrations and
+// rejected by ParsePartitionKey.
+const PartitionKeySeparator = "||"
+
 // PartitionKey returns the Kafka partition key the producer should
 // stamp on each event so the sticky-assignment consumer keeps per-
 // (tenant, source) ordering. Exposed for callers (e.g. connectors)
 // that publish events.
 func PartitionKey(tenantID, sourceID string) string {
-	return tenantID + "|" + sourceID
+	return tenantID + PartitionKeySeparator + sourceID
 }
 
 // ParsePartitionKey is the inverse of PartitionKey. Returns
@@ -388,15 +395,14 @@ func PartitionKey(tenantID, sourceID string) string {
 // otherwise. A missing source_id (legacy producers) is rejected — the
 // admin source-management surface always emits both halves.
 func ParsePartitionKey(key string) (string, string, bool) {
-	for i := 0; i < len(key); i++ {
-		if key[i] == '|' {
-			tenant := key[:i]
-			source := key[i+1:]
-			if tenant == "" || source == "" {
-				return "", "", false
-			}
-			return tenant, source, true
-		}
+	i := strings.Index(key, PartitionKeySeparator)
+	if i < 0 {
+		return "", "", false
 	}
-	return "", "", false
+	tenant := key[:i]
+	source := key[i+len(PartitionKeySeparator):]
+	if tenant == "" || source == "" {
+		return "", "", false
+	}
+	return tenant, source, true
 }
