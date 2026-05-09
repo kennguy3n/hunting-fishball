@@ -364,6 +364,19 @@ landed) is documented in
   Architectural changes land here *before* the code change in the relevant
   service repository (`ai-agent-platform`, `ai-agent-context-engine`,
   `ai-agent-desktop`, `knowledge`, etc.).
+- **CI lanes.** CI is split into a fast lane and a full lane (see
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+  - **Fast lane** (gofmt, vet, golangci-lint, race+cover unit tests, build,
+    Python services unit tests) runs on every PR push and is required for
+    merge. Branch protection should require the `Required CI (fast lane)`
+    aggregator check.
+  - **Full lane** (proto-gen check, e2e smoke against the docker-compose
+    stack, Go ↔ Python integration with the heavy ML images) runs on:
+    push to `main`, PRs labelled `full-ci` (or `run-integration` for the
+    integration job only), the nightly `27 6 * * *` cron, and manual
+    `workflow_dispatch`. Add the label when a PR touches the storage
+    plane, the gRPC contracts, or anything else that the fast lane can't
+    cover.
 ---
 
 ## Related repositories

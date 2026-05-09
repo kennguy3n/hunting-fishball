@@ -1,28 +1,154 @@
 name: CI
 
+# ---------------------------------------------------------------
+# CI is split into a fast lane (every PR, must pass) and a
+# full lane (label-gated / push-to-main / nightly). The goal is
+# to keep PR turnaround under ~1 minute while still running the
+# expensive checks (docker compose stack, ML services, race +
+# coverage suites) on a regular cadence.
+#
+#   Fast lane      gofmt, vet, lint, race+cover, build, python
+#                  unit tests. Runs on every PR push.
+#
+#   Full lane      proto-gen check, e2e smoke (docker stack),
+#                  Go ↔ Python integration. Runs on:
+#                    - push to main (post-merge gate)
+#                    - PR carrying the `full-ci` label
+#                    - PR carrying the `run-integration` label
+#                      (integration job only)
+#                    - nightly cron (06:27 UTC)
+#                    - manual workflow_dispatch
+#
+# Branch protection should require the `Required CI (fast lane)`
+# aggregator job — adding new fast-lane checks just means adding
+# them to its `needs:` list.
+# ---------------------------------------------------------------
+
 on:
   push:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  schedule:
+    # Nightly full lane: catches regressions in heavy/integration
+    # checks even if no PR carries the `full-ci` label.
+    - cron: "27 6 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  go:
-    name: Go ${{ matrix.go-version }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: ["1.25.x"]
+  # ===============================================================
+  # Fast lane — runs on every PR, blocking
+  # ===============================================================
 
+  fast-go:
+    name: Fast Go (gofmt + vet + lint + race+cover)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: "1.25.x"
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: gofmt check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error title=gofmt::Files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race -cover
+        run: go test -race -cover -count=1 ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.5.0
+          args: --timeout=5m
+
+      - name: build binaries
+        run: |
+          mkdir -p bin
+          go build -o bin/context-engine-ingest ./cmd/ingest
+          go build -o bin/context-engine-api    ./cmd/api
+
+  fast-python:
+    name: Fast Python services unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install proto / test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install grpcio==1.80.0 grpcio-tools==1.80.0 "protobuf>=6,<8" pytest
+
+      - name: Generate Python proto stubs
+        run: bash services/gen_protos.sh
+
+      - name: Run unit tests
+        run: cd services && python -m pytest -q --import-mode=importlib
+
+  # Aggregator: branch protection should require this single check.
+  # When you add a new fast-lane job, add it to `needs:` here.
+  fast-required:
+    name: Required CI (fast lane)
+    runs-on: ubuntu-latest
+    needs: [fast-go, fast-python]
+    if: always()
+    steps:
+      - name: Verify fast-lane jobs passed
+        run: |
+          set -e
+          fail=0
+          for r in "${{ needs.fast-go.result }}" "${{ needs.fast-python.result }}"; do
+            if [ "$r" != "success" ]; then
+              fail=1
+            fi
+          done
+          if [ "$fail" = "1" ]; then
+            echo "::error::fast-go=${{ needs.fast-go.result }} fast-python=${{ needs.fast-python.result }}"
+            exit 1
+          fi
+          echo "fast lane green"
+
+  # ===============================================================
+  # Full lane — gated; only runs on push-to-main, the `full-ci`
+  # label, the nightly cron, or workflow_dispatch
+  # ===============================================================
+
+  full-proto-gen:
+    name: Full — proto-gen check
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
           cache: true
 
       - name: Install protoc
@@ -32,21 +158,6 @@ jobs:
           curl -sSLo /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
           sudo unzip -q -o /tmp/protoc.zip -d /usr/local
           protoc --version
-
-      - name: go mod download
-        run: go mod download
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: go test -race -cover
-        run: go test -race -cover ./...
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.5.0
-          args: --timeout=5m
 
       - name: proto-gen check
         run: |
@@ -61,20 +172,18 @@ jobs:
               "$f"
           done
           if ! git diff --exit-code -- proto; then
-            echo "Generated proto files are out of date. Run 'make proto-gen' and commit."
+            echo "::error title=stale proto::Generated proto files are out of date. Run 'make proto-gen' and commit."
             exit 1
           fi
 
-      - name: build binaries
-        run: |
-          mkdir -p bin
-          go build -o bin/context-engine-ingest ./cmd/ingest
-          go build -o bin/context-engine-api    ./cmd/api
-
-  e2e:
-    name: e2e smoke
+  full-e2e:
+    name: Full — e2e smoke
     runs-on: ubuntu-latest
-    needs: go
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
     steps:
       - uses: actions/checkout@v4
 
@@ -110,39 +219,24 @@ jobs:
         if: always()
         run: docker compose down -v
 
-  services-unit:
-    name: Python services unit tests
+  full-integration:
+    name: Full — Go ↔ Python integration
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install proto / test deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install grpcio==1.80.0 grpcio-tools==1.80.0 "protobuf>=6,<8" pytest
-
-      - name: Generate Python proto stubs
-        run: bash services/gen_protos.sh
-
-      - name: Run unit tests
-        run: cd services && python -m pytest -q --import-mode=importlib
-
-  integration:
-    name: Go ↔ Python integration
-    runs-on: ubuntu-latest
-    needs: [go, services-unit]
+    needs: fast-python
     # Heavy ML image builds (Docling ~3 GB, sentence-transformers
     # +torch ~2 GB) and Mem0's external LLM dependency mean this job
     # can flake on the default GitHub-hosted runners. Treat it as a
-    # signal job until we move it onto a self-hosted runner with a
-    # warm image cache and an OPENAI_API_KEY secret.
+    # signal job (continue-on-error) until we move it onto a self-
+    # hosted runner with a warm image cache and an OPENAI_API_KEY.
     continue-on-error: true
-    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-integration')
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.labels.*.name, 'full-ci') ||
+        contains(github.event.pull_request.labels.*.name, 'run-integration')
+      ))
     steps:
       - uses: actions/checkout@v4
 
