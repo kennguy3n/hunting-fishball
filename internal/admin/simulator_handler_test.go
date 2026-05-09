@@ -378,6 +378,53 @@ func TestSimulatorHandler_SimulateWhatIf_RejectsMissingQuery(t *testing.T) {
 	}
 }
 
+func TestSimulatorHandler_SimulateWhatIf_DraftNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeDraftStore()
+	r := newSimulatorRouter(t, store, &fakePromotion{}, &fakeSimulator{}, &fakeAudit{}, "tenant-a")
+
+	body := admin.SimulateRequest{DraftID: "missing", Query: "q"}
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/policy/simulate", mustJSON(t, body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSimulatorHandler_SimulateWhatIf_DraftStoreInternalError(t *testing.T) {
+	t.Parallel()
+	store := newFakeDraftStore()
+	store.getErr = errors.New("connection reset by peer")
+	r := newSimulatorRouter(t, store, &fakePromotion{}, &fakeSimulator{}, &fakeAudit{}, "tenant-a")
+
+	body := admin.SimulateRequest{DraftID: "any", Query: "q"}
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/policy/simulate", mustJSON(t, body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSimulatorHandler_SimulateDataFlow_DraftStoreInternalError(t *testing.T) {
+	t.Parallel()
+	store := newFakeDraftStore()
+	store.getErr = errors.New("db: deadline exceeded")
+	r := newSimulatorRouter(t, store, &fakePromotion{}, &fakeSimulator{}, &fakeAudit{}, "tenant-a")
+
+	body := admin.SimulateRequest{DraftID: "any", Query: "q"}
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/policy/simulate/diff", mustJSON(t, body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestSimulatorHandler_SimulateDataFlow_Happy(t *testing.T) {
 	t.Parallel()
 	store := newFakeDraftStore()

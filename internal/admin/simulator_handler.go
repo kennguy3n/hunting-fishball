@@ -272,18 +272,23 @@ type SimulateRequest struct {
 	DraftPolicy policy.PolicySnapshot `json:"draft_policy"`
 }
 
-func (h *SimulatorHandler) buildWhatIfRequest(c *gin.Context, tenantID string, req SimulateRequest) (policy.WhatIfRequest, *gin.H) {
+// buildWhatIfRequest hydrates a WhatIfRequest from the incoming
+// SimulateRequest. On error it returns the appropriate HTTP status
+// code alongside the response body so callers can emit 400 / 404 /
+// 500 distinctly — a database fault from Drafts.Get must not be
+// swallowed as a 400.
+func (h *SimulatorHandler) buildWhatIfRequest(c *gin.Context, tenantID string, req SimulateRequest) (policy.WhatIfRequest, int, gin.H) {
 	if req.Query == "" {
-		return policy.WhatIfRequest{}, &gin.H{"error": "query is required"}
+		return policy.WhatIfRequest{}, http.StatusBadRequest, gin.H{"error": "query is required"}
 	}
 	draftPolicy := req.DraftPolicy
 	if req.DraftID != "" {
 		d, err := h.cfg.Drafts.Get(c.Request.Context(), tenantID, req.DraftID)
 		if errors.Is(err, policy.ErrDraftNotFound) {
-			return policy.WhatIfRequest{}, &gin.H{"error": "draft not found"}
+			return policy.WhatIfRequest{}, http.StatusNotFound, gin.H{"error": "draft not found"}
 		}
 		if err != nil {
-			return policy.WhatIfRequest{}, &gin.H{"error": err.Error()}
+			return policy.WhatIfRequest{}, http.StatusInternalServerError, gin.H{"error": err.Error()}
 		}
 		draftPolicy = d.Payload.Snapshot
 	}
@@ -294,7 +299,7 @@ func (h *SimulatorHandler) buildWhatIfRequest(c *gin.Context, tenantID string, r
 		Query:       req.Query,
 		TopK:        req.TopK,
 		DraftPolicy: draftPolicy,
-	}, nil
+	}, 0, nil
 }
 
 func (h *SimulatorHandler) simulateWhatIf(c *gin.Context) {
@@ -308,15 +313,9 @@ func (h *SimulatorHandler) simulateWhatIf(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	whatif, errResp := h.buildWhatIfRequest(c, tenantID, req)
+	whatif, status, errResp := h.buildWhatIfRequest(c, tenantID, req)
 	if errResp != nil {
-		// Choose 404 vs 400 based on the error string we know we
-		// can produce.
-		if (*errResp)["error"] == "draft not found" {
-			c.JSON(http.StatusNotFound, *errResp)
-		} else {
-			c.JSON(http.StatusBadRequest, *errResp)
-		}
+		c.JSON(status, errResp)
 		return
 	}
 	res, err := h.cfg.Simulator.WhatIf(c.Request.Context(), whatif)
@@ -338,13 +337,9 @@ func (h *SimulatorHandler) simulateDataFlow(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	whatif, errResp := h.buildWhatIfRequest(c, tenantID, req)
+	whatif, status, errResp := h.buildWhatIfRequest(c, tenantID, req)
 	if errResp != nil {
-		if (*errResp)["error"] == "draft not found" {
-			c.JSON(http.StatusNotFound, *errResp)
-		} else {
-			c.JSON(http.StatusBadRequest, *errResp)
-		}
+		c.JSON(status, errResp)
 		return
 	}
 	diff, err := h.cfg.Simulator.SimulateDataFlow(c.Request.Context(), whatif)
