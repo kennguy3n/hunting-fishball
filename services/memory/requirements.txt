@@ -1,0 +1,5 @@
+# Phase 3 Mem0 gRPC microservice runtime deps.
+grpcio==1.80.0
+grpcio-tools==1.80.0
+protobuf>=6.0.0,<8.0.0
+mem0ai>=0.1.30,<1

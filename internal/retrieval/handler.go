@@ -1,22 +1,29 @@
-// Package retrieval serves the Phase 1 retrieval API: a single
-// POST /v1/retrieve endpoint that runs a top-k vector search against
-// the per-tenant Qdrant collection and returns ranked results with
-// provenance and privacy_label.
+// Package retrieval serves the Phase 1 / Phase 3 retrieval API: a
+// single POST /v1/retrieve endpoint that fans out across the vector,
+// BM25, graph, and memory backends, applies tenant policy, and
+// returns ranked results with provenance and privacy_label.
 //
 // Tenant isolation is enforced the same way the audit handler does it
 // — tenant_id MUST come from the Gin request context (populated by
 // auth middleware) and is never read from the request body or query
-// params. The underlying VectorStore also enforces tenant scoping at
-// the storage boundary (ErrMissingTenantScope), so even a misconfigured
+// params. Each backend client also enforces tenant scoping at the
+// storage boundary (ErrMissingTenantScope), so even a misconfigured
 // handler can't leak across tenants.
 package retrieval
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
@@ -34,10 +41,50 @@ type Embedder interface {
 	EmbedQuery(ctx context.Context, tenantID, query string) ([]float32, error)
 }
 
-// HandlerConfig configures the retrieval Handler.
+// BM25Backend is the lexical retrieval seam. *storage.TantivyClient
+// satisfies it via the small adapter in storage_adapter.go.
+type BM25Backend interface {
+	Search(ctx context.Context, tenantID, query string, k int) ([]*Match, error)
+}
+
+// GraphBackend is the graph traversal seam. *storage.FalkorDBClient
+// satisfies it via the storage_adapter.go projection.
+type GraphBackend interface {
+	Traverse(ctx context.Context, tenantID, query string, k int) ([]*Match, error)
+}
+
+// MemoryBackend is the persistent memory seam (Mem0). The cmd/api
+// wiring constructs a tiny gRPC adapter that satisfies it.
+type MemoryBackend interface {
+	Search(ctx context.Context, tenantID, query string, k int) ([]*Match, error)
+}
+
+// Cache is the semantic cache seam. *storage.SemanticCache satisfies
+// it.
+type Cache interface {
+	Get(ctx context.Context, tenantID, channelID string, queryEmbedding []float32, scopeHash string) (*storage.CachedResult, error)
+	Set(ctx context.Context, tenantID, channelID string, queryEmbedding []float32, scopeHash string, result *storage.CachedResult, ttl time.Duration) error
+}
+
+// HandlerConfig configures the retrieval Handler. VectorStore and
+// Embedder are required (Phase 1 contract); BM25, Graph, Memory,
+// Cache, Merger, Reranker, and PolicyFilter are optional Phase 3
+// upgrades — when nil, the handler degrades to the Phase 1 single-
+// stream behaviour.
 type HandlerConfig struct {
 	VectorStore VectorStore
 	Embedder    Embedder
+
+	// Phase 3 backends. Any of these may be nil; missing backends are
+	// skipped during fan-out and surface in `policy.applied` as the
+	// backends that *did* contribute.
+	BM25         BM25Backend
+	Graph        GraphBackend
+	Memory       MemoryBackend
+	Cache        Cache
+	Merger       *Merger
+	Reranker     Reranker
+	PolicyFilter *PolicyFilter
 
 	// DefaultTopK is the default top_k when the request doesn't set
 	// one. Defaults to 10.
@@ -45,6 +92,19 @@ type HandlerConfig struct {
 
 	// MaxTopK caps the user-supplied top_k. Defaults to 100.
 	MaxTopK int
+
+	// PerBackendDeadline caps each fan-out backend call. Defaults to
+	// 250ms (well below the API's overall budget per
+	// ARCHITECTURE.md §4.2).
+	PerBackendDeadline time.Duration
+
+	// CacheTTL is the TTL for newly-written cache entries. Defaults
+	// to 5 minutes.
+	CacheTTL time.Duration
+
+	// DefaultPrivacyMode is the channel privacy mode used when the
+	// request doesn't supply one. Defaults to "internal".
+	DefaultPrivacyMode string
 }
 
 // Handler serves the retrieval HTTP API.
@@ -66,6 +126,24 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if cfg.MaxTopK == 0 {
 		cfg.MaxTopK = 100
 	}
+	if cfg.PerBackendDeadline == 0 {
+		cfg.PerBackendDeadline = 250 * time.Millisecond
+	}
+	if cfg.CacheTTL == 0 {
+		cfg.CacheTTL = 5 * time.Minute
+	}
+	if cfg.DefaultPrivacyMode == "" {
+		cfg.DefaultPrivacyMode = "internal"
+	}
+	if cfg.Merger == nil {
+		cfg.Merger = NewMerger(MergerConfig{})
+	}
+	if cfg.Reranker == nil {
+		cfg.Reranker = NewLinearReranker(LinearRerankerConfig{})
+	}
+	if cfg.PolicyFilter == nil {
+		cfg.PolicyFilter = NewPolicyFilter(PolicyConfig{})
+	}
 
 	return &Handler{cfg: cfg}, nil
 }
@@ -84,6 +162,11 @@ type RetrieveRequest struct {
 	Sources   []string `json:"sources,omitempty"`
 	Channels  []string `json:"channels,omitempty"`
 	Documents []string `json:"document_ids,omitempty"`
+
+	// PrivacyMode is the channel's declared privacy mode. The policy
+	// filter drops chunks whose privacy_label exceeds this. Defaults
+	// to HandlerConfig.DefaultPrivacyMode when empty.
+	PrivacyMode string `json:"privacy_mode,omitempty"`
 }
 
 // RetrieveHit is one entry in the response.
@@ -100,11 +183,32 @@ type RetrieveHit struct {
 	Text         string         `json:"text,omitempty"`
 	Connector    string         `json:"connector,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
+	Sources      []string       `json:"sources,omitempty"`
+}
+
+// RetrievePolicy summarises the policy decisions made during fan-out.
+type RetrievePolicy struct {
+	// Applied lists the backend names that contributed at least one
+	// match (e.g. ["vector", "bm25"]).
+	Applied []string `json:"applied,omitempty"`
+	// Degraded names backends that timed out or failed within the
+	// per-backend deadline. The handler still returns the partial
+	// result; clients can render a "degraded" badge.
+	Degraded []string `json:"degraded,omitempty"`
+	// BlockedCount counts chunks dropped by the policy filter.
+	BlockedCount int `json:"blocked_count"`
+	// CacheHit is true when the response was served from the
+	// semantic cache.
+	CacheHit bool `json:"cache_hit"`
+	// PrivacyMode is the channel privacy mode the request resolved
+	// to (echoed for the client UI).
+	PrivacyMode string `json:"privacy_mode,omitempty"`
 }
 
 // RetrieveResponse is the JSON envelope for POST /v1/retrieve.
 type RetrieveResponse struct {
-	Hits []RetrieveHit `json:"hits"`
+	Hits   []RetrieveHit  `json:"hits"`
+	Policy RetrievePolicy `json:"policy"`
 }
 
 func (h *Handler) retrieve(c *gin.Context) {
@@ -138,6 +242,10 @@ func (h *Handler) retrieve(c *gin.Context) {
 	if topK > h.cfg.MaxTopK {
 		topK = h.cfg.MaxTopK
 	}
+	privacyMode := req.PrivacyMode
+	if privacyMode == "" {
+		privacyMode = h.cfg.DefaultPrivacyMode
+	}
 
 	vec, err := h.cfg.Embedder.EmbedQuery(c.Request.Context(), tenantID, req.Query)
 	if err != nil {
@@ -146,23 +254,383 @@ func (h *Handler) retrieve(c *gin.Context) {
 		return
 	}
 
-	filter := buildFilter(req)
+	channelID := firstNonEmpty(req.Channels)
+	scopeHash := scopeHashFor(req, topK)
 
-	hits, err := h.cfg.VectorStore.Search(c.Request.Context(), tenantID, vec, storage.SearchOpts{
-		Limit:  topK,
-		Filter: filter,
-	})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "search failed"})
+	// Cache short-circuit. A cache hit serves the response without
+	// any fan-out (ARCHITECTURE.md §4.4). On error the handler
+	// degrades to a fan-out — a stale cache should never take
+	// retrieval offline.
+	if h.cfg.Cache != nil {
+		cached, cerr := h.cfg.Cache.Get(c.Request.Context(), tenantID, channelID, vec, scopeHash)
+		if cerr == nil && cached != nil {
+			c.JSON(http.StatusOK, responseFromCache(cached, privacyMode, topK))
+
+			return
+		}
+	}
+
+	streams, degraded := h.fanOut(c.Request.Context(), tenantID, req, vec, topK)
+
+	merged := h.cfg.Merger.Merge(streams...)
+	reranked, rerr := h.cfg.Reranker.Rerank(c.Request.Context(), req.Query, merged)
+	if rerr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "rerank failed"})
 
 		return
 	}
 
-	out := RetrieveResponse{Hits: make([]RetrieveHit, 0, len(hits))}
-	for _, h := range hits {
-		out.Hits = append(out.Hits, hitFromQdrant(h))
+	pres := h.cfg.PolicyFilter.Apply(reranked, privacyMode)
+	if len(pres.Allowed) > topK {
+		pres.Allowed = pres.Allowed[:topK]
 	}
-	c.JSON(http.StatusOK, out)
+
+	resp := RetrieveResponse{
+		Hits: make([]RetrieveHit, 0, len(pres.Allowed)),
+		Policy: RetrievePolicy{
+			Applied:      appliedSources(streams),
+			Degraded:     degraded,
+			BlockedCount: pres.BlockedCount,
+			PrivacyMode:  privacyMode,
+		},
+	}
+	for _, m := range pres.Allowed {
+		resp.Hits = append(resp.Hits, hitFromMatch(m))
+	}
+
+	// Cache the merged + reranked + filtered response. Errors are
+	// swallowed — failing to write a cache entry must not fail the
+	// retrieval.
+	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
+		_ = h.cfg.Cache.Set(c.Request.Context(), tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), h.cfg.CacheTTL)
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// fanOut runs every wired-in backend in parallel under
+// errgroup.WithContext, applying a per-backend deadline. Returns the
+// per-stream []*Match list and the list of degraded sources.
+func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveRequest, vec []float32, topK int) ([][]*Match, []string) {
+	g, gctx := errgroup.WithContext(ctx)
+
+	var (
+		mu       sync.Mutex
+		streams  = make([][]*Match, 0, 4)
+		degraded []string
+	)
+
+	push := func(ms []*Match) {
+		mu.Lock()
+		defer mu.Unlock()
+		streams = append(streams, ms)
+	}
+	markDegraded := func(name string) {
+		mu.Lock()
+		defer mu.Unlock()
+		degraded = append(degraded, name)
+	}
+
+	deadlineCtx := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(gctx, h.cfg.PerBackendDeadline)
+	}
+
+	if h.cfg.VectorStore != nil {
+		g.Go(func() error {
+			ctx, cancel := deadlineCtx()
+			defer cancel()
+			hits, err := h.cfg.VectorStore.Search(ctx, tenantID, vec, storage.SearchOpts{
+				Limit:  topK,
+				Filter: buildFilter(req),
+			})
+			if err != nil {
+				markDegraded(SourceVector)
+
+				return nil
+			}
+			out := make([]*Match, 0, len(hits))
+			for i, hit := range hits {
+				m := matchFromQdrant(hit)
+				m.Rank = i + 1
+				out = append(out, m)
+			}
+			push(out)
+
+			return nil
+		})
+	}
+	if h.cfg.BM25 != nil {
+		g.Go(func() error {
+			ctx, cancel := deadlineCtx()
+			defer cancel()
+			hits, err := h.cfg.BM25.Search(ctx, tenantID, req.Query, topK)
+			if err != nil {
+				markDegraded(SourceBM25)
+
+				return nil
+			}
+			for i, m := range hits {
+				if m.Source == "" {
+					m.Source = SourceBM25
+				}
+				if m.Rank == 0 {
+					m.Rank = i + 1
+				}
+			}
+			push(hits)
+
+			return nil
+		})
+	}
+	if h.cfg.Graph != nil {
+		g.Go(func() error {
+			ctx, cancel := deadlineCtx()
+			defer cancel()
+			hits, err := h.cfg.Graph.Traverse(ctx, tenantID, req.Query, topK)
+			if err != nil {
+				markDegraded(SourceGraph)
+
+				return nil
+			}
+			for i, m := range hits {
+				if m.Source == "" {
+					m.Source = SourceGraph
+				}
+				if m.Rank == 0 {
+					m.Rank = i + 1
+				}
+			}
+			push(hits)
+
+			return nil
+		})
+	}
+	if h.cfg.Memory != nil {
+		g.Go(func() error {
+			ctx, cancel := deadlineCtx()
+			defer cancel()
+			hits, err := h.cfg.Memory.Search(ctx, tenantID, req.Query, topK)
+			if err != nil {
+				markDegraded(SourceMemory)
+
+				return nil
+			}
+			for i, m := range hits {
+				if m.Source == "" {
+					m.Source = SourceMemory
+				}
+				if m.Rank == 0 {
+					m.Rank = i + 1
+				}
+			}
+			push(hits)
+
+			return nil
+		})
+	}
+
+	_ = g.Wait()
+
+	return streams, degraded
+}
+
+// matchFromQdrant projects a *storage.QdrantHit into the merger's
+// neutral *Match shape.
+func matchFromQdrant(h storage.QdrantHit) *Match {
+	m := &Match{
+		ID:     h.ID,
+		Source: SourceVector,
+		Score:  h.Score,
+	}
+	for k, v := range h.Payload {
+		switch k {
+		case "tenant_id":
+			m.TenantID, _ = v.(string)
+		case "source_id":
+			m.SourceID, _ = v.(string)
+		case "document_id":
+			m.DocumentID, _ = v.(string)
+		case "block_id":
+			m.BlockID, _ = v.(string)
+		case "title":
+			m.Title, _ = v.(string)
+		case "uri":
+			m.URI, _ = v.(string)
+		case "privacy_label":
+			m.PrivacyLabel, _ = v.(string)
+		case "text":
+			m.Text, _ = v.(string)
+		case "connector":
+			m.Connector, _ = v.(string)
+		case "ingested_at":
+			if s, ok := v.(string); ok {
+				if t, perr := time.Parse(time.RFC3339, s); perr == nil {
+					m.IngestedAt = t
+				}
+			}
+		default:
+			if m.Metadata == nil {
+				m.Metadata = map[string]any{}
+			}
+			m.Metadata[k] = v
+		}
+	}
+
+	return m
+}
+
+// hitFromMatch projects an internal *Match back into the public
+// response shape.
+func hitFromMatch(m *Match) RetrieveHit {
+	return RetrieveHit{
+		ID:           m.ID,
+		Score:        m.Score,
+		TenantID:     m.TenantID,
+		SourceID:     m.SourceID,
+		DocumentID:   m.DocumentID,
+		BlockID:      m.BlockID,
+		Title:        m.Title,
+		URI:          m.URI,
+		PrivacyLabel: m.PrivacyLabel,
+		Text:         m.Text,
+		Connector:    m.Connector,
+		Metadata:     m.Metadata,
+		Sources:      m.Sources,
+	}
+}
+
+// responseFromCache projects a cached entry into the public response
+// shape, stamping policy.cache_hit so clients can render the badge.
+// The result is sliced to topK as a defense-in-depth — scopeHashFor
+// already keys the cache on topK, but a stale entry written by an
+// older binary (or a future schema bump) must never violate the API
+// contract.
+func responseFromCache(c *storage.CachedResult, privacyMode string, topK int) RetrieveResponse {
+	hits := c.Hits
+	if topK > 0 && len(hits) > topK {
+		hits = hits[:topK]
+	}
+	out := RetrieveResponse{
+		Hits: make([]RetrieveHit, 0, len(hits)),
+		Policy: RetrievePolicy{
+			CacheHit:    true,
+			PrivacyMode: privacyMode,
+		},
+	}
+	for _, h := range hits {
+		out.Hits = append(out.Hits, RetrieveHit{
+			ID:           h.ID,
+			Score:        h.Score,
+			TenantID:     h.TenantID,
+			SourceID:     h.SourceID,
+			DocumentID:   h.DocumentID,
+			BlockID:      h.BlockID,
+			Title:        h.Title,
+			URI:          h.URI,
+			PrivacyLabel: h.PrivacyLabel,
+			Text:         h.Text,
+			Connector:    h.Connector,
+			Metadata:     h.Metadata,
+		})
+	}
+
+	return out
+}
+
+// cachedFromResponse projects the response shape into the storage-
+// layer CachedResult so the cache is populated without re-fetching
+// chunk metadata.
+func cachedFromResponse(resp RetrieveResponse) *storage.CachedResult {
+	c := &storage.CachedResult{
+		Hits:     make([]storage.CachedHit, 0, len(resp.Hits)),
+		ChunkIDs: make([]string, 0, len(resp.Hits)),
+	}
+	for _, h := range resp.Hits {
+		c.Hits = append(c.Hits, storage.CachedHit{
+			ID:           h.ID,
+			Score:        h.Score,
+			TenantID:     h.TenantID,
+			SourceID:     h.SourceID,
+			DocumentID:   h.DocumentID,
+			BlockID:      h.BlockID,
+			Title:        h.Title,
+			URI:          h.URI,
+			PrivacyLabel: h.PrivacyLabel,
+			Text:         h.Text,
+			Connector:    h.Connector,
+			Metadata:     h.Metadata,
+		})
+		c.ChunkIDs = append(c.ChunkIDs, h.ID)
+	}
+
+	return c
+}
+
+// appliedSources returns the unique list of backends that contributed
+// at least one match across the streams.
+func appliedSources(streams [][]*Match) []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, s := range streams {
+		for _, m := range s {
+			if m == nil || m.Source == "" {
+				continue
+			}
+			if _, ok := seen[m.Source]; ok {
+				continue
+			}
+			seen[m.Source] = struct{}{}
+			out = append(out, m.Source)
+		}
+	}
+
+	return out
+}
+
+// scopeHashFor produces a stable hash over the request fields that
+// affect the retrieval scope. Same hash → same cache key.
+//
+// topK is part of the scope: a topK=5 request must NOT serve from a
+// topK=100 entry (would return more rows than asked) and a topK=100
+// request must NOT serve from a topK=5 entry (would return fewer
+// rows than asked). Bump this hash whenever request fields that
+// affect the result set are added.
+func scopeHashFor(req RetrieveRequest, topK int) string {
+	h := sha256.New()
+	for _, v := range req.Sources {
+		_, _ = h.Write([]byte(v))
+		_, _ = h.Write([]byte{0})
+	}
+	_, _ = h.Write([]byte("|channels|"))
+	for _, v := range req.Channels {
+		_, _ = h.Write([]byte(v))
+		_, _ = h.Write([]byte{0})
+	}
+	_, _ = h.Write([]byte("|documents|"))
+	for _, v := range req.Documents {
+		_, _ = h.Write([]byte(v))
+		_, _ = h.Write([]byte{0})
+	}
+	_, _ = h.Write([]byte("|privacy|"))
+	_, _ = h.Write([]byte(req.PrivacyMode))
+	_, _ = h.Write([]byte("|topk|"))
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(topK))
+	_, _ = h.Write(buf[:])
+
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// firstNonEmpty returns the first non-empty entry of slice or "" if
+// none present.
+func firstNonEmpty(slice []string) string {
+	for _, s := range slice {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+
+	return ""
 }
 
 // tenantIDFromContext mirrors the audit-handler implementation so the
@@ -202,59 +670,4 @@ func buildFilter(req RetrieveRequest) map[string]any {
 	}
 
 	return map[string]any{"must": conds}
-}
-
-// hitFromQdrant projects the Qdrant payload into a stable response
-// shape. Unknown payload keys are surfaced under metadata so callers
-// can inspect them without us having to update this code on every
-// connector change.
-func hitFromQdrant(h storage.QdrantHit) RetrieveHit {
-	out := RetrieveHit{
-		ID:    h.ID,
-		Score: h.Score,
-	}
-	known := map[string]struct{}{
-		"tenant_id":     {},
-		"source_id":     {},
-		"document_id":   {},
-		"block_id":      {},
-		"title":         {},
-		"uri":           {},
-		"privacy_label": {},
-		"text":          {},
-		"connector":     {},
-	}
-	for k, v := range h.Payload {
-		switch k {
-		case "tenant_id":
-			out.TenantID, _ = v.(string)
-		case "source_id":
-			out.SourceID, _ = v.(string)
-		case "document_id":
-			out.DocumentID, _ = v.(string)
-		case "block_id":
-			out.BlockID, _ = v.(string)
-		case "title":
-			out.Title, _ = v.(string)
-		case "uri":
-			out.URI, _ = v.(string)
-		case "privacy_label":
-			out.PrivacyLabel, _ = v.(string)
-		case "text":
-			out.Text, _ = v.(string)
-		case "connector":
-			out.Connector, _ = v.(string)
-		}
-	}
-	for k, v := range h.Payload {
-		if _, ok := known[k]; ok {
-			continue
-		}
-		if out.Metadata == nil {
-			out.Metadata = map[string]any{}
-		}
-		out.Metadata[k] = v
-	}
-
-	return out
 }

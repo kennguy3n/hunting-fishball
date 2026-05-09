@@ -125,6 +125,12 @@ func TestRetrieve_HappyPath(t *testing.T) {
 	if vs.tenant != "tenant-a" {
 		t.Fatalf("vs.tenant: %q", vs.tenant)
 	}
+	if got.Policy.PrivacyMode == "" {
+		t.Fatalf("policy.privacy_mode should be populated")
+	}
+	if len(got.Policy.Applied) == 0 {
+		t.Fatalf("policy.applied should list contributing backends")
+	}
 }
 
 func TestRetrieve_TenantIsolation(t *testing.T) {
@@ -216,16 +222,30 @@ func TestRetrieve_EmbedderFailureReturns500(t *testing.T) {
 	}
 }
 
-func TestRetrieve_VectorStoreFailureReturns500(t *testing.T) {
+func TestRetrieve_VectorStoreFailureSurfacesAsDegraded(t *testing.T) {
 	t.Parallel()
 
+	// Phase 3 fan-out behaviour: a backend failure should NOT take
+	// retrieval offline. The handler returns 200 with empty hits and
+	// policy.degraded listing the failed backend so the client can
+	// render a "partial result" badge.
 	vs := &fakeVectorStore{searchErr: errors.New("qdrant down")}
 	emb := &fakeEmbedder{vec: []float32{1}}
 	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{VectorStore: vs, Embedder: emb})
 	r := newRouter(t, h, "tenant-a")
 	w := doPost(r, retrieval.RetrieveRequest{Query: "hi"})
-	if w.Code != http.StatusInternalServerError {
+	if w.Code != http.StatusOK {
 		t.Fatalf("status: %d", w.Code)
+	}
+	var got retrieval.RetrieveResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Policy.Degraded) != 1 || got.Policy.Degraded[0] != retrieval.SourceVector {
+		t.Fatalf("policy.degraded: %v", got.Policy.Degraded)
+	}
+	if len(got.Hits) != 0 {
+		t.Fatalf("expected 0 hits on full failure, got %d", len(got.Hits))
 	}
 }
 

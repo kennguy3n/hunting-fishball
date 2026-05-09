@@ -53,17 +53,23 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 3 — Retrieval fan-out
 
-**Status.** ⏳ planned
+**Status.** 🟡 partial | ~70%
 
-- [ ] Qdrant Go client integrated, per-tenant collections
-- [ ] `tantivy-go` integrated, per-tenant directories
-- [ ] FalkorDB Go client integrated, per-tenant graphs
-- [ ] Mem0 gRPC contract + Go client
-- [ ] Retrieval API parallel fan-out via `errgroup` with deadlines
-- [ ] Reciprocal-rank fusion merger
-- [ ] Cross-encoder reranker + Go fallback reranker
-- [ ] Redis semantic cache with lazy invalidation on Stage 4 writes
+- [x] Qdrant Go client integrated, per-tenant collections
+- [x] BM25 search integrated via `bleve` (pure-Go fallback for
+      `tantivy-go`, per-tenant index directories)
+- [x] FalkorDB Go client integrated, per-tenant graphs
+- [x] Mem0 gRPC contract + Go client (wired through retrieval handler)
+- [x] Retrieval API parallel fan-out via `errgroup` with per-backend
+      deadlines and `policy.degraded` signalling
+- [x] Reciprocal-rank fusion merger
+- [x] Lightweight Go-side reranker (BM25 blend + freshness boost) +
+      `Reranker` interface for a future cross-encoder
+- [x] Redis semantic cache with per-tenant key prefix and explicit
+      `Invalidate` on Stage 4 writes
 - [ ] Retrieval P95 < 500 ms on the sample corpus
+      (in-process P95 ~178 µs measured in `tests/benchmark/`; full
+      end-to-end latency target deferred to Phase 4 load tests)
 
 ## Phase 4 — Policy framework + simulator + privacy strip
 
@@ -161,23 +167,24 @@ microservices behind gRPC". They cross-cut Phases 1–3 and 8.
 
 - [x] Implement Go retrieval API with Gin
 - [x] Implement Go vector search client (Qdrant)
-- [ ] Implement Go BM25 search (`tantivy-go` bindings)
-- [ ] Implement Go graph traversal client (FalkorDB)
-- [ ] Implement Go semantic cache (Redis)
-- [ ] Implement Go result merger and reranker
+- [x] Implement Go BM25 search (pure-Go `bleve` fallback for
+      `tantivy-go`)
+- [x] Implement Go graph traversal client (FalkorDB)
+- [x] Implement Go semantic cache (Redis)
+- [x] Implement Go result merger and reranker
 
 ### Python ML microservices
 
-- [ ] Build Python Docling gRPC microservice (thin wrapper)
-- [ ] Build Python embedding gRPC microservice (thin wrapper)
-- [ ] Build Python Mem0 gRPC microservice (thin wrapper)
+- [x] Build Python Docling gRPC microservice (thin wrapper)
+- [x] Build Python embedding gRPC microservice (thin wrapper)
+- [x] Build Python Mem0 gRPC microservice (thin wrapper)
 
 ### Validation
 
-- [ ] Write integration tests for Go ↔ Python gRPC communication
-- [ ] Benchmark Go context engine vs Python baseline
+- [x] Write integration tests for Go ↔ Python gRPC communication
+- [x] Benchmark Go context engine vs Python baseline
       (throughput, P50 / P95 / P99 latency, RSS per worker)
-- [ ] Document cutover plan and rollback procedure
+- [x] Document cutover plan and rollback procedure
 
 ---
 
@@ -200,6 +207,13 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-09: Phase 3 partial — Go retrieval API completion (BM25 via
+  bleve, FalkorDB graph traversal, Redis semantic cache,
+  RRF merger + lightweight reranker, parallel fan-out with per-backend
+  deadlines, `policy.degraded` signalling), Python ML microservices
+  (Docling, embedding, Mem0) with proto stubs and unit tests,
+  Go ↔ Python integration tests, throughput / latency benchmarks
+  in `tests/benchmark/`, cutover plan in `docs/CUTOVER.md`.
 - 2026-05-09: Phase 1 complete — Google Drive + Slack connectors, Go
   Kafka consumer, 4-stage pipeline (fetch / parse / embed / store),
   retrieval API (`POST /v1/retrieve`), CI smoke test against docker

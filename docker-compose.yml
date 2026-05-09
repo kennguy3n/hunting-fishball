@@ -6,10 +6,14 @@ version: "3.9"
 # Wipe state:      docker compose down -v
 #
 # Services:
-#   - postgres : metadata, audit log, policy
-#   - redis    : semantic cache / rate limit / locks
-#   - kafka    : pipeline events, audit outbox (KRaft single-node)
-#   - qdrant   : vector store (per-tenant collections)
+#   - postgres  : metadata, audit log, policy
+#   - redis     : semantic cache / rate limit / locks
+#   - kafka     : pipeline events, audit outbox (KRaft single-node)
+#   - qdrant    : vector store (per-tenant collections)
+#   - falkordb  : graph traversal (Phase 3, Redis-protocol-compatible)
+#   - docling   : Python gRPC parser (Phase 3 Stage 2)
+#   - embedding : Python gRPC sentence-transformers (Phase 3 Stage 3)
+#   - memory    : Python gRPC Mem0 (Phase 3 retrieval backend)
 
 name: hunting-fishball
 
@@ -75,8 +79,59 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
 
+  # FalkorDB exposes the Redis wire protocol with the GRAPH.* command
+  # family. We bind it to host port 6380 so it doesn't collide with
+  # the cache Redis on 6379.
+  falkordb:
+    image: falkordb/falkordb:edge
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - falkordb_data:/var/lib/falkordb/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  docling:
+    build:
+      context: .
+      dockerfile: services/docling/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "50051:50051"
+    environment:
+      DOCLING_ADDR: "[::]:50051"
+
+  embedding:
+    build:
+      context: .
+      dockerfile: services/embedding/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "50052:50052"
+    environment:
+      EMBEDDING_ADDR: "[::]:50052"
+      EMBEDDING_MODEL: "sentence-transformers/all-MiniLM-L6-v2"
+
+  memory:
+    build:
+      context: .
+      dockerfile: services/memory/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      qdrant:
+        condition: service_started
+    ports:
+      - "50053:50053"
+    environment:
+      MEMORY_ADDR: "[::]:50053"
+
 volumes:
   postgres_data:
   redis_data:
   kafka_data:
   qdrant_data:
+  falkordb_data:
