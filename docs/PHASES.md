@@ -18,8 +18,11 @@ phase.
 
 > Phase 0 is **🟡 partial** as of 2026-05-09 — the connector contract,
 > registry, credential encryption, audit log primitives, and gRPC proto
-> contracts have all landed. Every other phase below is currently `⏳
-> planned`. As phases land, flip the marker and move the supporting
+> contracts have all landed. **Phase 1** is **🟡 partial** as of
+> 2026-05-09 — Google Drive + Slack connectors, the Go Kafka consumer,
+> the 4-stage Go pipeline, the retrieval API, and the docker-compose
+> e2e smoke test have all landed. Every other phase below is currently
+> `⏳ planned`. As phases land, flip the marker and move the supporting
 > status row in [`PROGRESS.md`](PROGRESS.md).
 
 ---
@@ -47,7 +50,7 @@ platform backend.
 
 ---
 
-## Phase 1 — Single-source MVP end-to-end  ⏳
+## Phase 1 — Single-source MVP end-to-end  🟡
 
 **Scope.** Get one source connector all the way through ingestion, the
 4-stage Go context engine, the storage plane, and the retrieval API.
@@ -59,17 +62,18 @@ service-account is in).
 
 **Exit criteria.**
 
-- [ ] Google Drive connector implements `SourceConnector` with delta
+- [x] Google Drive connector implements `SourceConnector` with delta
       tokens.
-- [ ] Slack connector implements `SourceConnector` with the Events API.
-- [ ] Go context engine consumes from Kafka and runs Stage 1 (Fetch),
+- [x] Slack connector implements `SourceConnector` with the Events API.
+- [x] Go context engine consumes from Kafka and runs Stage 1 (Fetch),
       Stage 2 (gRPC → Python Docling), Stage 3 (gRPC → Python embedding),
       Stage 4 (Storage to Qdrant + Postgres).
-- [ ] `POST /v1/retrieve` returns top-k matches from Qdrant for a sample
+- [x] `POST /v1/retrieve` returns top-k matches from Qdrant for a sample
       query.
-- [ ] Round-trip latency P95 < 1 s on the sample corpus.
-- [ ] Audit log records every ingestion + retrieval call.
-- [ ] One smoke test runs in CI end-to-end (using docker-compose for the
+- [ ] Round-trip latency P95 < 1 s on the sample corpus. *(measurement
+      pending Phase 8 capacity test against a deployed stack.)*
+- [x] Audit log records every ingestion + retrieval call.
+- [x] One smoke test runs in CI end-to-end (using docker-compose for the
       storage plane).
 
 ---

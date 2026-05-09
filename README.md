@@ -1,10 +1,12 @@
 # hunting-fishball
 
-> **Status.** Phase 0 scaffolding is in `main` (🟡 partial — see
-> [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live checklist). Phase 1
-> connectors and the end-to-end pipeline are still planned. The product
-> thesis lives in [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target
-> system design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> **Status.** Phase 0 scaffolding and Phase 1 are both in `main`
+> (🟡 partial — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live
+> checklist). Phase 1 brings the Google Drive + Slack connectors, the
+> Go Kafka consumer, the 4-stage pipeline (fetch / parse / embed /
+> store), the `POST /v1/retrieve` API, and a docker-compose CI smoke
+> test. The product thesis lives in [`docs/PROPOSAL.md`](docs/PROPOSAL.md)
+> and the target system design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 `hunting-fishball` is a privacy-preserving **knowledge & context platform** that
 unifies an organization's documents, chat history, files, and SaaS records into
@@ -184,17 +186,21 @@ docker compose up -d
 # 4. Run the test suite
 make test           # = go test -race -cover ./...
 
-# 5. Generate proto stubs (only needed when proto files change)
+# 5. Run the end-to-end smoke test against the docker-compose stack
+make test-e2e       # = E2E_ENABLED=1 go test -tags=e2e ./tests/e2e/...
+
+# 6. Generate proto stubs (only needed when proto files change)
 make proto-gen
 
-# 6. Build the binaries
+# 7. Build the binaries
 make build          # produces ./bin/context-engine-ingest and ./bin/context-engine-api
 ```
 
 Other targets:
 
-| Target          | What it does                                  |
-|-----------------|-----------------------------------------------|
+| Target           | What it does                                  |
+|------------------|-----------------------------------------------|
+| `make test-e2e` | Bring up docker compose, run e2e smoke test  |
 | `make build`    | Build both binaries into `./bin/`             |
 | `make test`     | `go test -race -cover ./...`                  |
 | `make vet`      | `go vet ./...`                                |
@@ -213,19 +219,28 @@ hunting-fishball/
 │   └── api/                   # context-engine-api    binary entry point
 ├── internal/
 │   ├── connector/             # SourceConnector interface, optional
-│   │                          # interfaces, process-global registry
+│   │   │                      # interfaces, process-global registry
+│   │   ├── googledrive/       # Google Drive connector (Phase 1)
+│   │   └── slack/             # Slack connector + Events API (Phase 1)
 │   ├── credential/            # AES-256-GCM envelope encryption
-│   └── audit/                 # audit_logs model + repository + Kafka
-│                              # outbox + Gin handler
+│   ├── audit/                 # audit_logs model + repository + Kafka
+│   │                          # outbox + Gin handler
+│   ├── pipeline/              # 4-stage pipeline (Phase 1):
+│   │                          # consumer / coordinator / fetch / parse
+│   │                          # / embed / store
+│   ├── retrieval/             # POST /v1/retrieve handler (Phase 1)
+│   └── storage/               # Qdrant + Postgres clients (Phase 1)
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
 │   └── memory/v1/             # Mem0 persistent memory service
 ├── migrations/                # SQL migrations (audit_logs, ...)
+├── tests/
+│   └── e2e/                   # docker-compose smoke test (//go:build e2e)
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
 ├── docker-compose.yml         # local Postgres / Redis / Kafka / Qdrant
-├── Makefile                   # build / test / lint / proto-gen
-└── .github/workflows/ci.yml   # CI: vet / test / lint / proto-check
+├── Makefile                   # build / test / lint / proto-gen / test-e2e
+└── .github/workflows/ci.yml   # CI: vet / test / lint / proto-check / e2e
 ```
 
 The full target architecture (including phases that have not yet

@@ -29,6 +29,16 @@ build:
 test:
 	$(GO) test -race -cover $(PKGS)
 
+.PHONY: test-e2e
+test-e2e:
+	@echo "Bringing up storage plane (postgres, redis, kafka, qdrant)..."
+	docker compose up -d --wait
+	@echo "Running e2e smoke tests..."
+	E2E_ENABLED=1 \
+	CONTEXT_ENGINE_DATABASE_URL="host=localhost user=hf password=hf dbname=hunting_fishball port=5432 sslmode=disable" \
+	CONTEXT_ENGINE_QDRANT_URL="http://localhost:6333" \
+	$(GO) test -tags=e2e -race -count=1 -timeout 5m ./tests/e2e/...
+
 .PHONY: vet
 vet:
 	$(GO) vet $(PKGS)
