@@ -47,16 +47,17 @@ type fakeFetch struct{}
 
 func (fakeFetch) FetchEvent(_ context.Context, evt pipeline.IngestEvent) (*pipeline.Document, error) {
 	return &pipeline.Document{
-		TenantID:    evt.TenantID,
-		SourceID:    evt.SourceID,
-		DocumentID:  evt.DocumentID,
-		NamespaceID: evt.NamespaceID,
-		Title:       evt.Title,
-		MIMEType:    evt.MIMEType,
-		Content:     evt.InlineContent,
-		ContentHash: pipeline.HashContent(evt.InlineContent),
-		IngestedAt:  time.Now().UTC(),
-		Metadata:    evt.Metadata,
+		TenantID:     evt.TenantID,
+		SourceID:     evt.SourceID,
+		DocumentID:   evt.DocumentID,
+		NamespaceID:  evt.NamespaceID,
+		Title:        evt.Title,
+		MIMEType:     evt.MIMEType,
+		PrivacyLabel: evt.PrivacyLabel,
+		Content:      evt.InlineContent,
+		ContentHash:  pipeline.HashContent(evt.InlineContent),
+		IngestedAt:   time.Now().UTC(),
+		Metadata:     evt.Metadata,
 	}, nil
 }
 

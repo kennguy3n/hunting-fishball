@@ -13,7 +13,10 @@ import (
 // the embedding written to Qdrant. Indexes are tenant-scoped.
 type Chunk struct {
 	// ID is the canonical chunk identifier — also used as the Qdrant
-	// point ID. Format: "<tenant_id>:<document_id>:<block_id>".
+	// point ID. The Stage 4 storer mints it as a UUIDv5 derived from
+	// the (tenant_id, document_id, block_id) triple so the same ID is
+	// stable across runs and acceptable to Qdrant (which only accepts
+	// u64 / UUID point ids).
 	ID string `gorm:"type:varchar(128);primaryKey;column:id" json:"id"`
 
 	// TenantID is the multi-tenant scope. Indexed.

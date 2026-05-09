@@ -132,8 +132,11 @@ func NewConsumer(group sarama.ConsumerGroup, cfg ConsumerConfig) (*Consumer, err
 		}
 	}
 	cfg.Coordinator.cfg.OnDLQ = func(ctx context.Context, evt IngestEvent, err error) {
-		c.markDone(ctx, evt, err)
+		// Publish to DLQ first so ConsumeClaim's MarkMessage cannot
+		// race with the DLQ producer (markDone is what unblocks
+		// ConsumeClaim).
 		c.publishDLQ(evt, err)
+		c.markDone(ctx, evt, err)
 		if prevDLQ != nil {
 			prevDLQ(ctx, evt, err)
 		}

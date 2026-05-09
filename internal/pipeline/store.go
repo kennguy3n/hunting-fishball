@@ -5,8 +5,23 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
+
+// chunkNamespace seeds the deterministic UUIDv5 we mint for each chunk.
+// Qdrant rejects arbitrary strings as point IDs (it accepts only u64
+// or UUID), so the (tenant, document, block) composite key is hashed
+// into a UUIDv5 derived from this fixed namespace. The result is stable
+// across runs, which preserves Stage 4 idempotency.
+var chunkNamespace = uuid.MustParse("6f4f3a52-4e8c-4d6d-9f3e-2b6f5a3a1c20")
+
+// chunkID hashes the composite key into a deterministic UUIDv5 used
+// both as the chunks.id primary key and as the Qdrant point id.
+func chunkID(tenantID, documentID, blockID string) string {
+	return uuid.NewSHA1(chunkNamespace, []byte(tenantID+":"+documentID+":"+blockID)).String()
+}
 
 // VectorStore is the narrow interface Stage 4 needs from the
 // QdrantClient. Tests inject an in-memory fake.
@@ -96,8 +111,9 @@ func (s *Storer) Store(ctx context.Context, doc *Document, blocks []Block, embed
 	// Build the rows.
 	chunks := make([]storage.Chunk, len(blocks))
 	points := make([]storage.QdrantPoint, len(blocks))
+	uri := uriFromMetadata(doc.Metadata)
 	for i, b := range blocks {
-		id := fmt.Sprintf("%s:%s:%s", doc.TenantID, doc.DocumentID, b.BlockID)
+		id := chunkID(doc.TenantID, doc.DocumentID, b.BlockID)
 		chunks[i] = storage.Chunk{
 			ID:           id,
 			TenantID:     doc.TenantID,
@@ -107,7 +123,7 @@ func (s *Storer) Store(ctx context.Context, doc *Document, blocks []Block, embed
 			BlockID:      b.BlockID,
 			ContentHash:  doc.ContentHash,
 			Title:        doc.Title,
-			URI:          uriFromMetadata(doc.Metadata),
+			URI:          uri,
 			Connector:    s.cfg.Connector,
 			PrivacyLabel: doc.PrivacyLabel,
 			Text:         b.Text,
@@ -115,9 +131,11 @@ func (s *Storer) Store(ctx context.Context, doc *Document, blocks []Block, embed
 		}
 		payload := map[string]any{
 			"document_id":   doc.DocumentID,
+			"source_id":     doc.SourceID,
 			"namespace_id":  doc.NamespaceID,
 			"block_id":      b.BlockID,
 			"title":         doc.Title,
+			"uri":           uri,
 			"connector":     s.cfg.Connector,
 			"privacy_label": doc.PrivacyLabel,
 			"text":          b.Text,
