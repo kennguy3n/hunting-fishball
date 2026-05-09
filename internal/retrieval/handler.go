@@ -384,6 +384,89 @@ func (h *Handler) retrieve(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// RetrieveWithSnapshot runs the retrieval pipeline against an
+// explicit policy.PolicySnapshot, bypassing the configured
+// PolicyResolver. It is the bridge the Phase 4 simulator's
+// Retriever uses to compare live vs draft policy hits against the
+// same corpus.
+//
+// The semantic cache is intentionally NOT consulted on this path:
+// cached entries are gated by the live snapshot at write time, so
+// reusing a cache entry for a draft snapshot would silently leak
+// the live policy decisions into the simulated draft view. The
+// pipeline still runs the privacy-label PolicyFilter, the ACL +
+// recipient gate against the supplied snapshot, and rerank — i.e.
+// every gate the gin handler applies, except cache I/O.
+//
+// req.PrivacyMode is honoured only as a fallback when both the
+// supplied snapshot's EffectiveMode and HandlerConfig
+// .DefaultPrivacyMode are empty (matching the gin handler's
+// resolver-driven precedence).
+func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot) (RetrieveResponse, error) {
+	if tenantID == "" {
+		return RetrieveResponse{}, errors.New("retrieval: tenantID is required")
+	}
+	if req.Query == "" {
+		return RetrieveResponse{}, errors.New("retrieval: query is required")
+	}
+
+	topK := req.TopK
+	if topK == 0 {
+		topK = h.cfg.DefaultTopK
+	}
+	if topK < 0 {
+		return RetrieveResponse{}, errors.New("retrieval: top_k must be >= 0")
+	}
+	if topK > h.cfg.MaxTopK {
+		topK = h.cfg.MaxTopK
+	}
+
+	privacyMode := req.PrivacyMode
+	if privacyMode == "" {
+		privacyMode = h.cfg.DefaultPrivacyMode
+	}
+	if snapshot.EffectiveMode != "" {
+		privacyMode = string(snapshot.EffectiveMode)
+	}
+
+	vec, err := h.cfg.Embedder.EmbedQuery(ctx, tenantID, req.Query)
+	if err != nil {
+		return RetrieveResponse{}, err
+	}
+
+	streams, degraded := h.fanOut(ctx, tenantID, req, vec, topK)
+
+	merged := h.cfg.Merger.Merge(streams...)
+	reranked, rerr := h.cfg.Reranker.Rerank(ctx, req.Query, merged)
+	if rerr != nil {
+		return RetrieveResponse{}, rerr
+	}
+
+	pres := h.cfg.PolicyFilter.Apply(reranked, privacyMode)
+	postPolicy, blockedByACL, blockedByRecipient := applyPolicySnapshot(pres.Allowed, snapshot, req.SkillID)
+	pres.Allowed = postPolicy
+	pres.BlockedCount += blockedByACL + blockedByRecipient
+	if len(pres.Allowed) > topK {
+		pres.Allowed = pres.Allowed[:topK]
+	}
+
+	resp := RetrieveResponse{
+		Hits: make([]RetrieveHit, 0, len(pres.Allowed)),
+		Policy: RetrievePolicy{
+			Applied:      appliedSources(streams),
+			Degraded:     degraded,
+			BlockedCount: pres.BlockedCount,
+			PrivacyMode:  privacyMode,
+		},
+	}
+	for _, m := range pres.Allowed {
+		hit := hitFromMatch(m)
+		hit.PrivacyStrip = BuildPrivacyStrip(m, snapshot)
+		resp.Hits = append(resp.Hits, hit)
+	}
+	return resp, nil
+}
+
 // fanOut runs every wired-in backend in parallel under
 // errgroup.WithContext, applying a per-backend deadline. Returns the
 // per-stream []*Match list and the list of degraded sources.

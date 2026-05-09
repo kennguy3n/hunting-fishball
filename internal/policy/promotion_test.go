@@ -16,12 +16,28 @@ import (
 // the production repository does, so a promotion path that builds an
 // AuditLog without an ID fails the test instead of silently passing
 // through a slice append. Mirrors internal/admin/source_handler_test.go.
+//
+// fakeAudit also captures the *gorm.DB CreateInTx was called with so
+// tests can assert audit writes ride the same tx as the rest of the
+// promotion (the transactional-outbox guarantee).
 type fakeAudit struct {
 	mu   sync.Mutex
 	logs []*audit.AuditLog
+	txs  []*gorm.DB
 }
 
 func (f *fakeAudit) Create(_ context.Context, log *audit.AuditLog) error {
+	return f.record(nil, log)
+}
+
+func (f *fakeAudit) CreateInTx(_ context.Context, tx *gorm.DB, log *audit.AuditLog) error {
+	if tx == nil {
+		return errors.New("fakeAudit: nil tx")
+	}
+	return f.record(tx, log)
+}
+
+func (f *fakeAudit) record(tx *gorm.DB, log *audit.AuditLog) error {
 	if log == nil {
 		return errors.New("fakeAudit: nil log")
 	}
@@ -31,6 +47,7 @@ func (f *fakeAudit) Create(_ context.Context, log *audit.AuditLog) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logs = append(f.logs, log)
+	f.txs = append(f.txs, tx)
 	return nil
 }
 
@@ -44,20 +61,33 @@ func (f *fakeAudit) actions() []audit.Action {
 	return out
 }
 
+func (f *fakeAudit) lastTx() *gorm.DB {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.txs) == 0 {
+		return nil
+	}
+	return f.txs[len(f.txs)-1]
+}
+
 // fakeLiveStore records ApplySnapshot calls and lets a test return a
-// canned error to exercise the rollback path.
+// canned error to exercise the rollback path. It also captures the
+// *gorm.DB tx it was handed so the AuditUsesTx test can assert the
+// audit and live-store writes share the outer transaction.
 type fakeLiveStore struct {
 	mu       sync.Mutex
 	called   int
 	lastSnap policy.PolicySnapshot
+	lastTx   *gorm.DB
 	err      error
 }
 
-func (f *fakeLiveStore) ApplySnapshot(_ context.Context, _ *gorm.DB, _, _ string, snap policy.PolicySnapshot) error {
+func (f *fakeLiveStore) ApplySnapshot(_ context.Context, tx *gorm.DB, _, _ string, snap policy.PolicySnapshot) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.called++
 	f.lastSnap = snap
+	f.lastTx = tx
 	return f.err
 }
 
@@ -263,6 +293,67 @@ func TestPromoter_RejectDraft_RejectsTerminal(t *testing.T) {
 	_, err := p.RejectDraft(ctx, "tenant-a", d.ID, "actor-1", "")
 	if !errors.Is(err, policy.ErrDraftTerminal) {
 		t.Fatalf("expected ErrDraftTerminal, got %v", err)
+	}
+}
+
+// TestPromoter_PromoteDraft_AuditWritesUseOuterTx is the regression
+// test for the transactional-outbox bug: the audit row MUST be
+// inserted via CreateInTx (riding the closure's tx), not via Create
+// (which would use the repository's default DB handle and survive an
+// outer-tx rollback).
+//
+// The test asserts that the *gorm.DB pointer captured by the audit
+// writer equals the pointer captured by the live store. Both are
+// supposed to be the tx GORM hands to the Transaction closure, so
+// equality proves the audit insert is enrolled in the same tx as
+// the live-store write — which is exactly what CreateInTx
+// guarantees and Create does not.
+func TestPromoter_PromoteDraft_AuditWritesUseOuterTx(t *testing.T) {
+	t.Parallel()
+	p, repo, live, ad := newPromoter(t)
+	ctx := context.Background()
+
+	d := policy.NewDraft("tenant-a", "", "ken", policy.PolicySnapshot{
+		EffectiveMode: policy.PrivacyModeRemote,
+	})
+	if err := repo.Create(ctx, d); err != nil {
+		t.Fatalf("Create draft: %v", err)
+	}
+
+	if _, err := p.PromoteDraft(ctx, "tenant-a", d.ID, "actor-1"); err != nil {
+		t.Fatalf("PromoteDraft: %v", err)
+	}
+
+	if live.lastTx == nil {
+		t.Fatal("fakeLiveStore did not capture a tx")
+	}
+	auditTx := ad.lastTx()
+	if auditTx == nil {
+		t.Fatal("fakeAudit did not capture a tx (CreateInTx not called?)")
+	}
+	if auditTx != live.lastTx {
+		t.Fatalf("audit tx %p != live-store tx %p — audit did not ride the outer tx", auditTx, live.lastTx)
+	}
+}
+
+// TestPromoter_RejectDraft_AuditWritesUseOuterTx mirrors the
+// PromoteDraft regression test for the rejection path.
+func TestPromoter_RejectDraft_AuditWritesUseOuterTx(t *testing.T) {
+	t.Parallel()
+	p, repo, _, ad := newPromoter(t)
+	ctx := context.Background()
+
+	d := policy.NewDraft("tenant-a", "", "ken", policy.PolicySnapshot{})
+	if err := repo.Create(ctx, d); err != nil {
+		t.Fatalf("Create draft: %v", err)
+	}
+
+	if _, err := p.RejectDraft(ctx, "tenant-a", d.ID, "actor-1", "stale"); err != nil {
+		t.Fatalf("RejectDraft: %v", err)
+	}
+
+	if ad.lastTx() == nil {
+		t.Fatal("fakeAudit did not capture a tx (CreateInTx not called?)")
 	}
 }
 

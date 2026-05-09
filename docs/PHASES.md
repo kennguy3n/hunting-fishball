@@ -33,8 +33,11 @@ phase.
 > deferred to Phase 8 load tests. **Phase 4** is **🟡 partial** as of
 > 2026-05-09 — privacy modes (`no-ai`/`local-only`/`local-api`/
 > `hybrid`/`remote`), allow/deny lists, recipient policy, the policy
-> simulator (what-if + data-flow diff + conflict detection), draft
-> isolation with audited promotion, the GORM-backed live store, and
+> simulator (what-if + data-flow diff + conflict detection) wired to
+> a live resolver and the retrieval handler's `RetrieveWithSnapshot`
+> entrypoint, draft isolation with audited promotion (transactional —
+> audit row rolls back with the live-table writes via
+> `AuditWriter.CreateInTx`), the GORM-backed live store, and
 > privacy-strip enrichment of retrieval responses have all landed; the
 > client-side privacy-strip render lands with the B2B/B2C UIs in
 > Phase 6. Every other phase below is currently `⏳ planned`. As
@@ -182,7 +185,10 @@ policy simulator. Privacy strip surfaces in every client.
       `internal/policy/promotion.go`,
       `internal/policy/live_store.go`; promotion emits
       `policy.promoted` / `policy.rejected` audit events transactionally
-      with the live-table writes).
+      with the live-table writes — the `AuditWriter` port now exposes
+      `CreateInTx` so the audit row rides the same `*gorm.DB`
+      transaction as `LiveStore.ApplySnapshot` /
+      `Drafts.MarkPromoted`).
 - [x] `privacy_label` returned on every retrieval row.
 - [x] Privacy strip enrichment in retrieval response
       (`internal/retrieval/privacy_strip.go`; every `RetrieveHit`

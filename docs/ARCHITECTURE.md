@@ -485,10 +485,14 @@ hunting-fishball/
 │   │                          # (what-if), simulator_diff.go
 │   │                          # (data-flow diff), simulator_conflict.go
 │   │                          # (conflict detection), draft.go +
-│   │                          # promotion.go (audited promotion FSM),
+│   │                          # promotion.go (audited promotion FSM,
+│   │                          # AuditWriter.CreateInTx so the audit
+│   │                          # row rides the outer tx),
 │   │                          # live_store.go (transactional GORM
 │   │                          # writes to migrations/004_policy.sql
-│   │                          # tables)
+│   │                          # tables) + live_resolver.go (the read
+│   │                          # counterpart used by both retrieval
+│   │                          # and the simulator)
 │   ├── pipeline/              # 4-stage pipeline (Phase 1):
 │   │                          # consumer / coordinator / fetch / parse
 │   │                          # / embed / store. Phase 2 added
@@ -713,7 +717,32 @@ hunting-fishball/
   inside the supplied transaction. Wipe-and-replace semantics on
   the rule tables make a draft the desired-state representation:
   promote = "make live look exactly like this draft", with no
-  diff-and-merge ambiguity.
+  diff-and-merge ambiguity. The audit emit is part of the same
+  transaction: `policy.AuditWriter.CreateInTx` joins the
+  `policy.promoted` / `policy.rejected` row to the outer tx, so a
+  `LiveStore` failure rolls the audit log back along with the rest
+  rather than leaving a "promoted" event for a promotion that never
+  happened.
+- **GORM live resolver:** `internal/policy/live_resolver.go`
+  (`LiveResolverGORM`) is the read counterpart to `LiveStoreGORM`.
+  It hydrates a `PolicySnapshot` from the same live policy tables —
+  resolving the strict-vs-permissive merge of tenant + channel
+  privacy mode, unioning tenant-wide and channel-specific ACL rules,
+  and respecting the channel's `recipient_default` for
+  `RecipientPolicy.DefaultAllow`. Wired into the retrieval
+  handler's `PolicyResolver` port and into the simulator's
+  `LiveResolver` port in `cmd/api/main.go`, so the same live state
+  drives production retrieval and what-if simulation.
+- **Snapshot-driven retrieval:**
+  `retrieval.Handler.RetrieveWithSnapshot` is the simulator's
+  in-process bridge into the retrieval pipeline. It runs the full
+  embed → fan-out → RRF merge → rerank → ACL/recipient gate
+  sequence against an explicit `PolicySnapshot`, deliberately
+  bypassing the semantic cache (a draft snapshot's rules must not
+  contaminate the live cache or vice versa). `cmd/api/main.go`
+  projects `policy.SimRetrieveRequest` ↔ `retrieval.RetrieveRequest`
+  through a thin `simulatorRetriever` adapter so the simulator and
+  the gin handler share one retrieval implementation.
 - **Admin HTTP surface:** `internal/admin/simulator_handler.go`
   mounts the policy endpoints under `/v1/admin/policy/`:
   `POST/GET /drafts`, `GET /drafts/:id`,

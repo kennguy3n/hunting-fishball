@@ -288,8 +288,10 @@ hunting-fishball/
 │   │                          # simulator_diff.go,
 │   │                          # simulator_conflict.go), draft store
 │   │                          # (draft.go), promotion FSM
-│   │                          # (promotion.go), GORM live store
-│   │                          # (live_store.go)
+│   │                          # (promotion.go, transactional audit via
+│   │                          # AuditWriter.CreateInTx), GORM live
+│   │                          # store (live_store.go) + live resolver
+│   │                          # (live_resolver.go)
 │   ├── pipeline/              # 4-stage pipeline (Phase 1):
 │   │                          # consumer / coordinator / fetch / parse
 │   │                          # / embed / store. Phase 2 adds
@@ -315,7 +317,12 @@ hunting-fishball/
 │   └── gen_protos.sh          # regenerates _proto/ from proto/
 ├── migrations/                # SQL migrations (audit_logs, ...)
 ├── tests/
-│   ├── e2e/                   # docker-compose smoke test (//go:build e2e)
+│   ├── e2e/                   # docker-compose smoke test (//go:build e2e):
+│   │                          # smoke_test.go covers Phase 1 (pipeline
+│   │                          # + retrieval + audit), phase234_test.go
+│   │                          # covers Phase 2/3/4 (admin source CRUD,
+│   │                          # ACL-deny via LiveResolverGORM, draft
+│   │                          # promote/reject, simulator endpoints)
 │   ├── integration/           # Go ↔ Python gRPC tests (//go:build integration)
 │   └── benchmark/             # pipeline + retrieval benchmarks
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
