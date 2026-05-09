@@ -26,9 +26,12 @@ jobs:
           cache: true
 
       - name: Install protoc
+        env:
+          PROTOC_VERSION: "25.3"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          curl -sSLo /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -q -o /tmp/protoc.zip -d /usr/local
+          protoc --version
 
       - name: go mod download
         run: go mod download
