@@ -585,3 +585,119 @@ func TestFanout_CacheHit_AppliesRecipientPolicy(t *testing.T) {
 		t.Fatalf("BlockedCount must reflect recipient denial: %d", got.Policy.BlockedCount)
 	}
 }
+
+// TestFanout_CacheKey_DiffersByEffectiveMode exercises the regression
+// where scopeHashFor hashed req.PrivacyMode (raw request field) but
+// the handler may override it with snapshot.EffectiveMode from the
+// PolicyResolver. Two requests with identical req.PrivacyMode but
+// different resolver-determined effective modes must compute distinct
+// cache keys — otherwise an admin tightening the tenant policy from
+// "remote" to "local-only" leaves stale cache entries serving the
+// more permissive mode until the TTL expires.
+func TestFanout_CacheKey_DiffersByEffectiveMode(t *testing.T) {
+	t.Parallel()
+
+	cacheA := &fakeCache{}
+	vsA := &fakeVectorStore{
+		hits: []storage.QdrantHit{{ID: "chunk-1", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}}},
+	}
+	hA, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore:    vsA,
+		Embedder:       &fakeEmbedder{vec: []float32{1}},
+		Cache:          cacheA,
+		PolicyResolver: stubResolver{snap: retrieval.PolicySnapshot{EffectiveMode: policy.PrivacyModeRemote}},
+	})
+	rA := newRouter(t, hA, "tenant-a")
+
+	cacheB := &fakeCache{}
+	vsB := &fakeVectorStore{
+		hits: []storage.QdrantHit{{ID: "chunk-1", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}}},
+	}
+	hB, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore:    vsB,
+		Embedder:       &fakeEmbedder{vec: []float32{1}},
+		Cache:          cacheB,
+		PolicyResolver: stubResolver{snap: retrieval.PolicySnapshot{EffectiveMode: policy.PrivacyModeLocalOnly}},
+	})
+	rB := newRouter(t, hB, "tenant-a")
+
+	// Identical req.PrivacyMode, different resolver-determined modes.
+	wA := doPost(rA, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "remote"})
+	if wA.Code != http.StatusOK {
+		t.Fatalf("remote-mode status: %d body=%s", wA.Code, wA.Body.String())
+	}
+	wB := doPost(rB, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "remote"})
+	if wB.Code != http.StatusOK {
+		t.Fatalf("local-only status: %d body=%s", wB.Code, wB.Body.String())
+	}
+
+	cacheA.mu.Lock()
+	defer cacheA.mu.Unlock()
+	cacheB.mu.Lock()
+	defer cacheB.mu.Unlock()
+	if len(cacheA.setHashes) != 1 || len(cacheB.setHashes) != 1 {
+		t.Fatalf("expected one Set per handler: A=%v B=%v", cacheA.setHashes, cacheB.setHashes)
+	}
+	if cacheA.setHashes[0] == cacheB.setHashes[0] {
+		t.Fatalf("scope hash must differ by resolver-determined mode; both = %q", cacheA.setHashes[0])
+	}
+	if len(cacheA.getHashes) != 1 || len(cacheB.getHashes) != 1 {
+		t.Fatalf("expected one Get per handler: A=%v B=%v", cacheA.getHashes, cacheB.getHashes)
+	}
+	if cacheA.getHashes[0] == cacheB.getHashes[0] {
+		t.Fatalf("Get scope hash must differ by resolver-determined mode: %q vs %q", cacheA.getHashes[0], cacheB.getHashes[0])
+	}
+}
+
+// TestFanout_CacheHit_AppliesPrivacyMode verifies the cache-hit
+// short-circuit re-applies the privacy-label PolicyFilter using the
+// resolved effective mode. A cache entry written under a permissive
+// privacy mode must NOT serve chunks that exceed a subsequently
+// tightened mode — even before the entry's scope-hash slot rolls
+// over to a fresh entry under the new mode.
+func TestFanout_CacheHit_AppliesPrivacyMode(t *testing.T) {
+	t.Parallel()
+
+	cached := &storage.CachedResult{
+		Hits: []storage.CachedHit{
+			{ID: "pub-1", TenantID: "tenant-a", PrivacyLabel: "public"},
+			{ID: "sec-1", TenantID: "tenant-a", PrivacyLabel: "secret"},
+			{ID: "pub-2", TenantID: "tenant-a", PrivacyLabel: "public"},
+		},
+	}
+	cache := &fakeCache{getValue: cached}
+	// Resolver pins the effective mode to "public" — only public-labelled
+	// chunks may pass; the cached secret-labelled chunk must drop.
+	resolver := stubResolver{snap: retrieval.PolicySnapshot{EffectiveMode: policy.PrivacyMode("public")}}
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore:    &fakeVectorStore{},
+		Embedder:       &fakeEmbedder{vec: []float32{1}},
+		Cache:          cache,
+		PolicyResolver: resolver,
+	})
+	r := newRouter(t, h, "tenant-a")
+	// Caller asks for "secret" but the resolver tightens to "public".
+	w := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 10, PrivacyMode: "secret"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body: %s", w.Code, w.Body.String())
+	}
+	var got retrieval.RetrieveResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if !got.Policy.CacheHit {
+		t.Fatalf("expected cache hit")
+	}
+	if got.Policy.PrivacyMode != "public" {
+		t.Fatalf("response must reflect resolved mode, got %q", got.Policy.PrivacyMode)
+	}
+	if len(got.Hits) != 2 {
+		t.Fatalf("privacy filter must drop secret-labelled chunk on cache-hit path: %v", topNIDs(got.Hits))
+	}
+	for _, hit := range got.Hits {
+		if hit.ID == "sec-1" {
+			t.Fatalf("secret chunk leaked through cache-hit privacy filter: %v", topNIDs(got.Hits))
+		}
+	}
+	if got.Policy.BlockedCount != 1 {
+		t.Fatalf("BlockedCount must reflect cache-hit privacy drop: %d", got.Policy.BlockedCount)
+	}
+}

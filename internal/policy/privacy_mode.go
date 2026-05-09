@@ -90,8 +90,12 @@ func normalisePrivacyMode(s string) (PrivacyMode, bool) {
 }
 
 // rankOf returns the strictness rank of m. Strictest (NoAI) → 0;
-// least strict (Remote) → len-1; unknown → len (treated as more
-// strict than every known mode so unknown values fail closed).
+// least strict (Remote) → len-1; unknown → -1. EffectiveMode treats
+// unknown as "defer to the other input" (and falls back to NoAI when
+// both are unknown), so the only path by which an unknown mode can
+// widen policy is when the other input is *also* unknown — which
+// already collapses to NoAI. Callers outside EffectiveMode must do
+// their own < 0 check before using the result as an index.
 func rankOf(m PrivacyMode) int {
 	for i, om := range orderedModes {
 		if om == m {

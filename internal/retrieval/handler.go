@@ -295,23 +295,29 @@ func (h *Handler) retrieve(c *gin.Context) {
 	}
 
 	channelID := firstNonEmpty(req.Channels)
-	scopeHash := scopeHashFor(req, topK)
+	scopeHash := scopeHashFor(req, topK, privacyMode)
 
 	// Cache short-circuit. A cache hit serves the response without
 	// any fan-out (ARCHITECTURE.md §4.4). On error the handler
 	// degrades to a fan-out — a stale cache should never take
 	// retrieval offline.
 	//
-	// The Phase 4 ACL + recipient gates are re-evaluated on the
-	// cache-hit path because the cache TTL is minutes-long: a
-	// policy change between write and read must NOT serve content
-	// the new policy denies.
+	// The Phase 4 privacy-label PolicyFilter, ACL, and recipient
+	// gates are re-evaluated on the cache-hit path because the
+	// cache TTL is minutes-long: a policy change between write and
+	// read must NOT serve content the new policy denies. Note that
+	// scopeHashFor already keys on the resolved privacyMode, so a
+	// post-resolver mode change writes to a fresh slot — but until
+	// that slot is populated, the prior slot can still hand out
+	// matches from the more permissive mode. Re-running the gates
+	// here closes that window without having to invalidate.
 	if h.cfg.Cache != nil {
 		cached, cerr := h.cfg.Cache.Get(c.Request.Context(), tenantID, channelID, vec, scopeHash)
 		if cerr == nil && cached != nil {
-			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(cached, snapshot, req.SkillID)
+			filtered, blockedByPrivacy := filterCachedByPrivacyMode(cached, h.cfg.PolicyFilter, privacyMode)
+			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
-			resp.Policy.BlockedCount = blockedByACL + blockedByRecipient
+			resp.Policy.BlockedCount = blockedByPrivacy + blockedByACL + blockedByRecipient
 			c.JSON(http.StatusOK, resp)
 
 			return
@@ -655,9 +661,17 @@ func appliedSources(streams [][]*Match) []string {
 // different SkillIDs but identical query/channel/topK would share a
 // cache slot and bypass the recipient gate.
 //
+// privacyMode is the *resolved* effective mode (post-PolicyResolver),
+// NOT req.PrivacyMode. Hashing the raw request field would let two
+// requests with the same req.PrivacyMode but different resolver-
+// determined effective modes (e.g. after an admin tightens the
+// tenant policy from "remote" to "local-only") share a cache slot —
+// stale entries from the more permissive mode would keep serving
+// until the TTL expired. The resolved mode closes that window.
+//
 // Bump this hash whenever request fields that affect the result set
 // are added.
-func scopeHashFor(req RetrieveRequest, topK int) string {
+func scopeHashFor(req RetrieveRequest, topK int, privacyMode string) string {
 	h := sha256.New()
 	for _, v := range req.Sources {
 		_, _ = h.Write([]byte(v))
@@ -674,7 +688,7 @@ func scopeHashFor(req RetrieveRequest, topK int) string {
 		_, _ = h.Write([]byte{0})
 	}
 	_, _ = h.Write([]byte("|privacy|"))
-	_, _ = h.Write([]byte(req.PrivacyMode))
+	_, _ = h.Write([]byte(privacyMode))
 	_, _ = h.Write([]byte("|skill|"))
 	_, _ = h.Write([]byte(req.SkillID))
 	_, _ = h.Write([]byte("|topk|"))

@@ -76,6 +76,47 @@ func applyPolicySnapshot(allowed []*Match, snap PolicySnapshot, skillID string) 
 	return out, blockedByACL, 0
 }
 
+// filterCachedByPrivacyMode re-applies the privacy-label PolicyFilter
+// to a CachedResult on the cache-hit path using the *resolved*
+// effective privacy mode. The retrieval cache TTL is minutes-long, so
+// when an admin tightens the tenant/channel mode between cache write
+// and read, cached chunks whose PrivacyLabel exceeds the new mode
+// MUST be dropped — otherwise the more permissive mode keeps leaking
+// content until the TTL expires.
+//
+// Returns the (possibly trimmed) CachedResult and the count blocked
+// by privacy mode. nil PolicyFilter is a pass-through (used by call
+// sites where the filter is intentionally disabled).
+func filterCachedByPrivacyMode(c *storage.CachedResult, pf *PolicyFilter, privacyMode string) (*storage.CachedResult, int) {
+	if c == nil || len(c.Hits) == 0 || pf == nil {
+		return c, 0
+	}
+	shadows := make([]*Match, len(c.Hits))
+	for i, h := range c.Hits {
+		shadows[i] = &Match{ID: h.ID, PrivacyLabel: h.PrivacyLabel}
+	}
+	pres := pf.Apply(shadows, privacyMode)
+	if pres.BlockedCount == 0 {
+		return c, 0
+	}
+	keep := make(map[string]struct{}, len(pres.Allowed))
+	for _, m := range pres.Allowed {
+		keep[m.ID] = struct{}{}
+	}
+	out := &storage.CachedResult{
+		Hits:     make([]storage.CachedHit, 0, len(pres.Allowed)),
+		CachedAt: c.CachedAt,
+		ChunkIDs: make([]string, 0, len(pres.Allowed)),
+	}
+	for _, h := range c.Hits {
+		if _, ok := keep[h.ID]; ok {
+			out.Hits = append(out.Hits, h)
+			out.ChunkIDs = append(out.ChunkIDs, h.ID)
+		}
+	}
+	return out, pres.BlockedCount
+}
+
 // filterCachedBySnapshot re-applies the Phase 4 ACL + recipient gates
 // to a CachedResult on the cache-hit path. The retrieval cache TTL is
 // minutes-long, so a policy change between cache write and read MUST
