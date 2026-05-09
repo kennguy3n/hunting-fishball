@@ -83,7 +83,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 4 — Policy framework + simulator + privacy strip
 
-**Status.** 🟡 partial | ~95%
+**Status.** 🟡 partial | ~98%
 
 - [x] Tenant- and channel-scoped privacy mode
       (`internal/policy/privacy_mode.go`,
@@ -108,7 +108,10 @@ This document tracks the *actual* state of the platform. The shape mirrors
       (`internal/policy/draft.go`, `migrations/005_policy_drafts.sql`,
       `internal/policy/promotion.go` with `policy.promoted` /
       `policy.rejected` audit events; `internal/policy/live_store.go`
-      writes the live tables transactionally)
+      writes the live tables transactionally; the
+      `AuditWriter.CreateInTx` port pulls the audit row inside the
+      same `*gorm.DB` transaction so a `LiveStore` failure rolls the
+      audit log back with the rest)
 - [x] `privacy_label` returned on every retrieval row
 - [x] Privacy strip enrichment in retrieval response
       (`internal/retrieval/privacy_strip.go`, every `RetrieveHit`
@@ -121,6 +124,13 @@ This document tracks the *actual* state of the platform. The shape mirrors
       `POST /v1/admin/policy/simulate`,
       `POST /v1/admin/policy/simulate/diff`,
       `POST /v1/admin/policy/conflicts`)
+- [x] Simulator wired to live state in `cmd/api`:
+      `policy.NewLiveResolverGORM` reads the live policy tables
+      defined in `migrations/004_policy.sql`, and the simulator's
+      `Retriever` delegates to
+      `retrieval.Handler.RetrieveWithSnapshot` so what-if /
+      data-flow diff calls run the full fan-out + merge + rerank
+      pipeline against the draft snapshot.
 - [ ] Privacy strip rendered in admin portal, desktop, and mobile UIs
       (server-side enrichment shipped; client-side rendering tracked
       separately under Phase 6)
@@ -248,6 +258,25 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-09: Phase 4 hardening (~98%): transactional audit on
+  promotion / rejection — `policy.AuditWriter` now exposes
+  `CreateInTx` and `internal/policy/promotion.go` emits the
+  `policy.promoted` / `policy.rejected` audit row inside the outer
+  `*gorm.DB` transaction, so a `LiveStore.ApplySnapshot` /
+  `MarkPromoted` failure rolls the audit row back along with the
+  rest. Live simulator wiring in `cmd/api`:
+  `policy.NewLiveResolverGORM` (new
+  `internal/policy/live_resolver.go`) reads the live policy tables
+  from `migrations/004_policy.sql`, and the simulator's `Retriever`
+  port now delegates to `retrieval.Handler.RetrieveWithSnapshot`
+  (new method that runs the full fan-out + merge + rerank +
+  ACL/recipient gate against an explicit snapshot, deliberately
+  bypassing the cache). Phase 2/3/4 e2e coverage in
+  `tests/e2e/phase234_test.go`: admin source CRUD,
+  ACL-deny-drops-hits via `LiveResolverGORM` +
+  `RetrieveWithSnapshot`, draft create/promote/reject through the
+  HTTP surface with a roundtrip-via-Postgres audit assertion, and
+  simulator endpoint smoke checks.
 - 2026-05-09: Phase 4 simulator + drafts + privacy strip (~95%):
   policy what-if engine (`internal/policy/simulator.go`,
   copy-on-write `PolicySnapshot.Clone()`), data-flow diff with

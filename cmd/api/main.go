@@ -102,9 +102,18 @@ func run() error {
 	}
 	queryEmbedder := &queryEmbedAdapter{e: embedder}
 
+	// LiveResolverGORM reads the live policy tables LiveStoreGORM
+	// writes (tenant_policies, channel_policies, policy_acl_rules,
+	// recipient_policies). The retrieval handler consults it on
+	// every request; the Phase 4 simulator uses the SAME instance
+	// as its LiveResolver so what-if diffs are computed against
+	// the freshest live state.
+	liveResolver := policy.NewLiveResolverGORM(db)
+
 	handlerCfg := retrieval.HandlerConfig{
-		VectorStore: qdrant,
-		Embedder:    queryEmbedder,
+		VectorStore:    qdrant,
+		Embedder:       queryEmbedder,
+		PolicyResolver: liveResolver,
 	}
 
 	// Phase 3: BM25, graph, semantic cache, Mem0. Each backend is
@@ -181,11 +190,15 @@ func run() error {
 	// Phase 4 simulator + draft policy surface. The Promoter wires
 	// the GORM-backed live store (writes the live policy tables in
 	// migrations/004_policy.sql) to the draft repo so promote =
-	// "make live look exactly like this draft, atomically". The
-	// Simulator runs against a noop LiveResolver until the GORM-
-	// backed resolver lands; the draft side of the diff is fully
-	// functional today and the live side reports an empty result
-	// set, which is the safest default.
+	// "make live look exactly like this draft, atomically".
+	//
+	// LiveResolver and Retriever are both real now: the resolver
+	// reads the same tables LiveStoreGORM writes, and the
+	// Retriever delegates to retrievalHandler.RetrieveWithSnapshot
+	// so what-if diffs run the full fan-out + merge + rerank +
+	// ACL/recipient gate against the supplied snapshot. The
+	// snapshot-driven retrieval bypasses the semantic cache by
+	// design — see the method's docstring.
 	draftRepo := policy.NewDraftRepository(db)
 	liveStore := policy.NewLiveStoreGORM(db)
 	promoter, err := policy.NewPromoter(policy.PromotionConfig{
@@ -197,20 +210,8 @@ func run() error {
 		return fmt.Errorf("policy promoter: %w", err)
 	}
 	simulator, err := policy.NewSimulator(policy.SimulatorConfig{
-		LiveResolver: policy.ResolverFunc(func(_ context.Context, _, _ string) (policy.PolicySnapshot, error) {
-			return policy.PolicySnapshot{}, nil
-		}),
-		Retriever: func(_ context.Context, _ policy.SimRetrieveRequest, _ policy.PolicySnapshot) ([]policy.RetrieveHit, error) {
-			// The retrieval-backed simulator path lands in a
-			// follow-up — wiring the full retrieval handler as
-			// the simulator's Retriever would create a back-
-			// edge from cmd/api/main.go's existing retrieval
-			// handler into the policy package. Until the
-			// simulator-internal retrieval port is split out,
-			// the API surface is mounted but returns empty
-			// hits.
-			return []policy.RetrieveHit{}, nil
-		},
+		LiveResolver: liveResolver,
+		Retriever:    simulatorRetriever(retrievalHandler),
 	})
 	if err != nil {
 		return fmt.Errorf("policy simulator: %w", err)
@@ -284,6 +285,51 @@ func (a *queryEmbedAdapter) EmbedQuery(ctx context.Context, tenantID, query stri
 	}
 
 	return out[0], nil
+}
+
+// simulatorRetriever bridges the policy.Simulator's Retriever port
+// to retrieval.Handler.RetrieveWithSnapshot. The simulator passes a
+// SimRetrieveRequest + draft PolicySnapshot; we project that into a
+// retrieval.RetrieveRequest, run the full pipeline against the
+// supplied snapshot (skipping the cache), then re-project the
+// resulting retrieval.RetrieveHits back into the policy-package
+// RetrieveHit shape so the simulator stays free of retrieval-
+// transitive deps.
+func simulatorRetriever(h *retrieval.Handler) policy.RetrieverFunc {
+	return func(ctx context.Context, req policy.SimRetrieveRequest, snap policy.PolicySnapshot) ([]policy.RetrieveHit, error) {
+		channels := []string{}
+		if req.ChannelID != "" {
+			channels = append(channels, req.ChannelID)
+		}
+		retrievalReq := retrieval.RetrieveRequest{
+			Query:    req.Query,
+			TopK:     req.TopK,
+			Channels: channels,
+			SkillID:  req.SkillID,
+		}
+		resp, err := h.RetrieveWithSnapshot(ctx, req.TenantID, retrievalReq, snap)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]policy.RetrieveHit, 0, len(resp.Hits))
+		for _, hit := range resp.Hits {
+			out = append(out, policy.RetrieveHit{
+				ID:           hit.ID,
+				Score:        hit.Score,
+				TenantID:     hit.TenantID,
+				SourceID:     hit.SourceID,
+				DocumentID:   hit.DocumentID,
+				BlockID:      hit.BlockID,
+				Title:        hit.Title,
+				URI:          hit.URI,
+				PrivacyLabel: hit.PrivacyLabel,
+				Connector:    hit.Connector,
+				Sources:      hit.Sources,
+				Metadata:     hit.Metadata,
+			})
+		}
+		return out, nil
+	}
 }
 
 // memoryAdapter wraps the Mem0 gRPC client into the

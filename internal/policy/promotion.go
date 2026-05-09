@@ -15,8 +15,16 @@ import (
 // from the audit repository. Real wiring uses *audit.Repository;
 // tests inject a recorder that runs Validate() so a missing-ID
 // AuditLog cannot slip through.
+//
+// CreateInTx is the transactional-outbox entry point: callers run
+// their business write and the audit insert under the same tx so
+// the audit row commits atomically with the promotion. Without it
+// (i.e. calling Create with the repository's default DB handle), an
+// outer-tx rollback would leave the audit row stranded and the
+// audit feed claiming a promotion that never happened.
 type AuditWriter interface {
 	Create(ctx context.Context, log *audit.AuditLog) error
+	CreateInTx(ctx context.Context, tx *gorm.DB, log *audit.AuditLog) error
 }
 
 // LiveStore is the narrow contract the promotion workflow needs to
@@ -131,7 +139,13 @@ func (p *Promoter) PromoteDraft(ctx context.Context, tenantID, draftID, actorID 
 			},
 			"",
 		)
-		return p.cfg.Audit.Create(ctx, log)
+		// CreateInTx — never Create — so the audit row joins the
+		// outer tx. A LiveStore.ApplySnapshot or MarkPromoted
+		// failure rolls the audit row back along with the rest;
+		// without this the row would commit on the repository's
+		// default handle and leave the feed claiming a promotion
+		// that never happened.
+		return p.cfg.Audit.CreateInTx(ctx, tx, log)
 	})
 	if err != nil {
 		return nil, err
@@ -171,7 +185,10 @@ func (p *Promoter) RejectDraft(ctx context.Context, tenantID, draftID, actorID, 
 			},
 			"",
 		)
-		return p.cfg.Audit.Create(ctx, log)
+		// Same transactional-outbox guarantee as PromoteDraft —
+		// the rejection audit row commits with the MarkRejected
+		// state flip or rolls back with it.
+		return p.cfg.Audit.CreateInTx(ctx, tx, log)
 	})
 	if err != nil {
 		return nil, err
