@@ -458,15 +458,20 @@ hunting-fishball/
 │   └── api/                   # context-engine-api    binary entry point
 ├── internal/
 │   ├── connector/             # SourceConnector interface, optional
-│   │                          # interfaces (DeltaSyncer / WebhookReceiver /
-│   │                          # Provisioner), process-global registry
+│   │   │                      # interfaces (DeltaSyncer / WebhookReceiver /
+│   │   │                      # Provisioner), process-global registry
+│   │   ├── googledrive/       # Google Drive connector (Phase 1)
+│   │   └── slack/             # Slack connector + Events API (Phase 1)
 │   ├── credential/            # AES-256-GCM envelope encryption for
 │   │                          # connector credentials
 │   ├── audit/                 # AuditLog model, repository (transactional
 │   │                          # outbox), Kafka outbox poller, Gin handler
-│   ├── pipeline/              # (Phase 1) pipeline coordinator
-│   ├── retrieval/             # (Phase 3) retrieval API
-│   └── storage/               # (Phase 1+) storage clients
+│   ├── pipeline/              # 4-stage pipeline (Phase 1):
+│   │                          # consumer / coordinator / fetch / parse
+│   │                          # / embed / store
+│   ├── retrieval/             # POST /v1/retrieve handler (Phase 1)
+│   └── storage/               # Qdrant + Postgres storage clients
+│                              # (Phase 1)
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
@@ -474,10 +479,13 @@ hunting-fishball/
 ├── pkg/                       # public shared types (reserved)
 ├── migrations/
 │   └── 001_audit_log.sql      # audit_logs table + indexes
+├── tests/
+│   └── e2e/                   # docker-compose smoke test
+│                              # (build tag: //go:build e2e)
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
 ├── docker-compose.yml         # local dev: Postgres / Redis / Kafka / Qdrant
-├── Makefile                   # build / test / vet / lint / proto-gen
-├── .github/workflows/ci.yml   # CI: vet / test / lint / proto-gen check
+├── Makefile                   # build / test / vet / lint / proto-gen / test-e2e
+├── .github/workflows/ci.yml   # CI: vet / test / lint / proto-gen / e2e
 ├── go.mod
 └── go.sum
 ```
@@ -498,3 +506,17 @@ hunting-fishball/
 - **Observability:** `go.opentelemetry.io/otel` is wired through go.mod
   but not yet instrumented; instrumentation lands in Phase 1 alongside
   the pipeline.
+
+### Tech choices added in Phase 1
+
+- **Vector store client:** stdlib `net/http` + JSON against the Qdrant
+  REST API (per-tenant collections, hard tenant filter on every search).
+  A native Go client lands when Phase 3's fan-out work begins.
+- **HTTP and external API clients (Google Drive, Slack):** stdlib
+  `net/http` only — keeps the binary surface small and means the same
+  test machinery (`httptest.Server`) covers every connector.
+- **Postgres driver in production:** `gorm.io/driver/postgres`.
+- **gRPC clients:** `google.golang.org/grpc` `NewClient` with
+  `insecure.NewCredentials()` for in-cluster traffic; the pipeline
+  embedder also exposes a `RemoteEmbedder` interface so external
+  embedding APIs can plug in behind per-tenant policy.

@@ -27,17 +27,17 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 1 — Single-source MVP end-to-end
 
-**Status.** ⏳ planned
+**Status.** 🟡 partial | ~100%
 
-- [ ] Google Drive connector implements `SourceConnector` with delta tokens
-- [ ] Slack connector implements `SourceConnector` with the Events API
-- [ ] Go context engine consumes from Kafka
-- [ ] Stage 1 (Fetch) Go worker
-- [ ] Stage 2 (Parse) gRPC integration with Python Docling service
-- [ ] Stage 3 (Embed) gRPC integration with Python embedding service
-- [ ] Stage 4 (Storage) Go worker — Qdrant + Postgres
-- [ ] `POST /v1/retrieve` returns top-k matches from Qdrant
-- [ ] CI end-to-end smoke test (docker-compose storage plane)
+- [x] Google Drive connector implements `SourceConnector` with delta tokens
+- [x] Slack connector implements `SourceConnector` with the Events API
+- [x] Go context engine consumes from Kafka
+- [x] Stage 1 (Fetch) Go worker
+- [x] Stage 2 (Parse) gRPC integration with Python Docling service
+- [x] Stage 3 (Embed) gRPC integration with Python embedding service
+- [x] Stage 4 (Storage) Go worker — Qdrant + Postgres
+- [x] `POST /v1/retrieve` returns top-k matches from Qdrant
+- [x] CI end-to-end smoke test (docker-compose storage plane)
 
 ## Phase 2 — B2B Admin Source Management
 
@@ -150,17 +150,17 @@ microservices behind gRPC". They cross-cut Phases 1–3 and 8.
 
 ### Go context engine — pipeline
 
-- [ ] Implement Go Kafka consumer (replacing Python `FastKafkaConsumer`)
-- [ ] Implement Go pipeline coordinator with goroutine-based workers
+- [x] Implement Go Kafka consumer (replacing Python `FastKafkaConsumer`)
+- [x] Implement Go pipeline coordinator with goroutine-based workers
       (replacing Python's `multiprocessing` `ProcessCoordinator`)
-- [ ] Implement Go Stage 1 (Fetch) worker — HTTP / S3 + retry / dedupe
-- [ ] Implement Go Stage 4 (Storage) worker — Qdrant, FalkorDB,
-      PostgreSQL writes; transactional outbox
+- [x] Implement Go Stage 1 (Fetch) worker — HTTP / S3 + retry / dedupe
+- [x] Implement Go Stage 4 (Storage) worker — Qdrant + PostgreSQL writes
+      (FalkorDB lands in Phase 3)
 
 ### Go context engine — retrieval API
 
-- [ ] Implement Go retrieval API with Gin
-- [ ] Implement Go vector search client (Qdrant)
+- [x] Implement Go retrieval API with Gin
+- [x] Implement Go vector search client (Qdrant)
 - [ ] Implement Go BM25 search (`tantivy-go` bindings)
 - [ ] Implement Go graph traversal client (FalkorDB)
 - [ ] Implement Go semantic cache (Redis)
@@ -200,6 +200,10 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-09: Phase 1 complete — Google Drive + Slack connectors, Go
+  Kafka consumer, 4-stage pipeline (fetch / parse / embed / store),
+  retrieval API (`POST /v1/retrieve`), CI smoke test against docker
+  compose storage plane.
 - 2026-05-09: Phase 0 complete — `SourceConnector` interface, registry,
   credential encryption, audit log (table + outbox + API), gRPC proto
   definitions for Docling/Embedding/Mem0.
