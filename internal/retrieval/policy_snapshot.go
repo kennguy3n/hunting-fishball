@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/kennguy3n/hunting-fishball/internal/policy"
+	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
 
 // PolicySnapshot captures every policy decision the retrieval
@@ -73,6 +74,52 @@ func applyPolicySnapshot(allowed []*Match, snap PolicySnapshot, skillID string) 
 		}
 	}
 	return out, blockedByACL, 0
+}
+
+// filterCachedBySnapshot re-applies the Phase 4 ACL + recipient gates
+// to a CachedResult on the cache-hit path. The retrieval cache TTL is
+// minutes-long, so a policy change between cache write and read MUST
+// be re-evaluated against the cached chunks rather than served stale.
+//
+// Returns the (possibly trimmed) CachedResult, the count blocked by
+// ACL, and the count blocked by recipient policy. When the recipient
+// gate denies the calling skill, the entire result set is dropped.
+//
+// The implementation projects each CachedHit into a minimal Match
+// shadow so applyPolicySnapshot is the single source of truth for the
+// gate semantics.
+func filterCachedBySnapshot(c *storage.CachedResult, snap PolicySnapshot, skillID string) (*storage.CachedResult, int, int) {
+	if c == nil || len(c.Hits) == 0 {
+		return c, 0, 0
+	}
+	shadows := make([]*Match, len(c.Hits))
+	for i, h := range c.Hits {
+		shadows[i] = &Match{
+			ID:       h.ID,
+			SourceID: h.SourceID,
+			Metadata: h.Metadata,
+		}
+	}
+	kept, blockedACL, blockedRecip := applyPolicySnapshot(shadows, snap, skillID)
+	if blockedACL == 0 && blockedRecip == 0 {
+		return c, 0, 0
+	}
+	keep := make(map[string]struct{}, len(kept))
+	for _, m := range kept {
+		keep[m.ID] = struct{}{}
+	}
+	out := &storage.CachedResult{
+		Hits:     make([]storage.CachedHit, 0, len(kept)),
+		CachedAt: c.CachedAt,
+		ChunkIDs: make([]string, 0, len(kept)),
+	}
+	for _, h := range c.Hits {
+		if _, ok := keep[h.ID]; ok {
+			out.Hits = append(out.Hits, h)
+			out.ChunkIDs = append(out.ChunkIDs, h.ID)
+		}
+	}
+	return out, blockedACL, blockedRecip
 }
 
 // metadataString safely fetches a string-valued key from a Match's

@@ -16,6 +16,8 @@ package admin
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -24,6 +26,17 @@ import (
 
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
 )
+
+// releaseLeaseScript releases a fenced lease iff the current value
+// equals the caller's token. An unconditional DEL would let a worker
+// whose lease TTL expired delete a freshly-acquired lease held by a
+// different worker, defeating the fence.
+var releaseLeaseScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+end
+return 0
+`)
 
 // ForgetSweeper is one storage tier the worker cleans. The contract
 // is intentionally minimal so each backend (Qdrant, FalkorDB, …) can
@@ -127,7 +140,14 @@ func (w *ForgetWorker) Run(ctx context.Context, job ForgetJob) error {
 		return errors.New("forget: missing tenant/source")
 	}
 	leaseKey := w.cfg.LeaseKeyPrefix + job.TenantID + ":" + job.SourceID
-	leaseToken := time.Now().UTC().Format(time.RFC3339Nano)
+	// Random token, not a timestamp: two workers acquiring within the
+	// same nanosecond could otherwise share a token and defeat the
+	// compare-and-delete on release.
+	tokenBuf := make([]byte, 16)
+	if _, err := rand.Read(tokenBuf); err != nil {
+		return fmt.Errorf("forget: lease token: %w", err)
+	}
+	leaseToken := hex.EncodeToString(tokenBuf)
 
 	ok, err := w.cfg.Lease.SetNX(ctx, leaseKey, leaseToken, w.cfg.LeaseTTL).Result()
 	if err != nil {
@@ -137,8 +157,12 @@ func (w *ForgetWorker) Run(ctx context.Context, job ForgetJob) error {
 		return ErrLeaseHeld
 	}
 	defer func() {
-		// Best-effort release; the TTL reaps stale leases on crash.
-		_ = w.cfg.Lease.Del(context.Background(), leaseKey).Err()
+		// Compare-and-delete: only release if the lease still holds
+		// our token. Guards against the case where this run exceeds
+		// the lease TTL, a second worker acquires a fresh lease, and
+		// our deferred release would otherwise wipe the new holder's
+		// lease. Best-effort — the TTL reaps stale leases on crash.
+		_ = releaseLeaseScript.Run(context.Background(), w.cfg.Lease, []string{leaseKey}, leaseToken).Err()
 	}()
 
 	// Verify the source is in `removing` — defends against the user

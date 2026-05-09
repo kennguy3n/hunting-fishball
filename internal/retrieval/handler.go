@@ -301,10 +301,18 @@ func (h *Handler) retrieve(c *gin.Context) {
 	// any fan-out (ARCHITECTURE.md §4.4). On error the handler
 	// degrades to a fan-out — a stale cache should never take
 	// retrieval offline.
+	//
+	// The Phase 4 ACL + recipient gates are re-evaluated on the
+	// cache-hit path because the cache TTL is minutes-long: a
+	// policy change between write and read must NOT serve content
+	// the new policy denies.
 	if h.cfg.Cache != nil {
 		cached, cerr := h.cfg.Cache.Get(c.Request.Context(), tenantID, channelID, vec, scopeHash)
 		if cerr == nil && cached != nil {
-			c.JSON(http.StatusOK, responseFromCache(cached, privacyMode, topK))
+			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(cached, snapshot, req.SkillID)
+			resp := responseFromCache(filtered, privacyMode, topK)
+			resp.Policy.BlockedCount = blockedByACL + blockedByRecipient
+			c.JSON(http.StatusOK, resp)
 
 			return
 		}
@@ -639,8 +647,16 @@ func appliedSources(streams [][]*Match) []string {
 // topK is part of the scope: a topK=5 request must NOT serve from a
 // topK=100 entry (would return more rows than asked) and a topK=100
 // request must NOT serve from a topK=5 entry (would return fewer
-// rows than asked). Bump this hash whenever request fields that
-// affect the result set are added.
+// rows than asked).
+//
+// SkillID is part of the scope so a skill denied by recipient policy
+// can never be served a cached response originally produced for an
+// allowed skill — without the SkillID component, two requests with
+// different SkillIDs but identical query/channel/topK would share a
+// cache slot and bypass the recipient gate.
+//
+// Bump this hash whenever request fields that affect the result set
+// are added.
 func scopeHashFor(req RetrieveRequest, topK int) string {
 	h := sha256.New()
 	for _, v := range req.Sources {
@@ -659,6 +675,8 @@ func scopeHashFor(req RetrieveRequest, topK int) string {
 	}
 	_, _ = h.Write([]byte("|privacy|"))
 	_, _ = h.Write([]byte(req.PrivacyMode))
+	_, _ = h.Write([]byte("|skill|"))
+	_, _ = h.Write([]byte(req.SkillID))
 	_, _ = h.Write([]byte("|topk|"))
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(topK))

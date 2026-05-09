@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/retrieval"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
@@ -436,4 +437,151 @@ func topNIDs(hits []retrieval.RetrieveHit) []string {
 	}
 
 	return out
+}
+
+// stubResolver returns a fixed PolicySnapshot for every request so
+// the cache-hit + ACL/recipient gate tests can drive deterministic
+// snapshots into the handler.
+type stubResolver struct {
+	snap retrieval.PolicySnapshot
+}
+
+func (s stubResolver) Resolve(_ context.Context, _, _ string) (retrieval.PolicySnapshot, error) {
+	return s.snap, nil
+}
+
+// TestFanout_CacheKey_DiffersBySkillID exercises the regression where
+// scopeHashFor omitted SkillID — two requests with the same query /
+// channel / topK but different SkillIDs would otherwise share a cache
+// slot, letting a recipient-denied skill be served a cached response
+// originally produced for an allowed skill.
+func TestFanout_CacheKey_DiffersBySkillID(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeCache{}
+	vs := &fakeVectorStore{
+		hits: []storage.QdrantHit{{ID: "chunk-1", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}}},
+	}
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore: vs,
+		Embedder:    &fakeEmbedder{vec: []float32{1}},
+		Cache:       cache,
+	})
+	r := newRouter(t, h, "tenant-a")
+
+	w1 := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "secret", SkillID: "summarizer"})
+	if w1.Code != http.StatusOK {
+		t.Fatalf("skill=summarizer status: %d", w1.Code)
+	}
+	w2 := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "secret", SkillID: "exfil"})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("skill=exfil status: %d", w2.Code)
+	}
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if len(cache.setHashes) != 2 {
+		t.Fatalf("setHashes: %v", cache.setHashes)
+	}
+	if cache.setHashes[0] == cache.setHashes[1] {
+		t.Fatalf("scope hash must differ by SkillID; both = %q", cache.setHashes[0])
+	}
+	if len(cache.getHashes) != 2 || cache.getHashes[0] == cache.getHashes[1] {
+		t.Fatalf("Get scope hash must differ by SkillID: %v", cache.getHashes)
+	}
+}
+
+// TestFanout_CacheHit_AppliesACL verifies the cache-hit short-circuit
+// re-applies the Phase 4 ACL gate to cached chunks. A policy change
+// landed between the cache write and read MUST drop denied chunks
+// instead of serving the stale entry.
+func TestFanout_CacheHit_AppliesACL(t *testing.T) {
+	t.Parallel()
+
+	cached := &storage.CachedResult{
+		Hits: []storage.CachedHit{
+			{ID: "ok-1", TenantID: "tenant-a", SourceID: "s1", Metadata: map[string]any{"path": "docs/intro.md"}},
+			{ID: "bad-1", TenantID: "tenant-a", SourceID: "s1", Metadata: map[string]any{"path": "secrets/keys.txt"}},
+			{ID: "ok-2", TenantID: "tenant-a", SourceID: "s1", Metadata: map[string]any{"path": "docs/howto.md"}},
+		},
+	}
+	cache := &fakeCache{getValue: cached}
+	resolver := stubResolver{snap: retrieval.PolicySnapshot{
+		ACL: &policy.AllowDenyList{Rules: []policy.ACLRule{
+			{PathGlob: "secrets/*", Action: policy.ACLActionDeny},
+		}},
+	}}
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore:    &fakeVectorStore{},
+		Embedder:       &fakeEmbedder{vec: []float32{1}},
+		Cache:          cache,
+		PolicyResolver: resolver,
+	})
+	r := newRouter(t, h, "tenant-a")
+	w := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 10, PrivacyMode: "secret"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body: %s", w.Code, w.Body.String())
+	}
+	var got retrieval.RetrieveResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if !got.Policy.CacheHit {
+		t.Fatalf("expected cache hit")
+	}
+	if len(got.Hits) != 2 {
+		t.Fatalf("ACL must drop the secrets hit on cache-hit path: %v", topNIDs(got.Hits))
+	}
+	for _, hit := range got.Hits {
+		if hit.ID == "bad-1" {
+			t.Fatalf("denied chunk leaked through cache-hit path: %v", topNIDs(got.Hits))
+		}
+	}
+	if got.Policy.BlockedCount != 1 {
+		t.Fatalf("BlockedCount must reflect cache-hit ACL drop: %d", got.Policy.BlockedCount)
+	}
+}
+
+// TestFanout_CacheHit_AppliesRecipientPolicy verifies the cache-hit
+// short-circuit honors recipient-policy denials. A skill denied by
+// the recipient policy must receive zero hits even when the cache
+// has a populated entry for the request scope.
+func TestFanout_CacheHit_AppliesRecipientPolicy(t *testing.T) {
+	t.Parallel()
+
+	cached := &storage.CachedResult{
+		Hits: []storage.CachedHit{
+			{ID: "c-1", TenantID: "tenant-a"},
+			{ID: "c-2", TenantID: "tenant-a"},
+		},
+	}
+	cache := &fakeCache{getValue: cached}
+	resolver := stubResolver{snap: retrieval.PolicySnapshot{
+		Recipient: &policy.RecipientPolicy{
+			Rules: []policy.RecipientRule{
+				{SkillID: "exfil", Action: policy.ACLActionDeny},
+			},
+			DefaultAllow: true,
+		},
+	}}
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore:    &fakeVectorStore{},
+		Embedder:       &fakeEmbedder{vec: []float32{1}},
+		Cache:          cache,
+		PolicyResolver: resolver,
+	})
+	r := newRouter(t, h, "tenant-a")
+	w := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 10, PrivacyMode: "secret", SkillID: "exfil"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d", w.Code)
+	}
+	var got retrieval.RetrieveResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if !got.Policy.CacheHit {
+		t.Fatalf("expected cache hit")
+	}
+	if len(got.Hits) != 0 {
+		t.Fatalf("recipient deny must drop every cached hit: %v", topNIDs(got.Hits))
+	}
+	if got.Policy.BlockedCount != 2 {
+		t.Fatalf("BlockedCount must reflect recipient denial: %d", got.Policy.BlockedCount)
+	}
 }

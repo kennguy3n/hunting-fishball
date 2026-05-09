@@ -167,3 +167,55 @@ func TestForgetWorker_RejectsMissingIdentifiers(t *testing.T) {
 		t.Fatal("expected error on empty job")
 	}
 }
+
+// TestForgetWorker_ReleaseDoesNotEvictForeignLease guards against a
+// stale unconditional DEL eating a freshly-acquired lease. We pause
+// the worker mid-run, overwrite the lease key to simulate the case
+// where this worker's TTL expired and a different worker took over,
+// then let the original finish. Its deferred release MUST honor the
+// stored token (compare-and-delete) and leave the foreign lease
+// untouched.
+func TestForgetWorker_ReleaseDoesNotEvictForeignLease(t *testing.T) {
+	t.Parallel()
+
+	gate := make(chan struct{})
+	blocker := admin.SweeperFunc(func(_ context.Context, _, _ string) error {
+		<-gate
+		return nil
+	})
+	w, repo, rc := newForgetWorker(t, []admin.ForgetSweeper{blocker}, &fakeAudit{})
+	srcID := seedRemoving(t, repo, "tenant-a", "google-drive")
+
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Run(context.Background(), admin.ForgetJob{TenantID: "tenant-a", SourceID: srcID})
+	}()
+
+	leaseKey := "hf:forget:tenant-a:" + srcID
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		v, err := rc.Get(context.Background(), leaseKey).Result()
+		if err == nil && v != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	const stolen = "stolen-by-other-worker"
+	if err := rc.Set(context.Background(), leaseKey, stolen, time.Minute).Err(); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	close(gate)
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got, err := rc.Get(context.Background(), leaseKey).Result()
+	if err != nil {
+		t.Fatalf("foreign lease was evicted by stale release: %v", err)
+	}
+	if got != stolen {
+		t.Fatalf("foreign lease overwritten: %q", got)
+	}
+}
