@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package memory.v1;
+
+option go_package = "github.com/kennguy3n/hunting-fishball/proto/memory/v1;memoryv1";
+
+// MemoryService wraps the Mem0 persistent memory worker. The Go
+// retrieval API calls Search from /v1/retrieve when the policy lets
+// memory contribute to the answer.
+service MemoryService {
+  rpc WriteMemory(WriteMemoryRequest)   returns (WriteMemoryResponse);
+  rpc SearchMemory(SearchMemoryRequest) returns (SearchMemoryResponse);
+  rpc DeleteMemory(DeleteMemoryRequest) returns (DeleteMemoryResponse);
+}
+
+// MemoryScope narrows where a search reads from. Multiple scopes can be
+// OR'd together by repeating the field in the request.
+enum MemoryScope {
+  MEMORY_SCOPE_UNSPECIFIED = 0;
+  MEMORY_SCOPE_USER        = 1;
+  MEMORY_SCOPE_SESSION     = 2;
+  MEMORY_SCOPE_TENANT      = 3;
+}
+
+message MemoryRecord {
+  string              id         = 1;
+  string              tenant_id  = 2;
+  string              user_id    = 3;
+  string              session_id = 4;
+  string              content    = 5;
+  map<string, string> metadata   = 6;
+  int64               created_at = 7; // unix epoch seconds
+}
+
+message WriteMemoryRequest {
+  string              tenant_id  = 1;
+  string              user_id    = 2;
+  string              session_id = 3;
+  string              content    = 4;
+  map<string, string> metadata   = 5;
+}
+
+message WriteMemoryResponse {
+  string id         = 1;
+  int64  created_at = 2;
+}
+
+message SearchMemoryRequest {
+  string               tenant_id  = 1;
+  string               user_id    = 2;
+  string               session_id = 3;
+  string               query      = 4;
+  int32                top_k      = 5;
+  repeated MemoryScope scopes     = 6;
+}
+
+message SearchMemoryResult {
+  MemoryRecord record = 1;
+  float        score  = 2;
+}
+
+message SearchMemoryResponse {
+  repeated SearchMemoryResult results = 1;
+}
+
+message DeleteMemoryRequest {
+  string tenant_id = 1;
+  string id        = 2;
+}
+
+message DeleteMemoryResponse {
+  bool deleted = 1;
+}

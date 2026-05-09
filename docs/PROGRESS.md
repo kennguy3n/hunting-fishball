@@ -16,14 +16,14 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 0 — Connector contract, registry, audit primitives
 
-**Status.** ⏳ planned
+**Status.** 🟡 partial | ~100%
 
-- [ ] `SourceConnector` interface defined in the platform backend
-- [ ] Optional `DeltaSyncer` / `WebhookReceiver` / `Provisioner` interfaces
-- [ ] Process-global connector registry (`Register*` / `Get*`)
-- [ ] AES-GCM credential encryption reused from the platform backend
-- [ ] Audit-log Postgres table + Kafka outbox
-- [ ] Audit-log API surfaced to the admin portal
+- [x] `SourceConnector` interface defined in the platform backend
+- [x] Optional `DeltaSyncer` / `WebhookReceiver` / `Provisioner` interfaces
+- [x] Process-global connector registry (`Register*` / `Get*`)
+- [x] AES-GCM credential encryption reused from the platform backend
+- [x] Audit-log Postgres table + Kafka outbox
+- [x] Audit-log API surfaced to the admin portal
 
 ## Phase 1 — Single-source MVP end-to-end
 
@@ -144,9 +144,9 @@ microservices behind gRPC". They cross-cut Phases 1–3 and 8.
 
 ### Proto / contract definitions
 
-- [ ] Define gRPC proto files for the document parsing service (Docling)
-- [ ] Define gRPC proto files for the embedding computation service
-- [ ] Define gRPC proto files for the memory service (Mem0)
+- [x] Define gRPC proto files for the document parsing service (Docling)
+- [x] Define gRPC proto files for the embedding computation service
+- [x] Define gRPC proto files for the memory service (Mem0)
 
 ### Go context engine — pipeline
 
@@ -195,3 +195,11 @@ ships, the matrix is empty. Each row records:
 | Connector | Identity | Documents | Webhooks | Delta | Provisioning | Status |
 |---|---|---|---|---|---|---|
 | _(empty until Phase 1)_ | | | | | | |
+
+---
+
+## Changelog
+
+- 2026-05-09: Phase 0 complete — `SourceConnector` interface, registry,
+  credential encryption, audit log (table + outbox + API), gRPC proto
+  definitions for Docling/Embedding/Mem0.

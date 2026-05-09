@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package embedding.v1;
+
+option go_package = "github.com/kennguy3n/hunting-fishball/proto/embedding/v1;embeddingv1";
+
+// EmbeddingService wraps the Python embedding model worker. The Go
+// pipeline calls ComputeEmbeddings from Stage 3 (Embed).
+service EmbeddingService {
+  rpc ComputeEmbeddings(ComputeEmbeddingsRequest) returns (ComputeEmbeddingsResponse);
+}
+
+message ComputeEmbeddingsRequest {
+  string          tenant_id = 1;
+  repeated string chunks    = 2;
+
+  // model_id selects a specific model. Optional — empty means "use the
+  // tenant default", which the embedding service resolves from its own
+  // config map.
+  string model_id = 3;
+}
+
+message Embedding {
+  repeated float values = 1;
+}
+
+message ComputeEmbeddingsResponse {
+  repeated Embedding embeddings = 1;
+  string             model_id   = 2;
+  int32              dimensions = 3;
+}
