@@ -190,7 +190,13 @@ func run() error {
 	cancel()
 	_ = cons.Stop()
 	coord.CloseInputs()
-	<-coordDone
+	// Drain coordDone non-blockingly: if the select above already fired
+	// the coordDone case, the value has been consumed and the goroutine
+	// has exited, so a blocking <-coordDone would deadlock here.
+	select {
+	case <-coordDone:
+	default:
+	}
 
 	return nil
 }

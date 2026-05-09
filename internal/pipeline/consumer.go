@@ -234,21 +234,32 @@ func (c *Consumer) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.C
 }
 
 // markDone signals the pending entry for the (topic, partition) of evt.
-// The lookup is by IdempotencyKey to keep partitions independent.
+// The lookup key MUST match the key partitionState.register uses; both
+// include SourceID because the Kafka partition key is
+// `tenant_id|source_id` and two different sources under the same tenant
+// can land on different partitions while still sharing a DocumentID
+// (e.g. both have a file named `readme.md`). Without SourceID in the
+// key, completing one event would falsely signal the other partition's
+// pending entry and ConsumeClaim would commit before Stage 4 actually
+// finished — leading to message loss on consumer restart.
 func (c *Consumer) markDone(_ context.Context, evt IngestEvent, _ error) {
-	// We don't know the partition the event came from inside the
-	// coordinator. State lookup is therefore best-effort: callers
-	// commit only after the channel fires, and per-partition state
-	// stores its event's IdempotencyKey.
+	key := pendingKey(evt)
 	c.pending.Range(func(_, v any) bool {
 		ps, ok := v.(*partitionState)
 		if !ok {
 			return true
 		}
-		ps.complete(IdempotencyKey(evt.TenantID, evt.DocumentID, ""))
+		ps.complete(key)
 
 		return true
 	})
+}
+
+// pendingKey is the lookup key shared by partitionState.register and
+// Consumer.markDone. Including SourceID is required for partition
+// isolation — see the comment on markDone.
+func pendingKey(evt IngestEvent) string {
+	return IdempotencyKey(evt.TenantID, evt.SourceID+":"+evt.DocumentID, "")
 }
 
 // publishDLQ wraps the original event in the DLQ envelope and pushes
@@ -292,7 +303,7 @@ func (p *partitionState) register(evt IngestEvent) chan struct{} {
 	if p.pending == nil {
 		p.pending = map[string]chan struct{}{}
 	}
-	key := IdempotencyKey(evt.TenantID, evt.DocumentID, "")
+	key := pendingKey(evt)
 	ch, ok := p.pending[key]
 	if !ok {
 		ch = make(chan struct{}, 1)

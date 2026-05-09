@@ -315,6 +315,65 @@ func TestConsumer_NewConsumer_Validation(t *testing.T) {
 	}
 }
 
+// TestConsumer_MarkDoneSourceScoped is a regression for the cross-partition
+// false-completion bug. Two sources under the same tenant can publish
+// events with identical DocumentIDs (e.g., both have a "readme.md"); they
+// land on distinct partitions because the Kafka partition key is
+// `tenant_id|source_id`. The pendingKey used by partitionState.register
+// and Consumer.markDone MUST therefore include SourceID — otherwise
+// completing one source's event would falsely release the other source's
+// pending channel and ConsumeClaim would commit before Stage 4 finished
+// the second event.
+func TestConsumer_MarkDoneSourceScoped(t *testing.T) {
+	t.Parallel()
+
+	psA := &partitionState{}
+	psB := &partitionState{}
+
+	a := IngestEvent{TenantID: "t", SourceID: "src-A", DocumentID: "readme.md"}
+	b := IngestEvent{TenantID: "t", SourceID: "src-B", DocumentID: "readme.md"}
+
+	chA := psA.register(a)
+	chB := psB.register(b)
+
+	// Build a Consumer just to drive markDone over the registered states.
+	c, _ := NewCoordinator(newFastConfig(fakeFetch{}, fakeParse{}, fakeEmbed{}, &fakeStore{}))
+	cons, err := NewConsumer(fakeConsumerGroup{}, ConsumerConfig{
+		GroupID: "g", Topics: []string{"ingest"}, DLQTopic: "dlq",
+		DLQProducer: &fakeDLQProducer{}, Coordinator: c,
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	cons.pending.Store("ingest-0", psA)
+	cons.pending.Store("ingest-1", psB)
+
+	// Completing source A must NOT release source B's channel.
+	cons.markDone(context.Background(), a, nil)
+
+	select {
+	case <-chA:
+		// good
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("source A's channel was not released")
+	}
+	select {
+	case <-chB:
+		t.Fatal("source B's channel was falsely released by source A's completion")
+	case <-time.After(50 * time.Millisecond):
+		// good
+	}
+
+	// Now complete source B; its channel must fire.
+	cons.markDone(context.Background(), b, nil)
+	select {
+	case <-chB:
+		// good
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("source B's channel was not released after its own completion")
+	}
+}
+
 func TestConsumer_OffsetCommitOnlyAfterStage4(t *testing.T) {
 	t.Parallel()
 

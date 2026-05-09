@@ -227,11 +227,17 @@ func (c *Coordinator) Run(ctx context.Context) error {
 					return nil
 				}
 				if it.evt.Kind == EventDocumentDeleted || it.evt.Kind == EventPurge {
-					// Skip Parse / Embed; route directly to Stage 4.
+					// Skip Parse / Embed; hand to Stage 3 so Stage 3
+					// stays the sole writer to stage4. Stage 3 already
+					// forwards empty-blocks items straight through to
+					// Stage 4, which routes the EventKind to
+					// Store.Delete. Sending to stage4 directly here
+					// would race with Stage 3's `defer close(c.stage4)`
+					// on shutdown and panic (send on closed channel).
 					select {
 					case <-gctx.Done():
 						return nil
-					case c.stage4 <- it:
+					case c.stage3 <- it:
 					}
 
 					continue
