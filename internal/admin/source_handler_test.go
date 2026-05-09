@@ -282,6 +282,40 @@ func TestHandler_Patch_TenantIsolation(t *testing.T) {
 	}
 }
 
+// TestHandler_Patch_ConflictOnTerminalStatus pins the HTTP surface of
+// the forget-worker race fix: a PATCH against a row already in a
+// terminal status must return 409 (not 200, not 404). 200 would race
+// with the worker; 404 would mislead the operator into thinking the
+// row was already purged.
+func TestHandler_Patch_ConflictOnTerminalStatus(t *testing.T) {
+	t.Parallel()
+	repo, _ := newSQLiteSourceRepo(t)
+	src := admin.NewSource("tenant-a", "google-drive", nil, nil)
+	if err := repo.Create(context.Background(), src); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := repo.MarkRemoving(context.Background(), "tenant-a", src.ID); err != nil {
+		t.Fatalf("MarkRemoving: %v", err)
+	}
+	h, _ := admin.NewHandler(admin.HandlerConfig{Repo: repo, Audit: &fakeAudit{}, Validator: &fakeValidator{}})
+
+	active := admin.SourceStatusActive
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/v1/admin/sources/"+src.ID, mustJSON(t, admin.PatchRequest{Status: &active}))
+	router(t, h, "tenant-a").ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("PATCH on removing source must 409, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	got, err := repo.Get(context.Background(), "tenant-a", src.ID)
+	if err != nil {
+		t.Fatalf("Get after rejected patch: %v", err)
+	}
+	if got.Status != admin.SourceStatusRemoving {
+		t.Fatalf("status mutated despite 409: got %q want %q", got.Status, admin.SourceStatusRemoving)
+	}
+}
+
 func TestHandler_Delete_MarksRemoving(t *testing.T) {
 	t.Parallel()
 	repo, _ := newSQLiteSourceRepo(t)

@@ -13,6 +13,11 @@ import (
 // (tenant_id, id) tuple.
 var ErrSourceNotFound = errors.New("admin: source not found")
 
+// ErrSourceTerminal is returned by Update when the row exists but is
+// in a terminal status (removing/removed) where mutation would race
+// with the forget worker. Handlers translate this to HTTP 409.
+var ErrSourceTerminal = errors.New("admin: source is in a terminal status")
+
 // SourceRepository is the read/write port for the sources table. All
 // methods are tenant-scoped: a misconfigured caller cannot pull
 // another tenant's row.
@@ -116,7 +121,11 @@ type UpdatePatch struct {
 
 // Update applies a patch to a source row and returns the refreshed
 // row. The update is scoped to (tenant_id, id) so cross-tenant
-// patches are structurally impossible.
+// patches are structurally impossible. Rows already in a terminal
+// status (removing/removed) are not patchable: ErrSourceTerminal is
+// returned so the forget worker's status check at
+// internal/admin/forget_worker.go cannot be raced by a concurrent
+// PATCH that flips the row back to active.
 func (r *SourceRepository) Update(ctx context.Context, tenantID, id string, patch UpdatePatch) (*Source, error) {
 	if tenantID == "" || id == "" {
 		return nil, ErrSourceNotFound
@@ -134,15 +143,30 @@ func (r *SourceRepository) Update(ctx context.Context, tenantID, id string, patc
 		updates["scopes"] = JSONStringSlice(*patch.Scopes)
 	}
 
+	terminal := []string{string(SourceStatusRemoving), string(SourceStatusRemoved)}
 	res := r.db.WithContext(ctx).
 		Model(&Source{}).
-		Where("tenant_id = ? AND id = ?", tenantID, id).
+		Where("tenant_id = ? AND id = ? AND status NOT IN ?", tenantID, id, terminal).
 		Updates(updates)
 	if res.Error != nil {
 		return nil, fmt.Errorf("admin: update source: %w", res.Error)
 	}
 	if res.RowsAffected == 0 {
-		return nil, ErrSourceNotFound
+		// The row was either missing or in a terminal status. Disambiguate
+		// without a second WHERE clause so the caller can return 404 vs
+		// 409 correctly.
+		var existing Source
+		lookupErr := r.db.WithContext(ctx).
+			Select("status").
+			Where("tenant_id = ? AND id = ?", tenantID, id).
+			First(&existing).Error
+		if errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			return nil, ErrSourceNotFound
+		}
+		if lookupErr != nil {
+			return nil, fmt.Errorf("admin: update source lookup: %w", lookupErr)
+		}
+		return nil, ErrSourceTerminal
 	}
 
 	return r.Get(ctx, tenantID, id)

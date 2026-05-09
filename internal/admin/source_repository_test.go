@@ -196,3 +196,58 @@ func TestSourceRepository_Update_NotFound(t *testing.T) {
 		t.Fatalf("Update missing: %v", err)
 	}
 }
+
+// TestSourceRepository_Update_RejectsTerminalStatus pins the
+// forget-worker race fix: once MarkRemoving has run, a PATCH
+// {status:active|paused} or PATCH {scopes:[...]} must not be able to
+// flip the row out of the terminal lifecycle. Without this guard, the
+// PATCH could land between the worker's status read at
+// internal/admin/forget_worker.go and its derived-data sweep, leaving
+// the row "active" with partially-purged Qdrant/FalkorDB/cache state.
+func TestSourceRepository_Update_RejectsTerminalStatus(t *testing.T) {
+	t.Parallel()
+	for _, terminal := range []admin.SourceStatus{admin.SourceStatusRemoving, admin.SourceStatusRemoved} {
+		terminal := terminal
+		t.Run(string(terminal), func(t *testing.T) {
+			t.Parallel()
+			repo, db := newSQLiteSourceRepo(t)
+			ctx := context.Background()
+
+			src := admin.NewSource("tenant-a", "google-drive", nil, []string{"d1"})
+			if err := repo.Create(ctx, src); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			// Force the row into the terminal status under test
+			// without going through MarkRemoving (which only flips
+			// to removing). This emulates the post-MarkRemoved end
+			// state.
+			if err := db.Exec("UPDATE sources SET status = ? WHERE id = ?", string(terminal), src.ID).Error; err != nil {
+				t.Fatalf("seed terminal status: %v", err)
+			}
+
+			active := admin.SourceStatusActive
+			scopes := []string{"d1", "d2"}
+			cases := []struct {
+				name  string
+				patch admin.UpdatePatch
+			}{
+				{"status only", admin.UpdatePatch{Status: &active}},
+				{"scopes only", admin.UpdatePatch{Scopes: &scopes}},
+				{"status + scopes", admin.UpdatePatch{Status: &active, Scopes: &scopes}},
+			}
+			for _, c := range cases {
+				if _, err := repo.Update(ctx, "tenant-a", src.ID, c.patch); !errors.Is(err, admin.ErrSourceTerminal) {
+					t.Errorf("%s: expected ErrSourceTerminal, got %v", c.name, err)
+				}
+			}
+
+			got, err := repo.Get(ctx, "tenant-a", src.ID)
+			if err != nil {
+				t.Fatalf("Get after rejected patches: %v", err)
+			}
+			if got.Status != terminal {
+				t.Fatalf("status mutated despite rejection: got %q want %q", got.Status, terminal)
+			}
+		})
+	}
+}

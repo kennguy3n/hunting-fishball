@@ -174,6 +174,10 @@ func (h *Handler) patch(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
 		return
 	}
+	if errors.Is(err, ErrSourceTerminal) {
+		c.JSON(http.StatusConflict, gin.H{"error": "source is in a terminal status (removing/removed); cannot be patched"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
