@@ -262,6 +262,25 @@ The full set of public + admin endpoints is documented in
   existing tenant / source / namespace without re-fetching from
   the upstream source.
 
+**Round 5 (PR #14) additions:**
+
+- `POST /v1/admin/sources/preview` — connector dry-run preview
+  (validate credentials, enumerate namespaces, count docs).
+- `POST /v1/admin/dlq/replay` — DLQ batch replay with filters
+  (source_id, time range, error_contains).
+- `POST /v1/retrieve` `explain: true` — retrieval explain/debug
+  mode (vector similarity, BM25, graph depth, RRF, reranker).
+- `POST /v1/retrieve/feedback` — retrieval feedback collection.
+- `GET /v1/admin/policy/history` — policy version history
+  (paginated).
+- `POST /v1/admin/policy/rollback/:version_id` — rollback to
+  a historical policy snapshot.
+- `POST /v1/admin/tenants/:tenant_id/export` — GDPR data export.
+- `GET /v1/admin/chunks/:chunk_id` — chunk provenance trace.
+- `GET /v1/admin/analytics/global` — cross-tenant super-admin
+  analytics (requires super_admin role).
+- `make eval` — run eval quality gate against golden corpus.
+
 ---
 
 ## Quick start

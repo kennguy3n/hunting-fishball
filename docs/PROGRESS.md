@@ -435,6 +435,62 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-10: **PR #14 — Round 5: CI fix + next-20 tasks**. CI Task 0
+  fixed sidecar Dockerfiles (missing `_metrics.py` COPY). Tasks 1–20:
+  - **Task 1**: Eval golden dataset + CI retrieval quality gate
+    (`tests/eval/golden_corpus.json`, `tests/eval/eval_ci_test.go`,
+    `make eval`).
+  - **Task 2**: Connector OAuth token auto-refresh worker
+    (`internal/admin/token_refresh.go`).
+  - **Task 3**: Cursor-based pagination for admin list endpoints
+    (`internal/admin/pagination.go`).
+  - **Task 4**: RBAC role middleware (`internal/admin/rbac.go`).
+  - **Task 5**: Generic webhook delivery router
+    (`internal/admin/webhook_router.go`).
+  - **Task 6**: Grafana dashboard JSON model
+    (`deploy/grafana/context-engine-dashboard.json`,
+    `docs/runbooks/alerting.md`).
+  - **Task 7**: GDPR data export endpoint
+    (`internal/admin/data_export.go`,
+    `migrations/015_export_jobs.sql`).
+  - **Task 8**: Namespace-level privacy mode override
+    (`internal/policy/namespace_policy_test.go`,
+    `migrations/016_namespace_policies.sql`).
+  - **Task 9**: Chunk provenance trace API
+    (`internal/admin/provenance_handler.go`).
+  - **Task 10**: Connector dry-run preview
+    (`internal/admin/preview_handler.go`).
+  - **Task 11**: DLQ batch replay with filters
+    (`internal/admin/dlq_batch_replay.go`).
+  - **Task 12**: Retrieval explain/debug mode
+    (`internal/retrieval/explain.go`).
+  - **Task 13**: Backfill completion event + SSE notification
+    (`internal/admin/backfill_completion.go`).
+  - **Task 14**: Credential expiry monitoring worker
+    (`internal/admin/credential_monitor.go`).
+  - **Task 15**: Policy version history + rollback
+    (`internal/policy/version_history.go`,
+    `internal/admin/policy_history_handler.go`,
+    `migrations/017_policy_versions.sql`).
+  - **Task 16**: Retrieval feedback collection
+    (`internal/retrieval/feedback_handler.go`,
+    `internal/eval/feedback.go`,
+    `migrations/018_feedback_events.sql`).
+  - **Task 17**: Idempotency key middleware
+    (`internal/admin/idempotency.go`).
+  - **Task 18**: Stale-index watchdog + auto-reindex
+    (`internal/admin/index_watchdog.go`).
+  - **Task 19**: Cross-tenant super-admin analytics
+    (`internal/admin/analytics_handler.go`).
+  - **Task 20**: PR #13 features e2e integration test
+    (`tests/e2e/pr13_features_test.go`).
+
+- 2026-05-10: **PR #13 — Round 4: next-20 tasks**. Eval runner,
+  error catalogue, scheduler, metering, credential rotation,
+  GraphRAG integration, fault injection, Python services,
+  regression tests, operational tooling (alerts, index health,
+  reindex orchestrator, SSE sync progress, API rate limiter).
+
 - 2026-05-10: Round-4 next-20 batch (eval harness, GraphRAG
   Stage 3b, production hardening, testing depth, operational
   tooling). Each task ships unit tests; full suite passes
