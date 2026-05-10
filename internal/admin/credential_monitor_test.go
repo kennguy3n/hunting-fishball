@@ -2,13 +2,35 @@ package admin_test
 
 import (
 	"context"
+	"math"
 	"sync"
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
+
+// gaugeValue extracts the current value of a labelled gauge for
+// regression-asserting the credential expiry metric.
+func gaugeValue(t *testing.T, connector, sourceID string) float64 {
+	t.Helper()
+	g, err := observability.CredentialsExpiring.GetMetricWithLabelValues(connector, sourceID)
+	if err != nil {
+		t.Fatalf("get metric: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := g.Write(m); err != nil {
+		t.Fatalf("write metric: %v", err)
+	}
+	if m.Gauge == nil || m.Gauge.Value == nil {
+		t.Fatalf("nil gauge value")
+	}
+	return *m.Gauge.Value
+}
 
 type fakeMonitorLister struct {
 	srcs []admin.Source
@@ -174,5 +196,55 @@ func TestCredentialMonitor_NilListerErrors(t *testing.T) {
 	_, err := admin.NewCredentialMonitor(admin.CredentialMonitorConfig{Audit: &auditCapture{}})
 	if err == nil {
 		t.Fatalf("expected error for nil Lister")
+	}
+}
+
+// TestCredentialMonitor_GaugePublishesActualDays regression-tests
+// the BUG_pr-review-job-..._0003 fix: the
+// context_engine_credentials_expiring_days gauge MUST publish the
+// real day count, not a 0/1 boolean. Alerting rules in the
+// runbook (docs/runbooks/alerting.md:115) threshold on
+// "remaining < 7 days" and would never fire if the gauge stayed
+// at 0/1.
+func TestCredentialMonitor_GaugePublishesActualDays(t *testing.T) {
+	// Cannot t.Parallel: shares the package-level
+	// observability.CredentialsExpiring registry across cases.
+	cases := []struct {
+		name     string
+		offset   time.Duration
+		minDays  float64
+		maxDays  float64
+		negative bool
+	}{
+		{name: "fresh", offset: 30 * 24 * time.Hour, minDays: 29.5, maxDays: 30.5},
+		{name: "expiring", offset: 48 * time.Hour, minDays: 1.5, maxDays: 2.5},
+		{name: "expired", offset: -25 * time.Hour, minDays: -1.5, maxDays: -1.0, negative: true},
+	}
+	now := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "metric-" + tc.name
+			src := newSourceWithExpiry("tenant-m", id, "google_drive", now.Add(tc.offset))
+			au := &auditCapture{}
+			mon, _ := admin.NewCredentialMonitor(admin.CredentialMonitorConfig{
+				Lister: &fakeMonitorLister{srcs: []admin.Source{src}},
+				Audit:  au,
+				Now:    func() time.Time { return now },
+			})
+			mon.Tick(context.Background())
+			got := gaugeValue(t, "google_drive", id)
+			if got < tc.minDays || got > tc.maxDays {
+				t.Fatalf("case %d (%s): gauge=%v want in [%v, %v]",
+					i, tc.name, got, tc.minDays, tc.maxDays)
+			}
+			if tc.negative && got >= 0 {
+				t.Fatalf("expired credential must publish negative days, got %v", got)
+			}
+			// 0 or 1 would mean the bug is back; ensure value is
+			// distinct from those sentinels for non-trivial offsets.
+			if math.Abs(got-1) < 0.01 || math.Abs(got) < 0.01 {
+				t.Fatalf("gauge looks boolean (got %v) — BUG_0003 regression?", got)
+			}
+		})
 	}
 }

@@ -116,6 +116,16 @@ func (m *CredentialMonitor) checkSource(ctx context.Context, s *Source, now time
 	}
 	key := s.TenantID + "|" + s.ID
 	remaining := expiresAt.Sub(now)
+	// The metric is named context_engine_credentials_expiring_days
+	// and the runbook (docs/runbooks/alerting.md:115) thresholds on
+	// it as a day count, so the value MUST be a real day count —
+	// not a 0/1 boolean. We always publish remainingDays so an
+	// alert rule of `context_engine_credentials_expiring_days < 7`
+	// fires correctly. Negative values indicate an already-expired
+	// credential and let alerts distinguish "expiring soon" from
+	// "already expired".
+	remainingDays := remaining.Hours() / 24.0
+	observability.CredentialsExpiring.WithLabelValues(s.ConnectorType, s.ID).Set(remainingDays)
 	switch {
 	case remaining <= 0:
 		if m.seen[key] < credExpired {
@@ -124,7 +134,6 @@ func (m *CredentialMonitor) checkSource(ctx context.Context, s *Source, now time
 				s.TenantID, "system", audit.ActionSourceCredentialExpired, "source", s.ID,
 				audit.JSONMap{"connector": s.ConnectorType, "expires_at": expiresAt.Format(time.RFC3339)}, "",
 			))
-			observability.CredentialsExpiring.WithLabelValues(s.ConnectorType, s.ID).Set(1)
 			if m.cfg.Health != nil {
 				_ = m.cfg.Health.RecordFailure(ctx, s.TenantID, s.ID)
 			}
@@ -140,12 +149,10 @@ func (m *CredentialMonitor) checkSource(ctx context.Context, s *Source, now time
 					"remaining_hr": int(remaining.Hours()),
 				}, "",
 			))
-			observability.CredentialsExpiring.WithLabelValues(s.ConnectorType, s.ID).Set(1)
 		}
 	default:
 		if m.seen[key] != credOK {
 			m.seen[key] = credOK
-			observability.CredentialsExpiring.WithLabelValues(s.ConnectorType, s.ID).Set(0)
 		}
 	}
 }
