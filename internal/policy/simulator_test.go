@@ -270,3 +270,38 @@ func TestPolicySnapshot_Clone_DoesNotAliasRules(t *testing.T) {
 		t.Fatalf("clone leaked into src.Recipient: %d rules", len(src.Recipient.Rules))
 	}
 }
+
+func TestPolicySnapshot_Clone_DeepCopiesChunkACL(t *testing.T) {
+	// Regression for the Round-6 ChunkACL leak: the new
+	// PolicySnapshot.ChunkACL pointer was not deep-copied in
+	// Clone(), so concurrent what-if retrievals and draft
+	// promotions shared a mutable ACL with the live snapshot.
+	t.Parallel()
+	src := policy.PolicySnapshot{
+		EffectiveMode: policy.PrivacyModeHybrid,
+		ChunkACL: policy.NewChunkACL([]policy.ChunkACLTag{
+			{ChunkID: "a", Decision: policy.ChunkACLDecisionDeny},
+		}),
+	}
+	clone := src.Clone()
+
+	// Mutating the clone must not bleed back into src.
+	clone.ChunkACL.Add(policy.ChunkACLTag{ChunkID: "b", Decision: policy.ChunkACLDecisionDeny})
+	if src.ChunkACL.Len() != 1 {
+		t.Fatalf("clone leaked into src.ChunkACL: %d rules", src.ChunkACL.Len())
+	}
+	if clone.ChunkACL.Len() != 2 {
+		t.Fatalf("clone must own 2 rules; got %d", clone.ChunkACL.Len())
+	}
+	if src.ChunkACL == clone.ChunkACL {
+		t.Fatal("clone.ChunkACL must be a distinct pointer from src.ChunkACL")
+	}
+}
+
+func TestPolicySnapshot_Clone_NilChunkACL(t *testing.T) {
+	t.Parallel()
+	src := policy.PolicySnapshot{EffectiveMode: policy.PrivacyModeRemote}
+	if clone := src.Clone(); clone.ChunkACL != nil {
+		t.Fatalf("nil src.ChunkACL must clone to nil; got %v", clone.ChunkACL)
+	}
+}

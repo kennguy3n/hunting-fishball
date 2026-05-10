@@ -4,10 +4,11 @@ package retrieval
 // diversifier.
 //
 // MMR re-ranks the post-rerank candidate list to balance relevance
-// against diversity. The standard MMR scoring rule, with lambda in
-// [0, 1], is:
+// against diversity. We use the *diversity-weighted* variant of MMR
+// where `lambda` directly expresses how much the caller wants to
+// diversify, in [0, 1]:
 //
-//	score(d) = lambda * Rel(d, q) - (1 - lambda) * max_{d' in S} Sim(d, d')
+//	score(d) = (1 - lambda) * Rel(d, q) - lambda * max_{d' in S} Sim(d, d')
 //
 // where S is the set of already-selected results, Rel(d, q) is the
 // candidate's relevance to the query (we use the post-rerank
@@ -16,9 +17,13 @@ package retrieval
 //
 // A `lambda` of 0 means "pure relevance / no diversification" so the
 // caller's existing rank is preserved. `lambda` of 1 means "pure
-// diversity" — pick the most relevant first, then greedily prefer
-// candidates that look least like everything already chosen, ignoring
-// the per-candidate score difference. Mid-range values blend the two.
+// diversity" — pick the most relevant first (tie-broken by the input
+// order, since maxSim is zero for the empty selected set), then
+// greedily prefer candidates that look least like everything already
+// chosen, ignoring the per-candidate relevance. Mid-range values
+// blend the two. This matches the public API contract documented on
+// `RetrieveRequest.Diversity`: higher `lambda` ⇒ more diverse
+// results.
 //
 // The diversifier is wired into the retrieval handler immediately
 // after `Reranker.Rerank()` and before the policy filter. Callers
@@ -64,9 +69,10 @@ func NewMMRDiversifier(sim SimilarityFunc) *MMRDiversifier {
 }
 
 // Diversify implements the MMR re-ranking. Returns the original slice
-// unchanged when `lambda <= 0` (passthrough) or when there is nothing
-// to diversify (len < 2). When `topK <= 0` the diversifier returns
-// the full re-ordered slice.
+// unchanged when `lambda <= 0` (passthrough — pure relevance, which
+// is the caller's existing rank order) or when there is nothing to
+// diversify (len < 2). When `topK <= 0` the diversifier returns the
+// full re-ordered slice.
 func (d *MMRDiversifier) Diversify(ctx context.Context, matches []*Match, lambda float32, topK int) []*Match {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
@@ -109,7 +115,7 @@ func (d *MMRDiversifier) Diversify(ctx context.Context, matches []*Match, lambda
 					maxSim = s
 				}
 			}
-			score := lambda*rel[i] - (1-lambda)*maxSim
+			score := (1-lambda)*rel[i] - lambda*maxSim
 			if score > bestScore {
 				bestScore = score
 				bestIdx = i

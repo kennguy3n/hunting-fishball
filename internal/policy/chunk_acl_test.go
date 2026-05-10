@@ -67,6 +67,38 @@ func TestChunkACL_InheritanceFromSourceTag(t *testing.T) {
 	}
 }
 
+func TestChunkACL_CloneIsIndependent(t *testing.T) {
+	// Regression for the PolicySnapshot.Clone() leak: mutating
+	// the clone (Add) must not bleed into the original ACL, and
+	// vice versa.
+	orig := policy.NewChunkACL([]policy.ChunkACLTag{
+		{ChunkID: "a", Decision: policy.ChunkACLDecisionDeny},
+	})
+	cl := orig.Clone()
+	cl.Add(policy.ChunkACLTag{ChunkID: "b", Decision: policy.ChunkACLDecisionDeny})
+
+	if orig.Len() != 1 {
+		t.Fatalf("orig must remain at 1 rule; got %d", orig.Len())
+	}
+	if cl.Len() != 2 {
+		t.Fatalf("clone must hold both rules; got %d", cl.Len())
+	}
+	// Verdicts must match the rule split.
+	if d := orig.Evaluate(policy.ChunkACLAttrs{ChunkID: "b"}); d != policy.ChunkACLDecisionAllow {
+		t.Fatalf("orig must allow `b` (rule was added to clone only); got %v", d)
+	}
+	if d := cl.Evaluate(policy.ChunkACLAttrs{ChunkID: "b"}); d != policy.ChunkACLDecisionDeny {
+		t.Fatalf("clone must deny `b`; got %v", d)
+	}
+}
+
+func TestChunkACL_CloneNilSafe(t *testing.T) {
+	var c *policy.ChunkACL
+	if got := c.Clone(); got != nil {
+		t.Fatalf("nil ChunkACL.Clone() must return nil; got %v", got)
+	}
+}
+
 func TestChunkACL_AddIsConcurrentSafe(t *testing.T) {
 	c := policy.NewChunkACL(nil)
 	done := make(chan struct{}, 8)

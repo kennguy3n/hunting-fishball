@@ -1418,8 +1418,10 @@ implements it.
 
 - **MMR diversifier** (`internal/retrieval/diversifier.go`).
   Reranker-adjacent stage that re-orders the merged result set
-  with `lambda * relevance - (1-lambda) * max_similarity`. Lambda
-  defaults to 0.0 (passthrough) so existing deployments are
+  with `(1-lambda) * relevance - lambda * max_similarity` — i.e.
+  higher `lambda` ⇒ more diversification, matching the API
+  contract on `RetrieveRequest.Diversity`. Lambda defaults to 0.0
+  (passthrough, pure relevance) so existing deployments are
   unaffected; clients opt in via `RetrieveRequest.Diversity`.
 - **Semantic deduplication** (`internal/pipeline/dedup.go`).
   Stage-4-adjacent pre-write hook computing cosine similarity

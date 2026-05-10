@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -1173,6 +1174,23 @@ func scopeHashFor(req RetrieveRequest, topK int, privacyMode string) string {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(topK))
 	_, _ = h.Write(buf[:])
+	// Diversity (Round-6 Task 1) re-ranks the result set via MMR,
+	// so two requests with the same query but different diversity
+	// lambdas MUST NOT share a cache slot — otherwise a request
+	// asking for diverse results would be served the cached pure-
+	// relevance ordering (or vice versa).
+	_, _ = h.Write([]byte("|diversity|"))
+	binary.BigEndian.PutUint32(buf[:4], math.Float32bits(req.Diversity))
+	_, _ = h.Write(buf[:4])
+	// Experiment routing (Round-6 Task 10) swaps the active
+	// retrieval config (different reranker, fan-out weights,
+	// etc.), which changes the result set. Including the
+	// experiment name and bucket key keeps control/variant
+	// responses from cross-contaminating each other's cache slot.
+	_, _ = h.Write([]byte("|experiment|"))
+	_, _ = h.Write([]byte(req.ExperimentName))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(req.ExperimentBucketKey))
 
 	return hex.EncodeToString(h.Sum(nil))
 }

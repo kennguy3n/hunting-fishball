@@ -87,6 +87,9 @@ func (s PolicySnapshot) Clone() PolicySnapshot {
 		rp.Rules = append([]RecipientRule(nil), s.Recipient.Rules...)
 		out.Recipient = &rp
 	}
+	if s.ChunkACL != nil {
+		out.ChunkACL = s.ChunkACL.Clone()
+	}
 	return out
 }
 

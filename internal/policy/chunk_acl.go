@@ -82,6 +82,21 @@ func (c *ChunkACL) Len() int {
 	return len(c.rows)
 }
 
+// Clone returns an independent copy of the ACL with its own rule
+// slice and mutex. Callers (PolicySnapshot.Clone, the simulator's
+// what-if engine, the draft promoter) rely on this to materialise
+// a copy-on-write view; mutating the clone — via Add — must not
+// race with or leak into the original snapshot.
+func (c *ChunkACL) Clone() *ChunkACL {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	rowsCopy := append([]ChunkACLTag(nil), c.rows...)
+	return &ChunkACL{rows: rowsCopy}
+}
+
 // ChunkACLAttrs is the per-chunk shape Evaluate inspects. The
 // retrieval handler projects retrieval.Match → ChunkACLAttrs
 // (chunk ID + the chunk's tag set drawn from metadata).

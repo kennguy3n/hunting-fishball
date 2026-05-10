@@ -23,36 +23,43 @@ func TestMMRDiversifier_LambdaZeroPassthrough(t *testing.T) {
 	}
 }
 
-func TestMMRDiversifier_LambdaOnePicksRelevanceFirst(t *testing.T) {
-	// With lambda=1 the score reduces to pure relevance — the
-	// algorithm picks descending by Match.Score regardless of
-	// similarity. We still expect the order [a, b, c] but the
-	// diversifier must walk every candidate (no passthrough).
+func TestMMRDiversifier_LambdaOneMaxDiversity(t *testing.T) {
+	// With lambda=1 the score reduces to pure diversity. The
+	// first pick is the most relevant candidate (maxSim is zero
+	// when nothing has been selected yet, so all candidates tie
+	// on score 0 and the input-order winner is picked first).
+	// From then on the algorithm greedily prefers the least-
+	// similar candidate regardless of its relevance score —
+	// matching the public API contract on RetrieveRequest.Diversity.
 	d := NewMMRDiversifier(nil)
 	in := []*Match{
-		mkMatch("a", "alpha", 1.0),
-		mkMatch("b", "alpha beta", 0.9),
-		mkMatch("c", "beta gamma", 0.8),
+		mkMatch("a", "alpha beta gamma", 1.0),
+		mkMatch("b", "alpha beta gamma delta", 0.95), // similar to a
+		mkMatch("c", "totally unrelated rocket science", 0.3),
 	}
 	out := d.Diversify(context.Background(), in, 1, 0)
-	if got, want := ids(out), []string{"a", "b", "c"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("lambda=1 expected %v, got %v", want, got)
+	got := ids(out)
+	if got[0] != "a" {
+		t.Fatalf("lambda=1 first pick must be highest-relevance (tie-break); got order %v", got)
+	}
+	if got[1] != "c" {
+		t.Fatalf("lambda=1 second pick must be the most-dissimilar candidate; got order %v", got)
 	}
 }
 
-func TestMMRDiversifier_MidLambdaPrefersDiverse(t *testing.T) {
+func TestMMRDiversifier_HighLambdaPrefersDiverse(t *testing.T) {
 	// Two highly similar high-relevance items, one diverse low-
-	// relevance item. With lambda < 1 the diversifier should
-	// promote the diverse item ahead of the near-duplicate,
-	// because the duplicate's MMR penalty pushes it below the
-	// diverse candidate.
+	// relevance item. With lambda close to 1 the diversifier
+	// promotes the diverse item ahead of the near-duplicate,
+	// because the duplicate's MMR penalty (−lambda·maxSim)
+	// outweighs its relevance bump.
 	d := NewMMRDiversifier(nil)
 	in := []*Match{
 		mkMatch("a", "the quick brown fox jumps over", 1.0),
 		mkMatch("b", "the quick brown fox jumps over again", 0.95),
 		mkMatch("c", "totally unrelated rocket science topic", 0.3),
 	}
-	out := d.Diversify(context.Background(), in, 0.3, 0)
+	out := d.Diversify(context.Background(), in, 0.7, 0)
 	got := ids(out)
 	// First pick is always the most relevant.
 	if got[0] != "a" {
@@ -62,6 +69,26 @@ func TestMMRDiversifier_MidLambdaPrefersDiverse(t *testing.T) {
 	// duplicate of the first.
 	if got[1] != "c" {
 		t.Fatalf("expected diverse pick second; got order %v", got)
+	}
+}
+
+func TestMMRDiversifier_LowLambdaPrefersRelevance(t *testing.T) {
+	// Mirror of the high-lambda case: with lambda near 0 the
+	// relevance term dominates so the near-duplicate (b) is
+	// picked second despite its similarity to a.
+	d := NewMMRDiversifier(nil)
+	in := []*Match{
+		mkMatch("a", "the quick brown fox jumps over", 1.0),
+		mkMatch("b", "the quick brown fox jumps over again", 0.95),
+		mkMatch("c", "totally unrelated rocket science topic", 0.3),
+	}
+	out := d.Diversify(context.Background(), in, 0.1, 0)
+	got := ids(out)
+	if got[0] != "a" {
+		t.Fatalf("first pick must be highest-relevance; got %v", got)
+	}
+	if got[1] != "b" {
+		t.Fatalf("low lambda should pick the next-most-relevant candidate second; got order %v", got)
 	}
 }
 
