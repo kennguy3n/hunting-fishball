@@ -77,6 +77,31 @@ func TestSlack_VerifyWebhookRequest_MissingHeaders(t *testing.T) {
 	}
 }
 
+// TestSlack_VerifyWebhookRequest_TolersHeaderWhitespace locks in that
+// X-Slack-Request-Timestamp / X-Slack-Signature headers arriving with
+// surrounding whitespace are still accepted: the HMAC basestring uses
+// the trimmed timestamp, mirroring the trimmed value the comparison
+// path uses for the signature. Pre-fix, the basestring contained the
+// raw whitespaced timestamp while the comparison trimmed `sig`, so a
+// legitimate webhook was silently rejected.
+func TestSlack_VerifyWebhookRequest_TolersHeaderWhitespace(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	ts := strconv.FormatInt(now.Unix(), 10)
+	body := []byte(`{"event":"x"}`)
+	c := slack.New(
+		slack.WithSigningSecret(fixedSecret),
+		slack.WithNow(func() time.Time { return now }),
+	)
+	hdrs := map[string][]string{
+		"X-Slack-Signature":         {"  " + slackSig(fixedSecret, ts, body) + "\n"},
+		"X-Slack-Request-Timestamp": {"\t" + ts + " "},
+	}
+	if err := c.VerifyWebhookRequest(hdrs, body); err != nil {
+		t.Fatalf("whitespace-padded headers must verify, got %v", err)
+	}
+}
+
 func TestSlack_VerifyWebhookRequest_StaleTimestamp(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)

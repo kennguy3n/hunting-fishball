@@ -128,12 +128,12 @@ func (s *Connector) VerifyWebhookRequest(headers map[string][]string, payload []
 	if s.signingSecret == "" {
 		return nil
 	}
-	sig := connector.FirstHeader(headers, "X-Slack-Signature")
-	ts := connector.FirstHeader(headers, "X-Slack-Request-Timestamp")
+	sig := strings.TrimSpace(connector.FirstHeader(headers, "X-Slack-Signature"))
+	ts := strings.TrimSpace(connector.FirstHeader(headers, "X-Slack-Request-Timestamp"))
 	if sig == "" || ts == "" {
 		return connector.ErrWebhookSignatureMissing
 	}
-	parsedTS, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64)
+	parsedTS, err := strconv.ParseInt(ts, 10, 64)
 	if err != nil {
 		return connector.ErrWebhookSignatureInvalid
 	}
@@ -146,7 +146,7 @@ func (s *Connector) VerifyWebhookRequest(headers map[string][]string, payload []
 	mac.Write([]byte{':'})
 	mac.Write(payload)
 	want := "v0=" + hex.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(want), []byte(strings.TrimSpace(sig))) {
+	if !hmac.Equal([]byte(want), []byte(sig)) {
 		return connector.ErrWebhookSignatureInvalid
 	}
 	return nil
