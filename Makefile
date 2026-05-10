@@ -119,6 +119,27 @@ proto-check: proto-gen
 		exit 1; \
 	fi
 
+.PHONY: alerts-check
+alerts-check:
+	@echo "Validating Prometheus alert YAML..."
+	$(GO) run ./internal/observability/alertcheck deploy/alerts.yaml
+
+.PHONY: fuzz
+fuzz:
+	$(GO) test -run=^$ -fuzz=. -fuzztime=30s ./internal/retrieval/...
+
+.PHONY: migrate-rollback
+migrate-rollback:
+	@echo "Rolling back migrations in reverse order..."
+	@if [ -z "$$CONTEXT_ENGINE_DATABASE_URL" ]; then \
+		echo "CONTEXT_ENGINE_DATABASE_URL must be set"; exit 1; \
+	fi
+	@for f in $$(ls -r migrations/rollback/*.sql 2>/dev/null); do \
+		echo "Applying $$f"; \
+		PGPASSWORD="$${CONTEXT_ENGINE_DATABASE_PASSWORD:-hf}" \
+			psql "$$CONTEXT_ENGINE_DATABASE_URL" -v ON_ERROR_STOP=1 -f $$f; \
+	done
+
 .PHONY: clean
 clean:
 	rm -rf $(BIN_DIR) coverage.out coverage.html
