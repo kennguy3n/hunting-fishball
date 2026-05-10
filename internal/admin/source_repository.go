@@ -205,6 +205,27 @@ func (r *SourceRepository) Update(ctx context.Context, tenantID, id string, patc
 	return r.Get(ctx, tenantID, id)
 }
 
+// GetByID resolves a source by its primary key alone — without
+// the usual tenant_id scoping. Used only by the inbound webhook
+// router (Round-5 Task 5), where the upstream SaaS caller doesn't
+// know which tenant the source belongs to. The handler
+// re-derives the tenant from the returned row and never trusts
+// any tenant value from the request.
+func (r *SourceRepository) GetByID(ctx context.Context, id string) (*Source, error) {
+	if id == "" {
+		return nil, ErrSourceNotFound
+	}
+	var s Source
+	err := r.db.WithContext(ctx).Where("id = ?", id).First(&s).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrSourceNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("admin: get source by id: %w", err)
+	}
+	return &s, nil
+}
+
 // ListAllActive returns every active source across all tenants in
 // id-ascending order. Used by background workers (token refresh,
 // credential expiry monitor) that intentionally span tenants. The
