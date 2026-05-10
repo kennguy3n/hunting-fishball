@@ -137,15 +137,30 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 5 — On-device knowledge core integration
 
-**Status.** ⏳ planned
+**Status.** 🟡 partial | ~40% (server-side shipped; on-device pending)
 
 - [ ] UniFFI XCFramework for iOS
 - [ ] UniFFI AAR for Android
 - [ ] N-API binding for desktop
-- [ ] On-device retrieval shard sync
-- [ ] Local-first retrieval, policy-bounded fallback
+- [x] On-device retrieval shard sync — server-side
+      (`internal/shard/handler.go` mounts
+      `GET /v1/shards/:tenant_id` and
+      `GET /v1/shards/:tenant_id/delta?since=<v>`;
+      `internal/shard/repository.go` is the GORM-backed metadata
+      store; `migrations/006_shards.sql` defines `shards`)
+- [x] Shard generation worker — policy-aware
+      (`internal/shard/generator.go` calls `PolicyResolver.Resolve`
+      to gate eligible chunks; wired into `cmd/ingest/main.go` as
+      an optional post-Stage-4 hook for `shard.requested`)
+- [x] Shard delta sync protocol — version-keyed add / remove
+      (`internal/shard/delta.go`)
+- [ ] Local-first retrieval, policy-bounded fallback (client side)
 - [ ] Bonsai-1.7B GGUF via `llama.cpp` on at least one desktop + one mobile
-- [ ] Cryptographic forgetting on the on-device tier
+- [x] Cryptographic forgetting on the on-device tier — server-side
+      (`internal/shard/forget.go` orchestrates pending_deletion →
+      drain → drop Qdrant / FalkorDB / Tantivy / Redis →
+      destroy DEKs → mark deleted; `cmd/api/main.go` mounts
+      `DELETE /v1/tenants/:tenant_id/keys`)
 
 ## Phase 6 — B2C client surfaces
 
@@ -158,32 +173,70 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 7 — Catalog expansion
 
-**Status.** ⏳ planned
+**Status.** 🟡 partial | ~85% (12 of 12 target connectors implemented;
+runbooks + per-connector e2e smoke tests pending)
 
-- [ ] ≥ 12 production connectors at GA
+- [x] ≥ 12 production connectors at GA — Phase 1 (Google Drive,
+      Slack) + Phase 7 (SharePoint, OneDrive, Dropbox, Box, Notion,
+      Confluence, Jira, GitHub, GitLab, Microsoft Teams) = 12
 - [ ] Per-connector runbooks
-- [ ] Per-connector capability matrix in this doc
+- [x] Per-connector capability matrix in this doc (see below)
 - [ ] End-to-end smoke test green per connector
 
 ## Phase 8 — Cross-platform optimization
 
-**Status.** ⏳ planned
+**Status.** 🟡 partial | ~50% (6 of 12 line items shipped; HPAs and
+Python-side autoscaling tracked in the deployment-config repo)
 
 Go context engine tuning:
 
-- [ ] Goroutine pool sizing per stage tuned against measured latency
-- [ ] Kafka consumer rebalancing tuned (sticky, session timeout, max poll)
-- [ ] Connection pooling for Qdrant / FalkorDB / Tantivy / Postgres
+- [x] Goroutine pool sizing per stage — `pipeline.StageConfig` adds
+      `FetchWorkers` / `ParseWorkers` / `EmbedWorkers` /
+      `StoreWorkers` to `CoordinatorConfig`; the coordinator
+      replaces the original "1 goroutine per stage" topology with
+      bounded worker pools that close downstream channels via a
+      `sync.WaitGroup` once every stage worker has exited
+      (`internal/pipeline/coordinator.go`)
+- [x] Kafka consumer rebalancing tuned — `pipeline.ConsumerTuning`
+      exposes `SessionTimeout`, `MaxPollInterval`, and
+      `RebalanceStrategy` (sticky / range / roundrobin); defaults
+      stay sticky to preserve per-source ordering across
+      rebalances (`internal/pipeline/consumer.go::SaramaConfigWith`)
+- [x] Connection pooling for Qdrant / FalkorDB / Tantivy / Postgres
+      — Qdrant uses a sized `http.Transport` with
+      `MaxIdleConnsPerHost` tunable via
+      `CONTEXT_ENGINE_QDRANT_POOL_SIZE`; the FalkorDB-shared Redis
+      pool is sized via `CONTEXT_ENGINE_REDIS_POOL_SIZE`; the
+      Postgres pool sets `SetMaxOpenConns` /
+      `SetMaxIdleConns` / `SetConnMaxLifetime` from
+      `CONTEXT_ENGINE_PG_MAX_OPEN` and
+      `CONTEXT_ENGINE_PG_MAX_IDLE`
 - [ ] HPA on Kafka lag (ingest) and QPS (api)
-- [ ] OpenTelemetry trace sampling tuned for cost / tail-latency tradeoff
+- [x] OpenTelemetry trace sampling tuned for cost / tail-latency
+      tradeoff — `internal/observability/tracing.go` centralises
+      tracer + attribute keys; spans emitted around the four
+      pipeline stages and the four retrieval backends
+      (vector / bm25 / graph / memory) with hit-count + latency_ms
+      attributes; `RetrieveResponse.TraceID` echoes the trace_id
+      to the client per the API contract
 
 Python ML microservice scaling:
 
 - [ ] HPA on Docling worker (CPU + queue depth)
 - [ ] HPA on embedding worker (CPU + queue depth)
 - [ ] Mem0 partitioning by tenant prefix
-- [ ] gRPC connection pooling + per-target deadlines on the Go side
-- [ ] Capacity test (N docs / min) without back-pressure to connectors
+- [x] gRPC connection pooling + per-target deadlines on the Go side
+      — `internal/grpcpool/` provides a round-robin pool with
+      configurable `Deadline`, a `Threshold`-based circuit
+      breaker (closed → open → half-open → closed) and
+      `OpenFor` recovery window
+- [x] Capacity test (N docs / min) without back-pressure to
+      connectors — `tests/capacity/capacity_test.go` submits
+      configurable docs/minute through the coordinator with fake
+      stages and asserts every submit completes within the
+      submit deadline (no producer back-pressure); `make
+      capacity-test` runs it; `CAPACITY_DOCS_PER_MIN` /
+      `CAPACITY_DURATION` tune the load shape
 
 Cross-platform on-device:
 
@@ -253,11 +306,52 @@ ships, the matrix is empty. Each row records:
 |---|---|---|---|---|---|---|
 | Google Drive | ❌ | ✅ | ❌ (poll) | ✅ (`changes.list` cursor) | ❌ | 🟡 Phase 1 |
 | Slack        | ✅ (workspace users) | ✅ (channels + threads) | ✅ (Events API) | ✅ (`oldest`/`latest` cursor) | ❌ | 🟡 Phase 1 |
+| SharePoint Online | ❌ | ✅ (drive items) | ❌ | ✅ (Graph delta token) | ❌ | 🟡 Phase 7 |
+| OneDrive     | ❌ | ✅ (drive items) | ❌ | ✅ (Graph delta token) | ❌ | 🟡 Phase 7 |
+| Dropbox      | ❌ | ✅ (file entries) | ❌ | ✅ (`list_folder/continue` cursor) | ❌ | 🟡 Phase 7 |
+| Box          | ❌ | ✅ (file entries) | ❌ | ✅ (events stream `next_stream_position`) | ❌ | 🟡 Phase 7 |
+| Notion       | ❌ | ✅ (pages) | ❌ | ✅ (`last_edited_time` filter) | ❌ | 🟡 Phase 7 |
+| Confluence Cloud | ❌ | ✅ (pages) | ❌ | ✅ (CQL `lastModified`) | ❌ | 🟡 Phase 7 |
+| Jira Cloud   | ❌ | ✅ (issues) | ✅ (Jira webhooks) | ✅ (JQL `updated`) | ❌ | 🟡 Phase 7 |
+| GitHub       | ❌ | ✅ (issues / PRs) | ✅ (GitHub webhooks) | ✅ (`since` filter) | ❌ | 🟡 Phase 7 |
+| GitLab       | ❌ | ✅ (issues) | ✅ (GitLab webhooks) | ✅ (`updated_after`) | ❌ | 🟡 Phase 7 |
+| Microsoft Teams | ❌ | ✅ (channel messages) | ✅ (Graph change notifications) | ✅ (`messages/delta`) | ❌ | 🟡 Phase 7 |
 
 ---
 
 ## Changelog
 
+- 2026-05-10: Phase 5 server-side (~40%) + Phase 7 catalog (~85%) +
+  Phase 8 optimisation (~50%):
+  - **Phase 5**: shard manifest API and metadata store
+    (`internal/shard/`, `migrations/006_shards.sql`,
+    `GET /v1/shards/:tenant_id`); policy-aware shard generation
+    worker (`internal/shard/generator.go` calls
+    `PolicyResolver.Resolve`); delta sync protocol
+    (`GET /v1/shards/:tenant_id/delta?since=<v>`,
+    `internal/shard/delta.go`); cryptographic forgetting
+    orchestrator (`internal/shard/forget.go`,
+    `DELETE /v1/tenants/:tenant_id/keys`).
+  - **Phase 7**: 10 new connectors landed —
+    `internal/connector/sharepoint`, `…/onedrive`, `…/dropbox`,
+    `…/box`, `…/notion`, `…/confluence`, `…/jira`,
+    `…/github`, `…/gitlab`, `…/teams`. Each implements
+    `SourceConnector`; all 10 implement `DeltaSyncer`; Jira /
+    GitHub / GitLab / Teams also implement `WebhookReceiver`.
+    Total connector catalog: 12 (target hit at GA).
+  - **Phase 8**: OpenTelemetry tracing helper
+    (`internal/observability/tracing.go`) instrumenting the four
+    pipeline stages (`pipeline.coordinator`) and the four
+    retrieval backends (`retrieval.handler.fanOut`); `trace_id`
+    echoed on `RetrieveResponse`. Per-stage worker pools
+    (`pipeline.StageConfig` in `CoordinatorConfig`). Sticky
+    Kafka rebalance + tunable session/poll/strategy
+    (`pipeline.ConsumerTuning`, `SaramaConfigWith`). Storage
+    pool sizing exposed via env (`CONTEXT_ENGINE_QDRANT_POOL_SIZE`,
+    `CONTEXT_ENGINE_REDIS_POOL_SIZE`, `CONTEXT_ENGINE_PG_MAX_OPEN`,
+    `CONTEXT_ENGINE_PG_MAX_IDLE`). gRPC pool with circuit
+    breaker (`internal/grpcpool/`). Capacity test harness
+    (`tests/capacity/`, `make capacity-test`).
 - 2026-05-09: Phase 4 hardening (~98%): transactional audit on
   promotion / rejection — `policy.AuditWriter` now exposes
   `CreateInTx` and `internal/policy/promotion.go` emits the

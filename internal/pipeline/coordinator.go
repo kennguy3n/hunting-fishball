@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // FetchStage is the abstract Stage 1 contract the coordinator depends
@@ -33,6 +35,40 @@ type StoreStage interface {
 	Delete(ctx context.Context, tenantID, documentID string) error
 }
 
+// StageConfig sizes the per-stage worker pools. Phase 8 introduces
+// bounded parallelism per stage — without this, every stage would
+// run a single goroutine and the embedder (which is normally the
+// long-pole) would dominate end-to-end latency.
+//
+// All four fields default to 1 (sequential per-stage processing,
+// matching the original coordinator semantics). Setting them above
+// 1 spawns N goroutines that each read from the upstream stage
+// channel; ordering across documents is no longer preserved within
+// a stage when N>1, but ordering between stages is still
+// channel-enforced (Stage 2 cannot see a document Stage 1 has not
+// pushed).
+type StageConfig struct {
+	FetchWorkers int `json:"fetch_workers"`
+	ParseWorkers int `json:"parse_workers"`
+	EmbedWorkers int `json:"embed_workers"`
+	StoreWorkers int `json:"store_workers"`
+}
+
+func (s *StageConfig) defaults() {
+	if s.FetchWorkers < 1 {
+		s.FetchWorkers = 1
+	}
+	if s.ParseWorkers < 1 {
+		s.ParseWorkers = 1
+	}
+	if s.EmbedWorkers < 1 {
+		s.EmbedWorkers = 1
+	}
+	if s.StoreWorkers < 1 {
+		s.StoreWorkers = 1
+	}
+}
+
 // CoordinatorConfig configures the 4-stage pipeline coordinator.
 type CoordinatorConfig struct {
 	Fetch FetchStage
@@ -43,6 +79,10 @@ type CoordinatorConfig struct {
 	// QueueSize bounds the per-stage channel buffer; back-pressure is
 	// enforced by sized buffers between stages. Defaults to 8.
 	QueueSize int
+
+	// Workers controls per-stage goroutine fan-out (Phase 8 Task 16).
+	// Zero values default to 1 (preserves pre-Phase-8 semantics).
+	Workers StageConfig
 
 	// MaxAttempts is the per-document retry budget. Defaults to 3.
 	MaxAttempts int
@@ -77,6 +117,7 @@ func (c *CoordinatorConfig) defaults() {
 	if c.MaxBackoff == 0 {
 		c.MaxBackoff = 5 * time.Second
 	}
+	c.Workers.defaults()
 }
 
 // CoordinatorMetrics counts the events that flow through the
@@ -160,21 +201,47 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 	g, gctx := errgroup.WithContext(ctx)
 
-	// Stage 1 worker: Fetch
-	g.Go(func() error {
-		defer close(c.stage2)
+	// Run N workers for a stage; the closer goroutine waits for all
+	// workers in the stage to finish before closing the downstream
+	// channel. This generalises the original "1 worker per stage"
+	// design to N workers per stage (Phase 8 Task 16).
+	stage := func(workers int, downstream chan<- stagedItem, body func()) {
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			g.Go(func() error {
+				defer wg.Done()
+				body()
+				return nil
+			})
+		}
+		if downstream != nil {
+			g.Go(func() error {
+				wg.Wait()
+				close(downstream)
+				return nil
+			})
+		} else {
+			// Stage 4 has no downstream channel; we still need a
+			// goroutine to keep the errgroup tracking workers alive
+			// until they exit, but we don't close anything.
+			g.Go(func() error {
+				wg.Wait()
+				return nil
+			})
+		}
+	}
+
+	// Stage 1 workers: Fetch
+	stage(c.cfg.Workers.FetchWorkers, c.stage2, func() {
 		for {
 			select {
 			case <-gctx.Done():
-				return nil
+				return
 			case se, ok := <-c.stage1:
 				if !ok {
-					return nil
+					return
 				}
-				// Delete and purge events have no bytes to fetch — the
-				// production Fetcher would reject them as poison. Build
-				// a minimal Document and forward straight to Stage 2,
-				// which already routes those Kinds to Stage 4.
 				if se.evt.Kind == EventDocumentDeleted || se.evt.Kind == EventPurge {
 					doc := &Document{
 						TenantID:   se.evt.TenantID,
@@ -183,7 +250,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 					}
 					select {
 					case <-gctx.Done():
-						return nil
+						return
 					case c.stage2 <- stagedItem{evt: se.evt, doc: doc}:
 					}
 
@@ -208,35 +275,27 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				}
 				select {
 				case <-gctx.Done():
-					return nil
+					return
 				case c.stage2 <- stagedItem{evt: se.evt, doc: doc.(*Document)}:
 				}
 			}
 		}
 	})
 
-	// Stage 2 worker: Parse
-	g.Go(func() error {
-		defer close(c.stage3)
+	// Stage 2 workers: Parse
+	stage(c.cfg.Workers.ParseWorkers, c.stage3, func() {
 		for {
 			select {
 			case <-gctx.Done():
-				return nil
+				return
 			case it, ok := <-c.stage2:
 				if !ok {
-					return nil
+					return
 				}
 				if it.evt.Kind == EventDocumentDeleted || it.evt.Kind == EventPurge {
-					// Skip Parse / Embed; hand to Stage 3 so Stage 3
-					// stays the sole writer to stage4. Stage 3 already
-					// forwards empty-blocks items straight through to
-					// Stage 4, which routes the EventKind to
-					// Store.Delete. Sending to stage4 directly here
-					// would race with Stage 3's `defer close(c.stage4)`
-					// on shutdown and panic (send on closed channel).
 					select {
 					case <-gctx.Done():
-						return nil
+						return
 					case c.stage3 <- it:
 					}
 
@@ -253,31 +312,27 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				it.blocks = blocks.([]Block)
 				select {
 				case <-gctx.Done():
-					return nil
+					return
 				case c.stage3 <- it:
 				}
 			}
 		}
 	})
 
-	// Stage 3 worker: Embed
-	g.Go(func() error {
-		defer close(c.stage4)
+	// Stage 3 workers: Embed
+	stage(c.cfg.Workers.EmbedWorkers, c.stage4, func() {
 		for {
 			select {
 			case <-gctx.Done():
-				return nil
+				return
 			case it, ok := <-c.stage3:
 				if !ok {
-					return nil
+					return
 				}
 				if len(it.blocks) == 0 {
-					// Empty parse → still push to Stage 4 so Storer can
-					// no-op cleanly; this preserves the invariant that
-					// every accepted event hits Stage 4 exactly once.
 					select {
 					case <-gctx.Done():
-						return nil
+						return
 					case c.stage4 <- it:
 					}
 
@@ -305,22 +360,22 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				it.modelID = res.modelID
 				select {
 				case <-gctx.Done():
-					return nil
+					return
 				case c.stage4 <- it:
 				}
 			}
 		}
 	})
 
-	// Stage 4 worker: Store
-	g.Go(func() error {
+	// Stage 4 workers: Store
+	stage(c.cfg.Workers.StoreWorkers, nil, func() {
 		for {
 			select {
 			case <-gctx.Done():
-				return nil
+				return
 			case it, ok := <-c.stage4:
 				if !ok {
-					return nil
+					return
 				}
 				if it.evt.Kind == EventDocumentDeleted || it.evt.Kind == EventPurge {
 					if _, err := c.runWithRetry(gctx, "delete", func(rc context.Context) (any, error) {
@@ -387,7 +442,12 @@ func (c *Coordinator) CloseInputs() {
 // runWithRetry executes fn with bounded retries on transient errors.
 // Poison messages (ErrPoisonMessage) and ErrUnchanged are returned
 // immediately without retry.
-func (c *Coordinator) runWithRetry(ctx context.Context, _ string, fn func(context.Context) (any, error)) (any, error) {
+func (c *Coordinator) runWithRetry(ctx context.Context, stage string, fn func(context.Context) (any, error)) (any, error) {
+	ctx, span := observability.StartSpan(ctx, "pipeline."+stage,
+		observability.AttrStage.String(stage),
+	)
+	defer span.End()
+
 	var lastErr error
 	backoff := c.cfg.InitialBackoff
 	for attempt := 1; attempt <= c.cfg.MaxAttempts; attempt++ {
@@ -399,10 +459,12 @@ func (c *Coordinator) runWithRetry(ctx context.Context, _ string, fn func(contex
 			return nil, err
 		}
 		if errors.Is(err, ErrPoisonMessage) {
+			observability.RecordError(span, err)
 			return nil, err
 		}
 		lastErr = err
 		if attempt == c.cfg.MaxAttempts {
+			observability.RecordError(span, err)
 			break
 		}
 		t := time.NewTimer(backoff)

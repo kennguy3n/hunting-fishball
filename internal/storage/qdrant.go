@@ -58,6 +58,16 @@ type QdrantConfig struct {
 
 	// APIKey, when non-empty, is sent in the `api-key` header.
 	APIKey string
+
+	// PoolMaxIdleConnsPerHost overrides http.Transport's
+	// MaxIdleConnsPerHost when HTTPClient is constructed by
+	// NewQdrantClient. Ignored when HTTPClient is supplied.
+	// Defaults to 32 (Phase 8 Task 18).
+	PoolMaxIdleConnsPerHost int
+
+	// PoolIdleConnTimeout overrides http.Transport's
+	// IdleConnTimeout. Defaults to 90s.
+	PoolIdleConnTimeout time.Duration
 }
 
 // QdrantPoint is one vector to upsert into Qdrant. ID must be unique
@@ -91,7 +101,22 @@ func NewQdrantClient(cfg QdrantConfig) (*QdrantClient, error) {
 		return nil, errors.New("qdrant: VectorSize must be > 0")
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+		maxIdle := cfg.PoolMaxIdleConnsPerHost
+		if maxIdle <= 0 {
+			maxIdle = 32
+		}
+		idleTO := cfg.PoolIdleConnTimeout
+		if idleTO <= 0 {
+			idleTO = 90 * time.Second
+		}
+		cfg.HTTPClient = &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        maxIdle * 4,
+				MaxIdleConnsPerHost: maxIdle,
+				IdleConnTimeout:     idleTO,
+			},
+		}
 	}
 	if cfg.Distance == "" {
 		cfg.Distance = "Cosine"
