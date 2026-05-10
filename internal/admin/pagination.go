@@ -13,6 +13,8 @@ package admin
 import (
 	"errors"
 	"strconv"
+
+	"github.com/kennguy3n/hunting-fishball/internal/util/strutil"
 )
 
 // MaxPageLimit is the absolute ceiling all admin list endpoints
@@ -41,15 +43,11 @@ func parsePageLimit(raw string) (int, error) {
 	return n, nil
 }
 
-// firstNonEmpty returns the first non-empty string in args. It is
-// used by handlers that accept a new query-parameter alias
-// (`cursor`) alongside an existing one (`page_token`) without
-// silently preferring one over the other.
+// firstNonEmpty is a thin alias preserving the package-private
+// call sites (cursor / page_token aliasing). The implementation
+// lives in internal/util/strutil so the audit handler can share
+// it without an admin → audit dependency cycle. Addresses
+// FLAG_pr-review-job-b10ff0a8305841f98c7f1ed361d5ee8b_0004.
 func firstNonEmpty(args ...string) string {
-	for _, a := range args {
-		if a != "" {
-			return a
-		}
-	}
-	return ""
+	return strutil.FirstNonEmpty(args...)
 }

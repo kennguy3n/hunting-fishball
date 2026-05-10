@@ -14,7 +14,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -104,18 +103,19 @@ func (h *DLQHandler) list(c *gin.Context) {
 	if v := c.Query("include_replayed"); v != "" {
 		filter.IncludeReplayed = v == "true" || v == "1"
 	}
-	rawPageSize := firstNonEmpty(c.Query("limit"), c.Query("page_size"))
-	if rawPageSize != "" {
-		n, err := strconv.Atoi(rawPageSize)
-		if err != nil || n < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
-			return
-		}
-		if n > MaxPageLimit {
-			n = MaxPageLimit
-		}
-		filter.PageSize = n
+	// Reuse the shared parsePageLimit helper so the DLQ handler
+	// behaves the same as the sources/audit handlers: limit=0
+	// falls back to the store's default page size, negatives are
+	// rejected with a 400. Addresses
+	// FLAG_pr-review-job-b10ff0a8305841f98c7f1ed361d5ee8b_0006
+	// which flagged the previous inconsistency where this handler
+	// alone rejected limit=0 with a "positive integer" error.
+	n, err := parsePageLimit(firstNonEmpty(c.Query("limit"), c.Query("page_size")))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
+	filter.PageSize = n
 	rows, err := h.cfg.Reader.List(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

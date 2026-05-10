@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/kennguy3n/hunting-fishball/internal/util/strutil"
 )
 
 // TenantContextKey is the Gin context key auth middleware writes the
@@ -192,16 +194,13 @@ func (h *Handler) get(c *gin.Context) {
 // internal/admin/pagination.go.
 const maxPageLimit = 200
 
-// firstNonEmpty returns the first non-empty string in args. Used so
-// the handler can accept Round-5 canonical names (`cursor`, `limit`)
-// alongside the original (`page_token`, `page_size`).
+// firstNonEmpty is a thin alias preserving the package-private
+// call sites (cursor / page_token aliasing). The implementation
+// lives in internal/util/strutil so admin and audit handlers
+// share a single source of truth. Addresses
+// FLAG_pr-review-job-b10ff0a8305841f98c7f1ed361d5ee8b_0004.
 func firstNonEmpty(args ...string) string {
-	for _, a := range args {
-		if a != "" {
-			return a
-		}
-	}
-	return ""
+	return strutil.FirstNonEmpty(args...)
 }
 
 // tenantIDFromContext pulls the authenticated tenant ID out of the Gin

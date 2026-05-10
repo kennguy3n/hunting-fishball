@@ -65,6 +65,15 @@ func (s *DLQStoreGORM) List(ctx context.Context, filter DLQListFilter) ([]DLQMes
 	if filter.OriginalTopic != "" {
 		q = q.Where("original_topic = ?", filter.OriginalTopic)
 	}
+	if filter.SourceID != "" {
+		q = q.Where("source_id = ?", filter.SourceID)
+	}
+	if !filter.MinCreatedAt.IsZero() {
+		q = q.Where("created_at >= ?", filter.MinCreatedAt)
+	}
+	if !filter.MaxCreatedAt.IsZero() {
+		q = q.Where("created_at < ?", filter.MaxCreatedAt)
+	}
 	if !filter.IncludeReplayed {
 		q = q.Where("replayed_at IS NULL")
 	}

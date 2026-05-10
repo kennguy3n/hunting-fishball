@@ -83,8 +83,29 @@ func (h *DLQHandler) batchReplay(c *gin.Context) {
 	var req DLQBatchReplayRequest
 	_ = c.ShouldBindJSON(&req)
 
+	// Resolve the time-range filters once so we can both push them
+	// to the SQL store AND surface a 400 on bad input. Pre-flight
+	// rejection matters because the reader would otherwise treat a
+	// bad timestamp as "no filter" and silently scan the full
+	// working set, masking the operator's payload mistake.
+	minT, maxT, ferr := parseReplayTimeRange(req)
+	if ferr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": ferr.Error()})
+		return
+	}
+
+	// Push the cheap, indexable filters (source_id, time range)
+	// to the store so the +1 fetch returns up to
+	// MaxReplayBatchSize matching rows even when the DLQ contains
+	// thousands of unrelated entries. error_contains is kept
+	// client-side because an unbounded ILIKE without a trigram
+	// index is worse than scanning a 100-row page in memory.
+	// Addresses FLAG_pr-review-job_0003.
 	rows, err := h.cfg.Reader.List(c.Request.Context(), pipeline.DLQListFilter{
 		TenantID:        tenantID,
+		SourceID:        req.SourceID,
+		MinCreatedAt:    minT,
+		MaxCreatedAt:    maxT,
 		IncludeReplayed: req.IncludeReplayed || req.Force,
 		PageSize:        MaxReplayBatchSize + 1,
 	})
@@ -93,11 +114,7 @@ func (h *DLQHandler) batchReplay(c *gin.Context) {
 		return
 	}
 
-	filtered, ferr := filterDLQRows(rows, req)
-	if ferr != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": ferr.Error()})
-		return
-	}
+	filtered := filterDLQRowsClientSide(rows, req)
 	if len(filtered) > MaxReplayBatchSize {
 		filtered = filtered[:MaxReplayBatchSize]
 	}
@@ -145,45 +162,44 @@ func (h *DLQHandler) batchReplay(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// filterDLQRows applies the user-supplied filters to the working
-// set returned by the reader. Errors are surfaced when the input
-// timestamp shapes are bad — the handler treats them as 400 so the
-// admin sees the payload mistake rather than a silently empty
-// response.
-func filterDLQRows(rows []pipeline.DLQMessage, req DLQBatchReplayRequest) ([]pipeline.DLQMessage, error) {
+// parseReplayTimeRange validates the request timestamps once so
+// the handler can short-circuit on a 400 without ever touching the
+// store.
+func parseReplayTimeRange(req DLQBatchReplayRequest) (time.Time, time.Time, error) {
 	var minT, maxT time.Time
 	var err error
 	if req.MinCreatedAt != "" {
 		minT, err = time.Parse(time.RFC3339, req.MinCreatedAt)
 		if err != nil {
-			return nil, errors.New("min_created_at must be RFC3339")
+			return time.Time{}, time.Time{}, errors.New("min_created_at must be RFC3339")
 		}
 	}
 	if req.MaxCreatedAt != "" {
 		maxT, err = time.Parse(time.RFC3339, req.MaxCreatedAt)
 		if err != nil {
-			return nil, errors.New("max_created_at must be RFC3339")
+			return time.Time{}, time.Time{}, errors.New("max_created_at must be RFC3339")
 		}
 	}
-	needle := strings.ToLower(strings.TrimSpace(req.ErrorContains))
+	return minT, maxT, nil
+}
 
+// filterDLQRowsClientSide applies the filters that aren't pushed
+// to the SQL store. Today only error_contains stays client-side
+// (substring match without a trigram index is faster on a 100-row
+// page than at the DB).
+func filterDLQRowsClientSide(rows []pipeline.DLQMessage, req DLQBatchReplayRequest) []pipeline.DLQMessage {
+	needle := strings.ToLower(strings.TrimSpace(req.ErrorContains))
+	if needle == "" {
+		return rows
+	}
 	out := make([]pipeline.DLQMessage, 0, len(rows))
 	for _, r := range rows {
-		if req.SourceID != "" && r.SourceID != req.SourceID {
-			continue
-		}
-		if !minT.IsZero() && r.CreatedAt.Before(minT) {
-			continue
-		}
-		if !maxT.IsZero() && !r.CreatedAt.Before(maxT) {
-			continue
-		}
-		if needle != "" && !strings.Contains(strings.ToLower(r.ErrorText), needle) {
+		if !strings.Contains(strings.ToLower(r.ErrorText), needle) {
 			continue
 		}
 		out = append(out, r)
 	}
-	return out, nil
+	return out
 }
 
 // reusable seam for Replayer test injection.

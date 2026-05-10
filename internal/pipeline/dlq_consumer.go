@@ -63,6 +63,17 @@ type DLQListFilter struct {
 	TenantID        string
 	OriginalTopic   string
 	IncludeReplayed bool
+	// SourceID, MinCreatedAt, MaxCreatedAt narrow the working set
+	// at the SQL layer for the batch-replay endpoint. Pushing these
+	// down (rather than filtering client-side after a +1 fetch)
+	// addresses FLAG_pr-review-job_0003: when an operator targets a
+	// specific connector or time window in a DLQ with thousands of
+	// rows, the SQL filter ensures the +1 fetch returns up to
+	// PageSize matching rows rather than slicing through unrelated
+	// rows that happened to land on the first page.
+	SourceID     string
+	MinCreatedAt time.Time // inclusive lower bound; zero = unset
+	MaxCreatedAt time.Time // exclusive upper bound; zero = unset
 	// PageSize is the LIMIT clause. <=0 falls back to
 	// DefaultDLQPageSize. Values > MaxDLQPageSize are clamped.
 	PageSize  int
