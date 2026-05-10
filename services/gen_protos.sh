@@ -41,7 +41,7 @@ path = sys.argv[1]
 with open(path) as fh:
     src = fh.read()
 src = re.sub(
-    r"^from (docling|embedding|memory)\.v1 ",
+    r"^from (docling|embedding|memory|graphrag)\.v1 ",
     r"from _proto.\1.v1 ",
     src,
     flags=re.MULTILINE,

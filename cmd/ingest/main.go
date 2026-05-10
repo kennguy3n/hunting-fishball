@@ -55,6 +55,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 	doclingv1 "github.com/kennguy3n/hunting-fishball/proto/docling/v1"
 	embeddingv1 "github.com/kennguy3n/hunting-fishball/proto/embedding/v1"
+	graphragv1 "github.com/kennguy3n/hunting-fishball/proto/graphrag/v1"
 )
 
 func main() {
@@ -176,12 +177,26 @@ func run() error {
 		EmbedWorkers: stageWorkerEnv("CONTEXT_ENGINE_EMBED_WORKERS"),
 		StoreWorkers: stageWorkerEnv("CONTEXT_ENGINE_STORE_WORKERS"),
 	}
+	// Phase 3 Stage 3b: opt-in GraphRAG entity extraction. When
+	// CONTEXT_ENGINE_GRAPHRAG_ENABLED=true and both the gRPC target
+	// and FalkorDB connection string are configured we wire the
+	// stage hook so the coordinator enriches each ingested
+	// document into the per-tenant graph.
+	graphRAG, graphRAGConn, err := buildGraphRAGStage(context.Background())
+	if err != nil {
+		return fmt.Errorf("graphrag: %w", err)
+	}
+	if graphRAGConn != nil {
+		defer func() { _ = graphRAGConn.Close() }()
+	}
+
 	coord, err := pipeline.NewCoordinator(pipeline.CoordinatorConfig{
-		Fetch:   fetcher,
-		Parse:   parser,
-		Embed:   embedder,
-		Store:   storer,
-		Workers: stageWorkers,
+		Fetch:    fetcher,
+		Parse:    parser,
+		Embed:    embedder,
+		Store:    storer,
+		Workers:  stageWorkers,
+		GraphRAG: graphRAG,
 	})
 	if err != nil {
 		return fmt.Errorf("coordinator: %w", err)
@@ -452,4 +467,91 @@ func parseInt(s string) (int, error) {
 	}
 
 	return n, nil
+}
+
+// buildGraphRAGStage returns a non-nil pipeline.GraphRAGStage when
+// CONTEXT_ENGINE_GRAPHRAG_ENABLED is truthy and the supporting
+// dependencies (graphrag gRPC target + falkordb url) are
+// configured. Returns (nil, nil, nil) when the feature is disabled
+// or under-configured — the coordinator falls back to its 4-stage
+// pipeline.
+func buildGraphRAGStage(ctx context.Context) (pipeline.GraphRAGStage, *grpc.ClientConn, error) {
+	if !envBool("CONTEXT_ENGINE_GRAPHRAG_ENABLED") {
+		return nil, nil, nil
+	}
+	target := os.Getenv("CONTEXT_ENGINE_GRAPHRAG_TARGET")
+	if target == "" {
+		observability.NewLogger("ingest").Warn(
+			"graphrag enabled but CONTEXT_ENGINE_GRAPHRAG_TARGET unset; skipping",
+		)
+		return nil, nil, nil
+	}
+	falkorURL := os.Getenv("CONTEXT_ENGINE_FALKORDB_URL")
+	if falkorURL == "" {
+		observability.NewLogger("ingest").Warn(
+			"graphrag enabled but CONTEXT_ENGINE_FALKORDB_URL unset; skipping",
+		)
+		return nil, nil, nil
+	}
+
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial graphrag: %w", err)
+	}
+
+	opts, err := redis.ParseURL(falkorURL)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("parse falkordb url: %w", err)
+	}
+	rc := redis.NewClient(opts)
+	falkor, err := storage.NewFalkorDBClient(storage.FalkorDBConfig{
+		Client:      &falkorRedisAdapter{rc: rc},
+		GraphPrefix: envOr("CONTEXT_ENGINE_FALKORDB_GRAPH_PREFIX", "hf-"),
+	})
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("falkordb client: %w", err)
+	}
+
+	stage := &pipeline.GraphRAGStageGRPC{
+		Client:  &graphRAGGRPCClient{stub: graphragv1.NewGraphRAGServiceClient(conn)},
+		Writer:  falkor,
+		ModelID: os.Getenv("CONTEXT_ENGINE_GRAPHRAG_MODEL"),
+	}
+	observability.NewLogger("ingest").Info(
+		"graphrag stage 3b enabled",
+		"target", target,
+		"falkor_prefix", envOr("CONTEXT_ENGINE_FALKORDB_GRAPH_PREFIX", "hf-"),
+	)
+	_ = ctx
+	return stage, conn, nil
+}
+
+// graphRAGGRPCClient adapts the generated graphragv1 stub to the
+// narrow pipeline.GraphRAGClient contract.
+type graphRAGGRPCClient struct {
+	stub graphragv1.GraphRAGServiceClient
+}
+
+func (c *graphRAGGRPCClient) ExtractEntities(ctx context.Context, req *graphragv1.ExtractRequest) (*graphragv1.ExtractResponse, error) {
+	return c.stub.ExtractEntities(ctx, req)
+}
+
+// falkorRedisAdapter projects the *redis.Client into the narrow
+// storage.FalkorDB contract (Do(ctx, args...) FalkorCmd).
+type falkorRedisAdapter struct {
+	rc *redis.Client
+}
+
+func (a *falkorRedisAdapter) Do(ctx context.Context, args ...any) storage.FalkorCmd {
+	return a.rc.Do(ctx, args...)
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

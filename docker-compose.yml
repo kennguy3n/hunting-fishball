@@ -147,6 +147,22 @@ services:
       retries: 12
       start_period: 30s
 
+  graphrag:
+    build:
+      context: .
+      dockerfile: services/graphrag/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "50054:50054"
+    environment:
+      GRAPHRAG_ADDR: "[::]:50054"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 50054), timeout=2).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
 volumes:
   postgres_data:
   redis_data:
