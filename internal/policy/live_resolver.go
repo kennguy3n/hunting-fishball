@@ -60,10 +60,11 @@ func (r *LiveResolverGORM) Resolve(ctx context.Context, tenantID, channelID stri
 	var (
 		channelMode      PrivacyMode
 		channelRecipDef  string
+		channelDenyLocal bool
 		hasChannelPolicy bool
 	)
 	if channelID != "" {
-		channelMode, channelRecipDef, hasChannelPolicy, err = loadChannelMode(t, tenantID, channelID)
+		channelMode, channelRecipDef, channelDenyLocal, hasChannelPolicy, err = loadChannelMode(t, tenantID, channelID)
 		if err != nil {
 			return PolicySnapshot{}, fmt.Errorf("policy: load channel mode: %w", err)
 		}
@@ -82,9 +83,10 @@ func (r *LiveResolverGORM) Resolve(ctx context.Context, tenantID, channelID stri
 	}
 
 	return PolicySnapshot{
-		EffectiveMode: effective,
-		ACL:           acl,
-		Recipient:     recipient,
+		EffectiveMode:      effective,
+		ACL:                acl,
+		Recipient:          recipient,
+		DenyLocalRetrieval: channelDenyLocal,
 	}, nil
 }
 
@@ -103,20 +105,22 @@ func loadTenantMode(tx *gorm.DB, tenantID string) (PrivacyMode, error) {
 	return PrivacyMode(row.PrivacyMode), nil
 }
 
-// loadChannelMode returns (mode, recipientDefault, present, err)
-// for the (tenant, channel) channel_policies row. When no row
-// matches, present=false and the (mode, recipientDefault) values
-// are zero.
-func loadChannelMode(tx *gorm.DB, tenantID, channelID string) (PrivacyMode, string, bool, error) {
+// loadChannelMode returns (mode, recipientDefault, denyLocal,
+// present, err) for the (tenant, channel) channel_policies row.
+// When no row matches, present=false and the other return values
+// are zero. denyLocal mirrors the deny_local_retrieval column added
+// in migrations/007_channel_deny_local.sql so the device-first hint
+// can honour the channel-level allow-local toggle.
+func loadChannelMode(tx *gorm.DB, tenantID, channelID string) (PrivacyMode, string, bool, bool, error) {
 	var row channelPolicyRow
 	err := tx.Where("tenant_id = ? AND channel_id = ?", tenantID, channelID).Limit(1).Find(&row).Error
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, false, err
 	}
 	if row.PrivacyMode == "" {
-		return "", "", false, nil
+		return "", "", false, false, nil
 	}
-	return PrivacyMode(row.PrivacyMode), row.RecipientDefault, true, nil
+	return PrivacyMode(row.PrivacyMode), row.RecipientDefault, row.DenyLocalRetrieval, true, nil
 }
 
 // resolveEffectiveMode picks the strictest of (tenant, channel) and

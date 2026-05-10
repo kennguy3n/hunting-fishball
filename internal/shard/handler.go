@@ -33,6 +33,12 @@ type HandlerConfig struct {
 	Repo   HandlerRepo
 	Forget ForgetTrigger
 
+	// CoverageRepo supplies the corpus-side chunk count for the
+	// `/v1/shards/:tenant_id/coverage` endpoint. Optional: when
+	// nil, the handler reports IsAuthoritative=false with reason
+	// "corpus_size_unknown" instead of fabricating a denominator.
+	CoverageRepo CoverageRepo
+
 	// MaxPageSize bounds the list response. Defaults to 200.
 	MaxPageSize int
 }
@@ -234,12 +240,12 @@ type CoverageResponse struct {
 	Reason          string  `json:"reason,omitempty"`
 }
 
-// CoverageRepo extends HandlerRepo with the read used by
+// CoverageRepo is the read used by
 // GET /v1/shards/:tenant_id/coverage. Implementations resolve the
 // total chunk count for the tenant scope (the denominator of the
-// coverage ratio). Optional — when the configured Repo does not
-// implement CoverageRepo the handler reports a coverage ratio of 0
-// and IsAuthoritative=false so the client falls back to remote.
+// coverage ratio). Optional — when no CoverageRepo is wired the
+// handler reports a coverage ratio of 0 and IsAuthoritative=false
+// so the client falls back to remote retrieval.
 type CoverageRepo interface {
 	CorpusChunkCount(ctx context.Context, f ScopeFilter) (int, error)
 }
@@ -282,8 +288,11 @@ func (h *Handler) coverage(c *gin.Context) {
 	resp.ShardVersion = manifest.ShardVersion
 	resp.ShardChunks = manifest.ChunksCount
 
-	corpusRepo, ok := h.cfg.Repo.(CoverageRepo)
-	if !ok {
+	corpusRepo := h.cfg.CoverageRepo
+	if corpusRepo == nil {
+		// Without an explicit CoverageRepo wired in, the corpus
+		// denominator is unknowable; surface that honestly rather
+		// than emitting a fabricated 1.0 ratio.
 		resp.Reason = "corpus_size_unknown"
 		c.JSON(http.StatusOK, resp)
 		return

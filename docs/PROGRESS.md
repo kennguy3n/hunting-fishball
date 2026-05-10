@@ -148,7 +148,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 5 — On-device knowledge core integration
 
-**Status.** 🟡 partial | ~70% (server-side + contracts shipped; on-device implementations still tracked in `kennguy3n/knowledge`)
+**Status.** 🟡 partial | ~80% (server-side + contracts shipped; coverage repo authoritative; channel `deny_local_retrieval` wired end-to-end; tenant-deletion 5-step workflow implemented; on-device implementations still tracked in `kennguy3n/knowledge`)
 
 - [x] UniFFI XCFramework for iOS — server-side contract
       (`docs/contracts/uniffi-ios.md`,
@@ -197,7 +197,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 6 — B2C client surfaces
 
-**Status.** 🟡 partial | ~60% (server contracts + endpoints shipped; client UIs in B2C repos)
+**Status.** 🟡 partial | ~75% (server contracts + endpoints shipped; e2e smoke covers shard/coverage/models/B2C/device-first/forget; structured JSON logging + W3C traceparent middleware shipped; readyz probes + DLQ observer wired; client UIs in B2C repos)
 
 - [x] iOS / Android / desktop B2C apps consume the same retrieval API —
       server-side SDK contract (`docs/contracts/b2c-retrieval-sdk.md`)
@@ -434,6 +434,99 @@ ships, the matrix is empty. Each row records:
 ---
 
 ## Changelog
+
+- 2026-05-10: Phase 5/6 wiring closeout + observability + benchmarks +
+  e2e closeout (20-task batch landed in this PR):
+  - **Phase 5 wiring closeout**:
+    - `migrations/007_channel_deny_local.sql` adds the
+      `deny_local_retrieval BOOLEAN NOT NULL DEFAULT FALSE` column
+      to `channel_policies`. `internal/policy/live_resolver.go`
+      now reads the column on every `Resolve()` call and
+      populates `policy.PolicySnapshot.DenyLocalRetrieval` —
+      completing the Phase 6 `channel_disallowed` reason wiring
+      that was previously snapshot-only.
+    - `internal/shard/coverage_repo.go` ships the GORM-backed
+      `CoverageRepoGORM` so the coverage endpoint can return
+      `is_authoritative=true`. `cmd/api/main.go` wires it via
+      `shard.HandlerConfig{CoverageRepo: …}`.
+  - **Phase 8 operational wiring closeout**:
+    - `cmd/ingest/main.go` reads
+      `CONTEXT_ENGINE_FETCH_WORKERS` /
+      `CONTEXT_ENGINE_PARSE_WORKERS` /
+      `CONTEXT_ENGINE_EMBED_WORKERS` /
+      `CONTEXT_ENGINE_STORE_WORKERS` and threads them through
+      `pipeline.StageConfig` so per-stage worker pools can be
+      tuned without a redeploy.
+    - `cmd/api/readyz.go` and `cmd/ingest/health.go` ship the
+      `/healthz` + `/readyz` probes (Postgres / Redis / Qdrant /
+      Kafka). Wired into the same listener as `/metrics`.
+  - **Phase 5/6 e2e closeout**:
+    - `tests/e2e/phase5_shard_test.go`,
+      `tests/e2e/phase5_models_test.go`,
+      `tests/e2e/phase5_forget_test.go`,
+      `tests/e2e/phase6_b2c_test.go`, and
+      `tests/e2e/phase6_device_first_test.go` cover
+      `/v1/shards/:tenant_id` + delta + coverage,
+      `/v1/models/catalog`, the cryptographic-forget
+      DELETE endpoint, the B2C `/v1/health` /
+      `/v1/capabilities` / `/v1/sync/schedule` surfaces, and
+      the device-first `prefer_local` hint on
+      `POST /v1/retrieve`. All five run under the existing
+      `e2e` build tag and `make test-e2e` target.
+  - **Phase 1 / Phase 3 P95 budgets**:
+    - `tests/benchmark/p95_e2e_test.go` enforces the Phase 1
+      end-to-end round-trip budget (< 1 s P95).
+    - `tests/benchmark/p95_retrieval_test.go` enforces the
+      stricter Phase 3 retrieval-only budget (< 500 ms P95).
+    - `make bench-e2e` runs both suites under the `e2e` build
+      tag so CI can fail on regression.
+  - **Phase 8 pipeline completeness**:
+    - `internal/pipeline/dlq_observer.go` + Prometheus counter
+      `context_engine_dlq_messages_total{original_topic}`
+      (per-tenant breakdowns live in the `tenant_id` log
+      field — see "Logger middleware key fix" below).
+      Logs structured fields per dead-letter envelope
+      (`tenant_id`, `document_id`, `source_id`, `error`,
+      `attempt_count`, `original_topic`, `timestamp`).
+      Optionally wired in `cmd/ingest/main.go` behind
+      `CONTEXT_ENGINE_DLQ_OBSERVE=1`.
+    - `internal/admin/tenant_delete.go` implements the 5-step
+      tenant-deletion workflow from `docs/ARCHITECTURE.md` §5
+      (mark pending → drain → sweep derived data → destroy
+      DEKs → mark deleted). `migrations/008_tenant_status.sql`
+      adds the `tenants.tenant_status` column with
+      `idx_tenants_status`. `DELETE /v1/admin/tenants/:tenant_id`
+      mounts the workflow under the admin handler.
+  - **Phase 6 / Phase 8 observability**:
+    - `internal/observability/logger.go` wraps `log/slog` with a
+      JSON handler that always emits `tenant_id` / `trace_id` /
+      `component` / `level` / `msg` / `timestamp`.
+      `LoggerFromContext(ctx)` extracts the active logger
+      pre-bound with the request scope.
+    - `GinLoggerMiddleware(component)` parses W3C `traceparent`
+      (with `X-Trace-ID` fallback) and reads the
+      `audit.TenantContextKey` set by the auth layer (with an
+      `X-Tenant-Id` header fallback) to inject the per-request
+      logger. Mounted on the authed `cmd/api` route group; the
+      `cmd/ingest` binary uses `net/http` and gets the same
+      structured `slog` JSON output via `slog.SetDefault` instead
+      of a Gin middleware.
+  - **Quality / robustness**:
+    - `internal/policy/device_first_test.go` adds the
+      `TestDecide_FullMatrix` 5×3 truth table over privacy modes
+      × device tiers, plus precedence and nil-snapshot guards.
+    - `internal/shard/eviction_test.go` adds
+      `TestShouldEvict_FullMatrix` covering the 24-row tier ×
+      thermal × memory × shard truth table and
+      `TestDefaultEvictionPolicies_ExactValues` pinning the
+      three Phase 8 default thresholds.
+  - **Documentation audit**: `docs/PROGRESS.md`,
+    `docs/PHASES.md`, `docs/ARCHITECTURE.md`, and `README.md`
+    re-cross-referenced — every checkbox in PROGRESS now matches
+    code on disk; PHASES exit criteria reflect the P95 + readyz
+    + e2e landings; ARCHITECTURE §9 directory tree includes the
+    new files; README's status banner + Make targets table
+    surface `bench-e2e` and the new percentages.
 
 - 2026-05-10: Phase 5 contracts → ~70% + Phase 6 server-side
   bootstrap → ~60% + Phase 8 on-device contracts → ~100%:

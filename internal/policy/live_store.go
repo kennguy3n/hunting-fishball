@@ -56,7 +56,7 @@ func (s *LiveStoreGORM) ApplySnapshot(ctx context.Context, tx *gorm.DB, tenantID
 			return fmt.Errorf("policy: upsert tenant_policies: %w", err)
 		}
 	} else {
-		if err := upsertChannelPolicy(t, tenantID, channelID, string(snap.EffectiveMode), recipientDefault(snap.Recipient), now); err != nil {
+		if err := upsertChannelPolicy(t, tenantID, channelID, string(snap.EffectiveMode), recipientDefault(snap.Recipient), snap.DenyLocalRetrieval, now); err != nil {
 			return fmt.Errorf("policy: upsert channel_policies: %w", err)
 		}
 	}
@@ -82,13 +82,14 @@ func upsertTenantPolicy(tx *gorm.DB, tenantID, mode string, now time.Time) error
 	return tx.Save(&row).Error
 }
 
-func upsertChannelPolicy(tx *gorm.DB, tenantID, channelID, mode, recipientDefault string, now time.Time) error {
+func upsertChannelPolicy(tx *gorm.DB, tenantID, channelID, mode, recipientDefault string, denyLocal bool, now time.Time) error {
 	row := channelPolicyRow{
-		TenantID:         tenantID,
-		ChannelID:        channelID,
-		PrivacyMode:      mode,
-		RecipientDefault: recipientDefault,
-		UpdatedAt:        now,
+		TenantID:           tenantID,
+		ChannelID:          channelID,
+		PrivacyMode:        mode,
+		RecipientDefault:   recipientDefault,
+		DenyLocalRetrieval: denyLocal,
+		UpdatedAt:          now,
 	}
 	return tx.Save(&row).Error
 }
@@ -182,12 +183,13 @@ func (tenantPolicyRow) TableName() string { return "tenant_policies" }
 
 // channelPolicyRow is the GORM model for channel_policies.
 type channelPolicyRow struct {
-	TenantID         string    `gorm:"type:char(26);primaryKey;column:tenant_id"`
-	ChannelID        string    `gorm:"type:char(26);primaryKey;column:channel_id"`
-	PrivacyMode      string    `gorm:"type:varchar(32);not null;column:privacy_mode"`
-	RecipientDefault string    `gorm:"type:varchar(8);not null;default:'allow';column:recipient_default"`
-	CreatedAt        time.Time `gorm:"not null;default:now();column:created_at"`
-	UpdatedAt        time.Time `gorm:"not null;default:now();column:updated_at"`
+	TenantID           string    `gorm:"type:char(26);primaryKey;column:tenant_id"`
+	ChannelID          string    `gorm:"type:char(26);primaryKey;column:channel_id"`
+	PrivacyMode        string    `gorm:"type:varchar(32);not null;column:privacy_mode"`
+	RecipientDefault   string    `gorm:"type:varchar(8);not null;default:'allow';column:recipient_default"`
+	DenyLocalRetrieval bool      `gorm:"not null;default:false;column:deny_local_retrieval"`
+	CreatedAt          time.Time `gorm:"not null;default:now();column:created_at"`
+	UpdatedAt          time.Time `gorm:"not null;default:now();column:updated_at"`
 }
 
 func (channelPolicyRow) TableName() string { return "channel_policies" }

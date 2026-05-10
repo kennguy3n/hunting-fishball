@@ -28,7 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -75,8 +75,16 @@ import (
 )
 
 func main() {
+	// Phase 8 Task 17: structured JSON logging. Every log line emitted
+	// from this binary inherits component="api" and (when the request
+	// context carries them) tenant_id and trace_id, so log shippers
+	// can correlate entries without parsing free-form prefixes.
+	logger := observability.NewLogger("api")
+	observability.SetDefault(logger)
+	slog.SetDefault(logger)
 	if err := run(); err != nil {
-		log.Fatalf("api: %v", err)
+		logger.Error("api: fatal", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 }
 
@@ -227,7 +235,7 @@ func run() error {
 	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	r.GET("/readyz", apiReadyzHandler(db, sharedRedis, qdrant))
 
-	api := r.Group("/", authPlaceholder)
+	api := r.Group("/", authPlaceholder, observability.GinLoggerMiddleware("api"))
 	audit.NewHandler(auditRepo).Register(api)
 	retrievalHandler.Register(api)
 
@@ -246,6 +254,26 @@ func run() error {
 		return fmt.Errorf("admin handler: %w", err)
 	}
 	adminHandler.Register(api)
+
+	// Phase 5/6: tenant-scope key destruction (cryptographic-forget)
+	// admin endpoint. Mounted on /v1/admin/tenants/:tenant_id; the
+	// per-channel forget is wired separately under /v1/tenants/:id/keys
+	// inside the shard handler. The deleter starts with no sweepers
+	// because production sweep wiring lives in cmd/ingest's binary;
+	// this binary owns the read+admin surface only.
+	tenantStatusRepo := admin.NewTenantStatusRepoGORM(db)
+	tenantDeleter, err := admin.NewTenantDeleter(admin.TenantDeleterConfig{
+		Status: tenantStatusRepo,
+		Audit:  auditRepo,
+	})
+	if err != nil {
+		return fmt.Errorf("tenant deleter: %w", err)
+	}
+	tenantDeleteHandler, err := admin.NewTenantDeleteHandler(tenantDeleter)
+	if err != nil {
+		return fmt.Errorf("tenant delete handler: %w", err)
+	}
+	tenantDeleteHandler.Register(api)
 
 	// Phase 4 simulator + draft policy surface. The Promoter wires
 	// the GORM-backed live store (writes the live policy tables in
@@ -294,7 +322,13 @@ func run() error {
 	// actual sweepers (Qdrant, FalkorDB, Tantivy, Redis, Postgres) are
 	// tier-specific and live under cmd/ingest's wiring; the API
 	// binary only needs the read path to be live.
-	shardHandlerCfg := shard.HandlerConfig{Repo: shardRepo}
+	// CoverageRepoGORM counts the corpus-side chunk rows so the
+	// `/v1/shards/:tenant_id/coverage` endpoint can report
+	// IsAuthoritative=true (numerator/denominator both observable);
+	// without this wiring the endpoint would forever return
+	// reason=corpus_size_unknown.
+	shardCoverageRepo := shard.NewCoverageRepoGORM(db)
+	shardHandlerCfg := shard.HandlerConfig{Repo: shardRepo, CoverageRepo: shardCoverageRepo}
 	shardHandler, err := shard.NewHandler(shardHandlerCfg)
 	if err != nil {
 		return fmt.Errorf("shard handler: %w", err)
@@ -329,7 +363,7 @@ func run() error {
 	// keep-alive ticker so the redis pool stays warm.
 	warmCtx, warmCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := qdrant.Warmup(warmCtx, qdrantPool/4+1); err != nil {
-		log.Printf("api: qdrant warmup: %v (non-fatal)", err)
+		slog.Warn("api: qdrant warmup", slog.String("error", err.Error()))
 	}
 	warmCancel()
 	keepAliveCtx, keepAliveCancel := context.WithCancel(context.Background())
@@ -345,7 +379,7 @@ func run() error {
 	srv := &http.Server{Addr: listenAddr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("api: listening on %s", listenAddr)
+		slog.Info("api: listening", slog.String("addr", listenAddr))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -357,7 +391,7 @@ func run() error {
 	case err := <-errCh:
 		return err
 	case <-stop:
-		log.Println("api: shutting down")
+		slog.Info("api: shutting down")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

@@ -142,6 +142,70 @@ func TestLiveResolverGORM_ChannelInheritsTenantACL(t *testing.T) {
 	}
 }
 
+// TestLiveResolverGORM_DenyLocalRetrieval_RoundTrips verifies that
+// applying a snapshot with DenyLocalRetrieval=true through
+// LiveStoreGORM round-trips back through LiveResolverGORM. This is
+// the wiring that closes the gap between PR #10's PolicySnapshot
+// field and migration 007's deny_local_retrieval column so the
+// device-first `channel_disallowed` reason fires end-to-end.
+func TestLiveResolverGORM_DenyLocalRetrieval_RoundTrips(t *testing.T) {
+	t.Parallel()
+	store, db := newSQLiteLiveStore(t)
+	resolver := policy.NewLiveResolverGORM(db)
+	ctx := context.Background()
+
+	snap := policy.PolicySnapshot{
+		EffectiveMode:      policy.PrivacyModeRemote,
+		DenyLocalRetrieval: true,
+	}
+	if err := store.ApplySnapshot(ctx, db, "tenant-a", "channel-1", snap); err != nil {
+		t.Fatalf("ApplySnapshot: %v", err)
+	}
+
+	got, err := resolver.Resolve(ctx, "tenant-a", "channel-1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !got.DenyLocalRetrieval {
+		t.Fatalf("DenyLocalRetrieval: got false, want true (snapshot=%+v)", got)
+	}
+
+	// Tenant-wide resolve (no channel scope) should not surface the
+	// channel-level deny — the flag is per-channel by contract.
+	got, err = resolver.Resolve(ctx, "tenant-a", "")
+	if err != nil {
+		t.Fatalf("Resolve tenant-wide: %v", err)
+	}
+	if got.DenyLocalRetrieval {
+		t.Fatalf("tenant-wide resolve should not surface channel-level deny: %+v", got)
+	}
+}
+
+// TestLiveResolverGORM_DenyLocalRetrieval_DefaultsFalse confirms
+// the absence-of-row case returns DenyLocalRetrieval=false so a
+// brand-new channel that has never had policy applied keeps the
+// default-true allow-local semantics documented in
+// docs/contracts/local-first-retrieval.md.
+func TestLiveResolverGORM_DenyLocalRetrieval_DefaultsFalse(t *testing.T) {
+	t.Parallel()
+	store, db := newSQLiteLiveStore(t)
+	resolver := policy.NewLiveResolverGORM(db)
+	ctx := context.Background()
+
+	if err := store.ApplySnapshot(ctx, db, "tenant-a", "channel-1", policy.PolicySnapshot{
+		EffectiveMode: policy.PrivacyModeHybrid,
+	}); err != nil {
+		t.Fatalf("ApplySnapshot: %v", err)
+	}
+	got, err := resolver.Resolve(ctx, "tenant-a", "channel-1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.DenyLocalRetrieval {
+		t.Fatalf("expected DenyLocalRetrieval=false default, got %+v", got)
+	}
+}
+
 // TestLiveResolverGORM_RejectsMissingTenant guards against silent
 // cross-tenant leaks if a caller fails to pass tenantID.
 func TestLiveResolverGORM_RejectsMissingTenant(t *testing.T) {
