@@ -17,7 +17,7 @@ type fakeChecker struct {
 	err  error
 }
 
-func (f *fakeChecker) Name() string             { return f.name }
+func (f *fakeChecker) Name() string                { return f.name }
 func (f *fakeChecker) Check(context.Context) error { return f.err }
 
 type fakeReindexer struct {

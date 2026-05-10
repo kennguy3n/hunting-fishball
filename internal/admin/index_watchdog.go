@@ -49,12 +49,12 @@ const WatchdogReindexCooldown = time.Hour
 
 // WatchdogConfig configures an IndexWatchdog.
 type WatchdogConfig struct {
-	Checkers []BackendChecker
-	Lister   CredentialMonitorSourceLister // ListAllActive()
+	Checkers  []BackendChecker
+	Lister    CredentialMonitorSourceLister // ListAllActive()
 	Reindexer ReindexRunner
-	Audit    AuditWriter
-	Logger   *slog.Logger
-	Now      func() time.Time // test seam
+	Audit     AuditWriter
+	Logger    *slog.Logger
+	Now       func() time.Time // test seam
 }
 
 // IndexWatchdog monitors backend health and auto-triggers
