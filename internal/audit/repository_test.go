@@ -235,6 +235,48 @@ func TestRepository_PendingPublishAndMark(t *testing.T) {
 	}
 }
 
+func TestRepository_ListPayloadSearch(t *testing.T) {
+	t.Parallel()
+
+	repo, _ := newSQLiteRepo(t)
+	ctx := context.Background()
+
+	matched := audit.NewAuditLog(
+		"tenant-a", "actor-1",
+		audit.ActionConnectorConnected,
+		"source", "src-1",
+		audit.JSONMap{"connector": "google-drive"},
+		"",
+	)
+	other := audit.NewAuditLog(
+		"tenant-a", "actor-1",
+		audit.ActionConnectorConnected,
+		"source", "src-2",
+		audit.JSONMap{"connector": "github"},
+		"",
+	)
+	for i, log := range []*audit.AuditLog{matched, other} {
+		log.CreatedAt = time.Now().UTC().Add(time.Duration(i) * time.Millisecond)
+		if err := repo.Create(ctx, log); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	got, err := repo.List(ctx, audit.ListFilter{
+		TenantID:      "tenant-a",
+		PayloadSearch: "google-drive",
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("expected 1 row matching payload, got %d", len(got.Items))
+	}
+	if got.Items[0].ID != matched.ID {
+		t.Fatalf("wrong row matched: %s want %s", got.Items[0].ID, matched.ID)
+	}
+}
+
 func TestRepository_RejectsMissingTenant(t *testing.T) {
 	t.Parallel()
 

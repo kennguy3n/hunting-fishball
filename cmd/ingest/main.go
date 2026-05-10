@@ -221,11 +221,22 @@ func run() error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
+	// coordDone / consDone are closed (in addition to receiving the
+	// final error) so a second receive after the channel has been
+	// drained returns the zero value immediately rather than blocking.
+	// The graceful-shutdown step for the pipeline coordinator relies
+	// on this — see waitChanClosed and its regression test.
 	coordDone := make(chan error, 1)
-	go func() { coordDone <- coord.Run(ctx) }()
+	go func() {
+		coordDone <- coord.Run(ctx)
+		close(coordDone)
+	}()
 
 	consDone := make(chan error, 1)
-	go func() { consDone <- cons.Run(ctx) }()
+	go func() {
+		consDone <- cons.Run(ctx)
+		close(consDone)
+	}()
 
 	// Phase 8 / Task 15: optional DLQ observer. Enables a sidecar
 	// consumer that watches the dead-letter topic and emits both a
@@ -358,12 +369,7 @@ func run() error {
 	sd.Add("kafka-consumer", func(_ context.Context) error { return cons.Stop() })
 	sd.Add("pipeline-coordinator", func(ctx context.Context) error {
 		coord.CloseInputs()
-		select {
-		case <-coordDone:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		return waitChanClosed(ctx, coordDone)
 	})
 	sd.Add("http-server", func(ctx context.Context) error { return httpSrv.Shutdown(ctx) })
 	if sqlDB, derr := db.DB(); derr == nil {
@@ -381,6 +387,26 @@ func envOr(key, def string) string {
 	}
 
 	return def
+}
+
+// waitChanClosed blocks until ch delivers a value, ch is closed, or ctx
+// expires. The original Phase 8 / Task 10 lifecycle step did the same
+// receive inline, but if the value had already been consumed by the
+// outer select (e.g. the coordinator exited cleanly before SIGTERM and
+// the main loop took its err==nil case), the inline `<-ch` blocked for
+// the full lifecycle deadline before returning ctx.Err(), starving
+// every subsequent shutdown step. The fix has two halves:
+//   - the producer goroutines close ch after sending, so a second
+//     receive returns the zero value immediately;
+//   - this helper makes that contract explicit and gives the
+//     regression test a stable surface to exercise.
+func waitChanClosed(ctx context.Context, ch <-chan error) error {
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // isAutoMigrateEnabled mirrors cmd/api: AUTO_MIGRATE / CONTEXT_ENGINE_AUTO_MIGRATE

@@ -149,7 +149,12 @@ func (r *Repository) List(ctx context.Context, f ListFilter) (*ListResult, error
 		q = q.Where("resource_id = ?", f.ResourceID)
 	}
 	if f.PayloadSearch != "" {
-		q = q.Where("payload LIKE ?", "%"+f.PayloadSearch+"%")
+		// CAST(metadata AS TEXT) lets the same LIKE expression run on
+		// Postgres (where metadata is JSONB) and SQLite (where it is
+		// TEXT). The column is named `metadata`, NOT `payload` — the
+		// migration in migrations/001_audit_log.sql is the source of
+		// truth and the GORM model maps the field via column:metadata.
+		q = q.Where("CAST(metadata AS TEXT) LIKE ?", "%"+f.PayloadSearch+"%")
 	}
 	if !f.Since.IsZero() {
 		q = q.Where("created_at >= ?", f.Since)
