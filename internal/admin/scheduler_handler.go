@@ -66,11 +66,19 @@ func (h *SchedulerHandler) upsert(c *gin.Context) {
 		enabled = *req.Enabled
 	}
 	row, err := UpsertSchedule(c.Request.Context(), h.db, tenantID, sourceID, req.CronExpr, enabled, h.now())
-	if err != nil {
+	switch {
+	case err == nil:
+		c.JSON(http.StatusOK, row)
+	case errors.Is(err, ErrScheduleValidation):
+		// Caller-side fault: bad cron expression / missing IDs.
+		// 400 keeps it out of the 5xx alert bucket.
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	default:
+		// Wrapped GORM / driver failure. These are server-side;
+		// reporting 400 hides them from 5xx alerting and skews
+		// error budgets.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 	}
-	c.JSON(http.StatusOK, row)
 }
 
 func (h *SchedulerHandler) get(c *gin.Context) {

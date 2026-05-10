@@ -14,6 +14,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -171,22 +172,35 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 	return nil
 }
 
+// ErrScheduleValidation is the sentinel returned from UpsertSchedule
+// when the caller-supplied schedule fails validation (missing
+// tenant/source, unparseable cron expression, cron yields no
+// future fire). Callers use errors.Is to map it to HTTP 400
+// (caller-side fault), distinguishing it from wrapped GORM /
+// driver errors which are server-side and map to 500.
+var ErrScheduleValidation = errors.New("scheduler: invalid schedule")
+
 // UpsertSchedule writes a SyncSchedule for (tenantID, sourceID),
 // computing a fresh next_run_at from the supplied cron expression.
 // It returns the persisted row so the handler can echo the
 // computed schedule back to the caller. ParseCron is invoked
 // up-front so a bad expression never lands in the DB.
+//
+// Validation failures (missing tenant/source, bad cron) are
+// wrapped with ErrScheduleValidation so the HTTP layer can map
+// them to 400. Wrapped GORM errors are returned bare so they map
+// to 500 by default.
 func UpsertSchedule(ctx context.Context, db *gorm.DB, tenantID, sourceID, expr string, enabled bool, now time.Time) (*SyncSchedule, error) {
 	if tenantID == "" || sourceID == "" {
-		return nil, errors.New("scheduler: missing tenant/source")
+		return nil, fmt.Errorf("%w: missing tenant/source", ErrScheduleValidation)
 	}
 	cs, err := ParseCron(expr, time.UTC)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrScheduleValidation, err)
 	}
 	next := cs.Next(now)
 	if next.IsZero() {
-		return nil, errors.New("scheduler: cron expression yields no future fire")
+		return nil, fmt.Errorf("%w: cron expression yields no future fire", ErrScheduleValidation)
 	}
 
 	row := SyncSchedule{

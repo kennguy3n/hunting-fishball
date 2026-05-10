@@ -2,6 +2,7 @@ package admin_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -178,5 +179,100 @@ func TestSchedulerHandler_BadRequest(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// TestScheduler_UpsertValidationErrorWrapsSentinel locks down the
+// contract: validation failures (missing tenant/source, bad cron
+// expression, cron yields no future fire) wrap ErrScheduleValidation
+// so the HTTP layer can map them to 400. Without this guarantee, a
+// caller-side fault would land in the 5xx alert bucket.
+func TestScheduler_UpsertValidationErrorWrapsSentinel(t *testing.T) {
+	t.Parallel()
+	db := newSchedulerDB(t)
+	cases := []struct {
+		name     string
+		tenantID string
+		sourceID string
+		expr     string
+	}{
+		{"missing-tenant", "", "src-a", "@every 5m"},
+		{"missing-source", "tenant-a", "", "@every 5m"},
+		{"bad-cron", "tenant-a", "src-a", "this is not a cron expression"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := admin.UpsertSchedule(context.Background(), db, tc.tenantID, tc.sourceID, tc.expr, true, time.Now())
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !errors.Is(err, admin.ErrScheduleValidation) {
+				t.Fatalf("error %q does not wrap ErrScheduleValidation", err)
+			}
+		})
+	}
+}
+
+// TestSchedulerHandler_DBErrorIs500 closes the underlying DB
+// connection so any GORM call fails, then asserts the upsert
+// handler returns 500 (server-side fault) — not 400 (caller-side).
+// This locks in the fix for the Devin Review finding that mapped
+// every UpsertSchedule error to 400, hiding infra failures from
+// 5xx alerting.
+func TestSchedulerHandler_DBErrorIs500(t *testing.T) {
+	t.Parallel()
+	db := newSchedulerDB(t)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("db.DB(): %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(audit.TenantContextKey, "tenant-a")
+		c.Next()
+	})
+	g := r.Group("")
+	admin.NewSchedulerHandler(db).Register(g)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sources/src-1/schedule",
+		strings.NewReader(`{"cron_expr":"@every 5m"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on DB failure, got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
+
+// TestSchedulerHandler_ValidationErrorIs400 confirms a bad cron
+// expression still maps to 400 after the sentinel-wrapping change.
+// Complements TestSchedulerHandler_BadRequest by inspecting the
+// sentinel directly via UpsertSchedule and exercising the HTTP
+// switch arm.
+func TestSchedulerHandler_ValidationErrorIs400(t *testing.T) {
+	t.Parallel()
+	db := newSchedulerDB(t)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(audit.TenantContextKey, "tenant-a")
+		c.Next()
+	})
+	g := r.Group("")
+	admin.NewSchedulerHandler(db).Register(g)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sources/src-1/schedule",
+		strings.NewReader(`{"cron_expr":"not-a-cron-expr"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on bad cron, got %d (body=%s)", w.Code, w.Body.String())
 	}
 }
