@@ -314,6 +314,16 @@ func run() error {
 	}
 	adminHandler.Register(api)
 
+	// Round-4 Task 17: tenant usage metering endpoint. Maintains
+	// the tenant_usage rollup table and exposes
+	// GET /v1/admin/tenants/:id/usage. The store is also held by
+	// the API binary for hot-path increment counters.
+	meteringStore := admin.NewMeteringStoreGORM(db)
+	if err := meteringStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("tenant_usage migrate: %w", err)
+	}
+	admin.NewMeteringHandler(meteringStore).Register(api)
+
 	// Round-4 Task 16: connector credential rotation endpoint.
 	// Mounts POST /v1/admin/sources/:id/rotate-credentials. The
 	// rotator validates new credentials via the connector's
