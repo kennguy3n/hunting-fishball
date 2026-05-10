@@ -38,6 +38,20 @@ type PolicySnapshot struct {
 	// `device_first.Decide` reads the inverted value through
 	// DeviceFirstInputs.AllowLocalRetrieval.
 	DenyLocalRetrieval bool
+
+	// NamespacePolicies layers per-namespace privacy mode overrides
+	// underneath the tenant + channel modes. Keys are namespace IDs
+	// (the same string connectors emit on chunk metadata, e.g.
+	// "engineering"); values are the namespace-scoped PrivacyMode.
+	// The retrieval handler resolves the effective mode for a chunk
+	// by calling EffectiveModeForNamespace which picks the strictest
+	// of (tenant, channel, namespace); an entry here can therefore
+	// only ever tighten the policy, never widen it.
+	//
+	// A nil map means "no namespace overrides installed"; an empty
+	// (non-nil) map is also treated as no overrides — both forms
+	// fall back to EffectiveMode(tenant, channel).
+	NamespacePolicies map[string]PrivacyMode
 }
 
 // Clone returns a deep copy of the snapshot. Used by the simulator
@@ -50,6 +64,13 @@ func (s PolicySnapshot) Clone() PolicySnapshot {
 	out := PolicySnapshot{
 		EffectiveMode:      s.EffectiveMode,
 		DenyLocalRetrieval: s.DenyLocalRetrieval,
+	}
+	if len(s.NamespacePolicies) > 0 {
+		nsCopy := make(map[string]PrivacyMode, len(s.NamespacePolicies))
+		for k, v := range s.NamespacePolicies {
+			nsCopy[k] = v
+		}
+		out.NamespacePolicies = nsCopy
 	}
 	if s.ACL != nil {
 		acl := *s.ACL
