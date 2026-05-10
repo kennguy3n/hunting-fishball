@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -72,6 +73,16 @@ type Draft struct {
 
 // TableName overrides the default GORM pluralisation.
 func (Draft) TableName() string { return "policy_drafts" }
+
+// AfterFind trims trailing whitespace from CHAR-padded columns so
+// existing rows that pre-date migrations/011_varchar_ids.sql do not
+// surface 26-space ChannelID strings into the rest of the system.
+// VARCHAR columns are no-ops here since TrimRight on an unpadded
+// string is a copy-free fast path.
+func (d *Draft) AfterFind(tx *gorm.DB) error {
+	d.ChannelID = strings.TrimRight(d.ChannelID, " ")
+	return nil
+}
 
 // DraftPayload is the JSON-serialised PolicySnapshot. Implements
 // driver.Valuer / sql.Scanner for direct GORM round-tripping.

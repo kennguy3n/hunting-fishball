@@ -104,6 +104,12 @@ services:
       - "50051:50051"
     environment:
       DOCLING_ADDR: "[::]:50051"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 50051), timeout=2).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   embedding:
     build:
@@ -115,6 +121,12 @@ services:
     environment:
       EMBEDDING_ADDR: "[::]:50052"
       EMBEDDING_MODEL: "sentence-transformers/all-MiniLM-L6-v2"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 50052), timeout=2).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
 
   memory:
     build:
@@ -128,6 +140,12 @@ services:
       - "50053:50053"
     environment:
       MEMORY_ADDR: "[::]:50053"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 50053), timeout=2).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
 volumes:
   postgres_data:

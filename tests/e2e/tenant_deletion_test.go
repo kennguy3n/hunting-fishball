@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"gorm.io/gorm"
 
@@ -74,14 +73,7 @@ func TestSmoke_TenantDeletionFlow(t *testing.T) {
 	// Seed an audit log entry owned by the tenant. The audit log is
 	// retained by design (forensics + governance) — the deletion
 	// only supersedes shards and destroys DEKs.
-	beforeAudit := &audit.AuditLog{
-		TenantID:     tenantID,
-		Action:       audit.ActionSourceConnected,
-		ResourceType: "source",
-		ResourceID:   uniqueActor(t),
-		ActorID:      uniqueActor(t),
-		CreatedAt:    time.Now().UTC().Add(-1 * time.Hour),
-	}
+	beforeAudit := audit.NewAuditLog(tenantID, uniqueActor(t), audit.ActionSourceConnected, "source", uniqueActor(t), nil, "")
 	if err := auditRepo.Create(t.Context(), beforeAudit); err != nil {
 		t.Fatalf("seed audit: %v", err)
 	}
