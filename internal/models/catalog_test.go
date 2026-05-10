@@ -29,6 +29,27 @@ func TestStaticCatalog_Validate(t *testing.T) {
 	}
 }
 
+// TestNewStaticCatalog_RunsValidate pins the contract documented
+// in the Validate() docstring and
+// `docs/contracts/bonsai-integration.md` §"Server-side validation":
+// NewStaticCatalog must run Validate at construction so a
+// regression in the hard-coded catalog cannot ship. The canonical
+// catalog is well-formed today; this test exists to ensure the
+// validation hook stays wired up — any future edit that breaks
+// the catalog will panic at construction (and therefore at this
+// test boundary) instead of silently shipping.
+func TestNewStaticCatalog_RunsValidate(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("NewStaticCatalog panicked on canonical catalog: %v", r)
+		}
+	}()
+	if p := models.NewStaticCatalog(); p == nil {
+		t.Fatalf("NewStaticCatalog returned nil")
+	}
+}
+
 func TestModelCatalog_Validate_Errors(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

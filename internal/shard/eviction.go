@@ -105,7 +105,7 @@ func (p EvictionPolicy) ShouldEvict(inputs EvictionInputs) EvictionDecision {
 	if p.MinFreeMemoryMB > 0 && inputs.AvailableMemoryMB < p.MinFreeMemoryMB {
 		return EvictionDecision{Evict: true, Reason: "memory_pressure"}
 	}
-	return EvictionDecision{Evict: false}
+	return EvictionDecision{Evict: false, Reason: "keep"}
 }
 
 // EvictionPolicyTable holds one EvictionPolicy per device tier.

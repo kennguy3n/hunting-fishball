@@ -170,6 +170,14 @@ func NewStaticCatalog() *StaticProvider {
 		},
 		EvictionConfig: shard.DefaultEvictionPolicies(),
 	}
+	// Catalog is a compile-time constant. A regression here is a
+	// programmer error and must be caught before the binary ships
+	// — see the Validate() docstring and
+	// `docs/contracts/bonsai-integration.md` §"Server-side
+	// validation".
+	if err := cat.Validate(); err != nil {
+		panic("models: invalid static catalog: " + err.Error())
+	}
 	return &StaticProvider{catalog: cat}
 }
 

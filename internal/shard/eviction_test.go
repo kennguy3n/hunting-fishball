@@ -69,7 +69,8 @@ func TestEvictionPolicy_ShouldEvict(t *testing.T) {
 				DeviceTier:        shard.DeviceTierMid,
 				AvailableMemoryMB: 4096,
 			},
-			want: false,
+			want:    false,
+			wantWhy: "keep",
 		},
 	}
 
