@@ -118,7 +118,15 @@ func (h *Handler) runOne(ctx context.Context, tenantID string, index int, sub Re
 	if err != nil {
 		return BatchResultItem{Index: index, Error: "policy resolve failed"}
 	}
-	resp, rerr := h.RetrieveWithSnapshot(ctx, tenantID, sub, snapshot)
+	// Batch sub-requests run against the LIVE policy snapshot just
+	// resolved above, so they share the semantic cache with the
+	// single-request /v1/retrieve endpoint. Pre-fix this called
+	// RetrieveWithSnapshot which intentionally skips the cache for
+	// the Phase 4 simulator (draft snapshots) — a hot dashboard
+	// query was paying the full fan-out cost on every batch slot.
+	// RetrieveWithSnapshotCached re-uses the live snapshot's cache
+	// slot so a sub-ms cache hit is possible per slot.
+	resp, rerr := h.RetrieveWithSnapshotCached(ctx, tenantID, sub, snapshot)
 	if rerr != nil {
 		if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
 			return BatchResultItem{Index: index, Error: rerr.Error()}

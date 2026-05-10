@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -52,6 +53,25 @@ const (
 	defaultPageSize = 50
 	maxPageSize     = 200
 )
+
+// likeEscaper escapes the three characters that have special meaning
+// inside a LIKE pattern paired with `ESCAPE '\'`: `\` itself, `%` (any
+// sequence) and `_` (any single character). The order matters — `\`
+// must be replaced first so the escape sequences inserted by the later
+// replacements aren't doubled.
+var likeEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	`%`, `\%`,
+	`_`, `\_`,
+)
+
+// escapeLike makes user-supplied substrings safe for the surrounding
+// `%...%` wildcards we add for PayloadSearch. The result must be paired
+// with an `ESCAPE '\'` clause for the database to interpret the
+// backslashes as escapes rather than literals.
+func escapeLike(s string) string {
+	return likeEscaper.Replace(s)
+}
 
 // ListResult is the ListAuditLogs response.
 type ListResult struct {
@@ -154,7 +174,18 @@ func (r *Repository) List(ctx context.Context, f ListFilter) (*ListResult, error
 		// TEXT). The column is named `metadata`, NOT `payload` — the
 		// migration in migrations/001_audit_log.sql is the source of
 		// truth and the GORM model maps the field via column:metadata.
-		q = q.Where("CAST(metadata AS TEXT) LIKE ?", "%"+f.PayloadSearch+"%")
+		//
+		// PayloadSearch is documented as a substring match. Without
+		// escaping, the LIKE meta-characters `%` (any sequence) and `_`
+		// (any single char) in user input would silently turn into
+		// wildcards: `q=%` would match every row, `q=_` would match any
+		// row whose metadata is non-empty. We escape them (and `\`
+		// itself) and pin the escape character with the ESCAPE clause —
+		// portable across Postgres and SQLite.
+		q = q.Where(
+			`CAST(metadata AS TEXT) LIKE ? ESCAPE '\'`,
+			"%"+escapeLike(f.PayloadSearch)+"%",
+		)
 	}
 	if !f.Since.IsZero() {
 		q = q.Where("created_at >= ?", f.Since)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // SyncProgress is the GORM row backing the progress table.
@@ -80,18 +81,6 @@ func (s *SyncProgressStoreGORM) increment(ctx context.Context, tenantID, sourceI
 		return errors.New("sync progress: unknown column")
 	}
 	now := s.now()
-	tx := s.db.WithContext(ctx).Model(&SyncProgress{}).
-		Where("tenant_id = ? AND source_id = ? AND namespace_id = ?", tenantID, sourceID, namespaceID).
-		UpdateColumns(map[string]any{
-			column:       gorm.Expr(column+" + ?", delta),
-			"updated_at": now,
-		})
-	if tx.Error != nil {
-		return tx.Error
-	}
-	if tx.RowsAffected > 0 {
-		return nil
-	}
 	row := SyncProgress{
 		TenantID:    tenantID,
 		SourceID:    sourceID,
@@ -107,7 +96,33 @@ func (s *SyncProgressStoreGORM) increment(ctx context.Context, tenantID, sourceI
 	case "failed":
 		row.Failed = delta
 	}
-	return s.db.WithContext(ctx).Create(&row).Error
+
+	// Atomic upsert. The previous shape was check-then-act (UPDATE
+	// first, fall back to CREATE when RowsAffected==0); two goroutines
+	// hitting the same (tenant, source, namespace) triple on its first
+	// insert would both see RowsAffected==0 and both attempt CREATE —
+	// the second hits the primary-key constraint on Postgres. Using
+	// `INSERT ... ON CONFLICT (...) DO UPDATE SET col = col +
+	// excluded.col, updated_at = ?` collapses both halves into a
+	// single statement that is atomic at the database level on both
+	// Postgres and SQLite (≥3.24, which is what glebarez/sqlite ships).
+	//
+	// `excluded.<col>` is the standard SQL alias for the row that
+	// would have been inserted on conflict; for our INSERT it equals
+	// `delta`, so the resulting expression is `column + delta` — the
+	// same arithmetic as the prior UpdateColumns path, but without the
+	// race window.
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "tenant_id"},
+			{Name: "source_id"},
+			{Name: "namespace_id"},
+		},
+		DoUpdates: clause.Assignments(map[string]any{
+			column:       gorm.Expr(column + " + excluded." + column),
+			"updated_at": now,
+		}),
+	}).Create(&row).Error
 }
 
 // IncrementDiscovered bumps the discovered counter by delta.

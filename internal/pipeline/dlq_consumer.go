@@ -283,11 +283,41 @@ func (r *Replayer) Replay(ctx context.Context, tenantID, id, topic string, force
 		_ = r.store.MarkReplayed(ctx, id, err)
 		return fmt.Errorf("replayer: send: %w", err)
 	}
+
+	// SendMessage succeeded — the envelope is on the ingest topic
+	// and cannot be unsent. Bookkeeping must run in this order:
+	//
+	//  1. MarkReplayed(nil)   — flips replayed_at from NULL to NOW().
+	//                            This is the only thing that prevents
+	//                            an operator (or this Replayer on a
+	//                            retry) from re-injecting the same
+	//                            envelope.
+	//  2. BumpAttemptCount()  — purely a counter, safe to fail.
+	//
+	// Pre-fix the order was reversed: BumpAttemptCount first, then
+	// MarkReplayed. A transient DB blip on the bump short-circuited
+	// before MarkReplayed ran, so replayed_at stayed NULL and the
+	// admin handler happily allowed the same envelope to be replayed
+	// again — a duplicate on the ingest topic. Devin Review surfaced
+	// this on PR #12; we now mark replayed first so a bump failure
+	// can no longer leave the row in a re-replayable state.
+	if err := r.store.MarkReplayed(ctx, id, nil); err != nil {
+		// MarkReplayed failure is genuinely bad: the envelope is on
+		// the topic but the row still says replayed_at=NULL, so a
+		// subsequent Replay would double-inject. We can't undo the
+		// publish; surface the error loudly so the operator can
+		// reconcile manually. Skip BumpAttemptCount in this branch
+		// — the row is already inconsistent and the counter is
+		// secondary.
+		return fmt.Errorf("replayer: mark replayed: %w", err)
+	}
 	if _, err := r.store.BumpAttemptCount(ctx, id); err != nil {
-		// Counter bump failure is non-fatal; the row was already
-		// re-injected. We surface the error so the operator sees
-		// the inconsistency in the admin response.
+		// Counter bump failure is non-fatal — the envelope is on
+		// the topic and the row is correctly marked replayed, so a
+		// retry will hit the ErrAlreadyReplayed guard. Surface the
+		// error so the operator sees the counter is stale, but the
+		// system is in a safe state.
 		return fmt.Errorf("replayer: bump attempts: %w", err)
 	}
-	return r.store.MarkReplayed(ctx, id, nil)
+	return nil
 }

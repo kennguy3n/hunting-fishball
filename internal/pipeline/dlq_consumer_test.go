@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,12 @@ type memDLQStore struct {
 	rows     map[string]*pipeline.DLQMessage
 	insertCh chan *pipeline.DLQMessage
 	failNext error
+
+	// bumpErr, when non-nil, makes the next BumpAttemptCount call
+	// return that error WITHOUT mutating the row — used by the
+	// Devin-Review-#4 regression to prove MarkReplayed still runs
+	// when bookkeeping fails.
+	bumpErr error
 }
 
 func newMemDLQStore() *memDLQStore {
@@ -97,6 +104,11 @@ func (s *memDLQStore) MarkReplayed(_ context.Context, id string, replayErr error
 func (s *memDLQStore) BumpAttemptCount(_ context.Context, id string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.bumpErr != nil {
+		err := s.bumpErr
+		s.bumpErr = nil
+		return 0, err
+	}
 	r, ok := s.rows[id]
 	if !ok {
 		return 0, pipeline.ErrDLQNotFound
@@ -326,6 +338,72 @@ func TestReplayer_Replay_ProducerFailureMarksReplayedWithError(t *testing.T) {
 	got, _ := store.Get(context.Background(), "tenant-a", row.ID)
 	if got.ReplayError == "" {
 		t.Fatalf("expected replay_error to be set, got empty string")
+	}
+}
+
+// TestReplayer_Replay_BumpFailureStillMarksReplayed is the regression
+// test for the Devin-Review #4 finding on PR #12. Pre-fix the
+// bookkeeping order in Replayer.Replay was:
+//
+//  1. SendMessage   — publishes to ingest topic.
+//  2. BumpAttemptCount — increments attempt counter.
+//  3. MarkReplayed  — stamps replayed_at = NOW().
+//
+// A transient DB error on step 2 short-circuited before step 3, so
+// `replayed_at` stayed NULL and the admin handler's ErrAlreadyReplayed
+// guard never triggered — an operator (or a retry) could replay the
+// SAME envelope again, double-injecting it onto the ingest topic.
+//
+// Post-fix the order is SendMessage → MarkReplayed → BumpAttemptCount,
+// so a bump failure leaves the row in a safe state: the envelope is on
+// the topic AND the row is marked replayed, so a subsequent Replay
+// hits ErrAlreadyReplayed and stops.
+func TestReplayer_Replay_BumpFailureStillMarksReplayed(t *testing.T) {
+	t.Parallel()
+	store := newMemDLQStore()
+	store.bumpErr = errors.New("db unavailable")
+	prod := &fakeProducer{}
+	r, _ := pipeline.NewReplayer(store, prod, 5)
+
+	evt := pipeline.IngestEvent{Kind: pipeline.EventDocumentChanged, TenantID: "tenant-a", SourceID: "src-1", DocumentID: "doc-1"}
+	row := &pipeline.DLQMessage{
+		ID: "01HZRYDLQID00000000000000F", TenantID: "tenant-a", OriginalTopic: "ingest",
+		Payload: encodedDLQEnvelope(t, evt, "boom", 0), ErrorText: "boom",
+		FailedAt: time.Now(), CreatedAt: time.Now(),
+	}
+	_ = store.Insert(context.Background(), row)
+
+	err := r.Replay(context.Background(), "tenant-a", row.ID, "ingest", false)
+	if err == nil {
+		t.Fatal("expected bump-attempt error to surface")
+	}
+	if !strings.Contains(err.Error(), "bump attempts") {
+		t.Fatalf("error should be wrapped as bump-attempts failure, got %v", err)
+	}
+
+	// The envelope must have been published despite the bump failure
+	// — SendMessage runs first.
+	if len(prod.sent) != 1 {
+		t.Fatalf("expected 1 published message, got %d", len(prod.sent))
+	}
+
+	// MarkReplayed MUST have run before BumpAttemptCount, so
+	// replayed_at is set and a follow-up Replay is rejected.
+	got, _ := store.Get(context.Background(), "tenant-a", row.ID)
+	if got.ReplayedAt == nil {
+		t.Fatal("replayed_at must be set even when BumpAttemptCount fails")
+	}
+	if got.AttemptCount != 0 {
+		t.Fatalf("AttemptCount must remain 0 when bump errored, got %d", got.AttemptCount)
+	}
+
+	// A second Replay (without force) must hit the ErrAlreadyReplayed
+	// guard — i.e. no duplicate publish even after the bump failure.
+	if err := r.Replay(context.Background(), "tenant-a", row.ID, "ingest", false); !errors.Is(err, pipeline.ErrAlreadyReplayed) {
+		t.Fatalf("second replay must be blocked by ErrAlreadyReplayed, got %v", err)
+	}
+	if len(prod.sent) != 1 {
+		t.Fatalf("second replay must NOT publish; sent count=%d", len(prod.sent))
 	}
 }
 

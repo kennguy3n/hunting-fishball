@@ -140,22 +140,77 @@ func TestSyncProgress_ConcurrentIncrement(t *testing.T) {
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	const N = 20
+	errs := make(chan error, N)
 	for i := 0; i < N; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = store.IncrementProcessed(ctx, "t-a", "s-1", "ns-1", 1)
+			if err := store.IncrementProcessed(ctx, "t-a", "s-1", "ns-1", 1); err != nil {
+				errs <- err
+			}
 		}()
 	}
 	wg.Wait()
+	close(errs)
+	// Post-fix (Devin Review on PR #12), the increment is a single
+	// atomic INSERT ... ON CONFLICT DO UPDATE, so concurrent calls
+	// can no longer hit a primary-key conflict and no updates are
+	// lost. Pre-fix this test was lenient because the check-then-act
+	// pattern allowed both races to slip through; the assertions are
+	// now exact.
+	for err := range errs {
+		t.Fatalf("concurrent increment errored: %v", err)
+	}
 	rows, _ := store.List(ctx, "t-a", "s-1")
 	if len(rows) != 1 {
 		t.Fatalf("rows=%d", len(rows))
 	}
-	// On SQLite without explicit transactions, lost updates are
-	// possible. Allow some slack but require at least 1 increment
-	// landed; production runs against Postgres where this is atomic.
-	if rows[0].Processed < 1 {
-		t.Fatalf("expected at least 1, got %d", rows[0].Processed)
+	if rows[0].Processed != N {
+		t.Fatalf("expected exactly %d, got %d", N, rows[0].Processed)
+	}
+}
+
+// TestSyncProgress_ConcurrentFirstInsert is the explicit regression
+// test for the TOCTOU bug surfaced by Devin Review on PR #12. Pre-fix,
+// the increment path was UPDATE-then-CREATE: both goroutines would see
+// `RowsAffected==0` from the UPDATE on a row that doesn't yet exist,
+// then both would attempt CREATE — and the second would hit a
+// primary-key violation on Postgres. SQLite without WAL mode and with
+// `MaxOpenConns(1)` already serialises writes, so the test focuses on
+// the post-fix behaviour: every goroutine must succeed AND the final
+// counter must equal the sum of every delta (no lost updates).
+func TestSyncProgress_ConcurrentFirstInsert(t *testing.T) {
+	t.Parallel()
+	db := newProgressDB(t)
+	store := admin.NewSyncProgressStoreGORM(db)
+	ctx := context.Background()
+
+	const N = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, N)
+	start := make(chan struct{})
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // align goroutines so we maximise the race window
+			if err := store.IncrementDiscovered(ctx, "t-a", "s-new", "ns-new", 1); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent first-insert errored: %v", err)
+	}
+	rows, _ := store.List(ctx, "t-a", "s-new")
+	if len(rows) != 1 {
+		t.Fatalf("expected exactly 1 row after concurrent first-insert, got %d", len(rows))
+	}
+	if rows[0].Discovered != N {
+		t.Fatalf("expected Discovered=%d (no lost updates), got %d", N, rows[0].Discovered)
 	}
 }
