@@ -314,6 +314,17 @@ func run() error {
 	}
 	adminHandler.Register(api)
 
+	// Round-4 Task 16: connector credential rotation endpoint.
+	// Mounts POST /v1/admin/sources/:id/rotate-credentials. The
+	// rotator validates new credentials via the connector's
+	// Validate before swapping; the previous credential is kept
+	// for CredentialGracePeriod so in-flight requests drain.
+	(&admin.CredentialRotator{
+		Repo:      sourceRepo,
+		Audit:     auditRepo,
+		Validator: admin.NewRegistryValidator(),
+	}).Register(api)
+
 	// Round-4 Task 5: per-source cron scheduler endpoints.
 	// Mounts POST/GET/DELETE /v1/admin/sources/:id/schedule. The
 	// scheduler goroutine itself runs in cmd/ingest; the API
