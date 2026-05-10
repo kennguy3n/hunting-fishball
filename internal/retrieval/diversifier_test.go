@@ -4,7 +4,69 @@ import (
 	"context"
 	"reflect"
 	"testing"
+
+	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
+
+// diversifierFakeVS / diversifierFakeEmb satisfy the narrow
+// VectorStore / Embedder contracts NewHandler validates. They're
+// kept local to this file (rather than reused from handler_test.go)
+// because handler_test.go is in package retrieval_test — the
+// default-install assertion has to read Handler.cfg, which is
+// unexported, so this test stays in package retrieval.
+type diversifierFakeVS struct{}
+
+func (diversifierFakeVS) Search(context.Context, string, []float32, storage.SearchOpts) ([]storage.QdrantHit, error) {
+	return nil, nil
+}
+
+type diversifierFakeEmb struct{}
+
+func (diversifierFakeEmb) EmbedQuery(context.Context, string, string) ([]float32, error) {
+	return []float32{0}, nil
+}
+
+// TestNewHandler_InstallsDefaultDiversifier asserts NewHandler
+// honours HandlerConfig.Diversifier's doc contract: when nil the
+// handler installs an MMRDiversifier with the default Jaccard
+// similarity. Without this, callers that wire NewHandler with the
+// minimum required dependencies (VectorStore + Embedder) still see
+// `req.Diversity > 0` silently ignored at the handler call sites,
+// because `h.cfg.Diversifier != nil` short-circuits to false.
+func TestNewHandler_InstallsDefaultDiversifier(t *testing.T) {
+	h, err := NewHandler(HandlerConfig{
+		VectorStore: diversifierFakeVS{},
+		Embedder:    diversifierFakeEmb{},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	if h.cfg.Diversifier == nil {
+		t.Fatal("NewHandler must install a default Diversifier (HandlerConfig.Diversifier doc contract)")
+	}
+	if _, ok := h.cfg.Diversifier.(*MMRDiversifier); !ok {
+		t.Fatalf("default Diversifier must be *MMRDiversifier; got %T", h.cfg.Diversifier)
+	}
+}
+
+// TestNewHandler_PreservesExplicitDiversifier verifies the
+// default-install path doesn't clobber a caller-supplied
+// Diversifier. Callers wiring a custom reranker-adjacent diversity
+// strategy must retain it.
+func TestNewHandler_PreservesExplicitDiversifier(t *testing.T) {
+	custom := NewMMRDiversifier(jaccardSimilarity)
+	h, err := NewHandler(HandlerConfig{
+		VectorStore: diversifierFakeVS{},
+		Embedder:    diversifierFakeEmb{},
+		Diversifier: custom,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	if h.cfg.Diversifier != custom {
+		t.Fatalf("NewHandler must keep caller-supplied Diversifier; got %T", h.cfg.Diversifier)
+	}
+}
 
 func mkMatch(id, text string, score float32) *Match {
 	return &Match{ID: id, Text: text, Score: score}

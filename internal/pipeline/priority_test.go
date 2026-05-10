@@ -107,6 +107,62 @@ func TestPriorityBuffer_PushAfterClose(t *testing.T) {
 	}
 }
 
+// TestPriorityBuffer_PushRacesClose exercises the TOCTOU window
+// between Push's `closed.Load()` check and the actual send on the
+// bucket channel. A naive guard returns ErrPriorityBufferClosed
+// from the load but lets the send proceed, which then panics with
+// "send on closed channel" because Close ran in between.
+//
+// We drive the race directly: prefill the bucket so subsequent
+// pushes block, hold those pushes inside Push's `select`, then
+// call Close. The blocked sends now race with `close(ch)`. The
+// defer-recover converts the runtime panic into a clean
+// ErrPriorityBufferClosed, so the test must (a) not panic and (b)
+// see ErrPriorityBufferClosed from every blocked Push.
+func TestPriorityBuffer_PushRacesClose(t *testing.T) {
+	const blocked = 16
+	pb := NewPriorityBuffer(PriorityBufferConfig{
+		HighCapacity:   1,
+		NormalCapacity: 1,
+		LowCapacity:    1,
+	})
+	// Fill each bucket so subsequent pushes block on the channel
+	// send inside Push's select — that is precisely the path the
+	// TOCTOU bug fires on.
+	for _, prio := range []Priority{PriorityHigh, PriorityNormal, PriorityLow} {
+		if err := pb.Push(context.Background(), IngestEvent{}, prio); err != nil {
+			t.Fatalf("seed push: %v", err)
+		}
+	}
+
+	errs := make(chan error, blocked*3)
+	var wg sync.WaitGroup
+	for i := 0; i < blocked; i++ {
+		for _, prio := range []Priority{PriorityHigh, PriorityNormal, PriorityLow} {
+			wg.Add(1)
+			go func(p Priority) {
+				defer wg.Done()
+				errs <- pb.Push(context.Background(), IngestEvent{}, p)
+			}(prio)
+		}
+	}
+	// Yield so blocked goroutines park inside the select.
+	time.Sleep(5 * time.Millisecond)
+	pb.Close()
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		// Blocked pushes either land in the buffer (nil) before
+		// Close closes the channel, or they observe the close and
+		// must return ErrPriorityBufferClosed — never panic and
+		// never any other error.
+		if err != nil && err != ErrPriorityBufferClosed {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+}
+
 func TestPriorityBuffer_DrainStopsOnContext(t *testing.T) {
 	pb := NewPriorityBuffer(PriorityBufferConfig{})
 	ctx, cancel := context.WithCancel(context.Background())

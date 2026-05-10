@@ -203,6 +203,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if cfg.PolicyResolver == nil {
 		cfg.PolicyResolver = noopPolicyResolver{}
 	}
+	if cfg.Diversifier == nil {
+		cfg.Diversifier = NewMMRDiversifier(nil)
+	}
 
 	return &Handler{cfg: cfg}, nil
 }

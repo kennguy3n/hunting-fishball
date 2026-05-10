@@ -113,7 +113,15 @@ type PriorityBuffer struct {
 	low       chan IngestEvent
 	closed    atomic.Bool
 	closeOnce sync.Once
-	stats     priorityStats
+	// done is closed by Close to signal shutdown. The bucket
+	// channels themselves are NOT closed because Push and Close
+	// would otherwise race on close-while-sending — that's a
+	// runtime panic and (under `-race`) a flagged data race on
+	// `chansend` vs. `closechan`. Push and Drain both select on
+	// `done` instead, and Drain uses allClosed (closed flag +
+	// len()==0) to decide when to terminate.
+	done  chan struct{}
+	stats priorityStats
 }
 
 // PriorityBufferConfig configures a PriorityBuffer.
@@ -160,6 +168,7 @@ func NewPriorityBuffer(cfg PriorityBufferConfig) *PriorityBuffer {
 		high:   make(chan IngestEvent, cfg.HighCapacity),
 		normal: make(chan IngestEvent, cfg.NormalCapacity),
 		low:    make(chan IngestEvent, cfg.LowCapacity),
+		done:   make(chan struct{}),
 	}
 }
 
@@ -168,13 +177,25 @@ func NewPriorityBuffer(cfg PriorityBufferConfig) *PriorityBuffer {
 var ErrPriorityBufferClosed = errors.New("priority buffer closed")
 
 // Push enqueues evt at the given priority. Blocks when the bucket
-// is full; returns ctx.Err() if ctx is cancelled.
+// is full; returns ctx.Err() if ctx is cancelled, or
+// ErrPriorityBufferClosed when the buffer has been closed.
+//
+// Close races: Close runs concurrently with Push. We deliberately
+// never close the bucket channels — closing a channel while
+// another goroutine is sending on it is a data race (flagged by
+// `-race`) and a runtime panic. Instead Close closes `done`, and
+// Push selects on `done` to wake up promptly. Pushes that are
+// already parked in the channel-send arm of the select either
+// land in the buffer or observe `done` first; either outcome is
+// safe.
 func (p *PriorityBuffer) Push(ctx context.Context, evt IngestEvent, prio Priority) error {
 	if p.closed.Load() {
 		return ErrPriorityBufferClosed
 	}
 	ch := p.bucket(prio)
 	select {
+	case <-p.done:
+		return ErrPriorityBufferClosed
 	case <-ctx.Done():
 		return ctx.Err()
 	case ch <- evt:
@@ -195,13 +216,12 @@ func (p *PriorityBuffer) bucket(prio Priority) chan IngestEvent {
 
 // Close drains nothing and signals no more pushes are accepted.
 // Drain reads any in-flight items and returns when all buckets are
-// empty.
+// empty. The bucket channels themselves are intentionally left
+// open — see the comment on PriorityBuffer.done.
 func (p *PriorityBuffer) Close() {
 	p.closeOnce.Do(func() {
 		p.closed.Store(true)
-		close(p.high)
-		close(p.normal)
-		close(p.low)
+		close(p.done)
 	})
 }
 
@@ -275,56 +295,53 @@ func (p *PriorityBuffer) Drain(ctx context.Context, sink func(IngestEvent)) {
 		if p.allClosed() {
 			return
 		}
-		// Block on whichever bucket gets data first OR ctx fires.
+		// Block on whichever bucket gets data first, or wake on
+		// ctx.Done / Close (via p.done). When done fires we loop
+		// back; the next iteration's tryRecvOpen calls drain any
+		// final items and allClosed() then returns true.
 		select {
 		case <-ctx.Done():
 			return
-		case v, ok := <-p.high:
-			if ok {
-				p.stats.high.Add(1)
-				sink(v)
-				consecHigh++
-				consecNonLow++
-			}
-		case v, ok := <-p.normal:
-			if ok {
-				p.stats.normal.Add(1)
-				sink(v)
-				consecHigh = 0
-				consecNonLow++
-			}
-		case v, ok := <-p.low:
-			if ok {
-				p.stats.low.Add(1)
-				sink(v)
-				consecHigh = 0
-				consecNonLow = 0
-			}
+		case <-p.done:
+			// re-check loop condition
+		case v := <-p.high:
+			p.stats.high.Add(1)
+			sink(v)
+			consecHigh++
+			consecNonLow++
+		case v := <-p.normal:
+			p.stats.normal.Add(1)
+			sink(v)
+			consecHigh = 0
+			consecNonLow++
+		case v := <-p.low:
+			p.stats.low.Add(1)
+			sink(v)
+			consecHigh = 0
+			consecNonLow = 0
 		}
 	}
 }
 
 // tryRecvOpen returns (event, true) only when ch has a buffered
-// item. Returns (zero, false) when the bucket is empty OR closed —
-// the caller separately checks closure via allClosed.
+// item. Returns (zero, false) when the bucket is empty. The bucket
+// channels are never closed (see PriorityBuffer.done); closure is
+// signalled by p.closed + len()==0 via allClosed.
 func (p *PriorityBuffer) tryRecvOpen(ch chan IngestEvent) (IngestEvent, bool) {
 	if len(ch) == 0 {
 		return IngestEvent{}, false
 	}
 	select {
-	case v, ok := <-ch:
-		if !ok {
-			return IngestEvent{}, false
-		}
+	case v := <-ch:
 		return v, true
 	default:
 		return IngestEvent{}, false
 	}
 }
 
-// allClosed returns true when every bucket is closed AND empty.
-// `closed` flips when Close() runs; once closed, len(ch) == 0
-// indicates the channel has been fully drained.
+// allClosed returns true when Close has been called AND every
+// bucket has been fully drained. The bucket channels themselves
+// are not closed; closure is tracked by the `closed` atomic flag.
 func (p *PriorityBuffer) allClosed() bool {
 	if !p.closed.Load() {
 		return false
