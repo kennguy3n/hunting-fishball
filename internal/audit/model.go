@@ -62,6 +62,7 @@ const (
 	ActionTenantExportCompleted    Action = "tenant.export_completed"
 	ActionIndexAutoReindex         Action = "index.auto_reindex_triggered"
 	ActionConnectorPreviewed       Action = "connector.previewed"
+	ActionDLQReplayedBatch         Action = "dlq.replayed_batch"
 )
 
 // AuditLog is a single audit event. The table is append-only — there is
