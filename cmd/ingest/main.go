@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -185,12 +186,12 @@ func run() error {
 	// and FalkorDB connection string are configured we wire the
 	// stage hook so the coordinator enriches each ingested
 	// document into the per-tenant graph.
-	graphRAG, graphRAGConn, err := buildGraphRAGStage(context.Background())
+	graphRAG, graphRAGCloser, err := buildGraphRAGStage(context.Background())
 	if err != nil {
 		return fmt.Errorf("graphrag: %w", err)
 	}
-	if graphRAGConn != nil {
-		defer func() { _ = graphRAGConn.Close() }()
+	if graphRAGCloser != nil {
+		defer func() { _ = graphRAGCloser.Close() }()
 	}
 
 	coord, err := pipeline.NewCoordinator(pipeline.CoordinatorConfig{
@@ -522,7 +523,16 @@ func parseInt(s string) (int, error) {
 // configured. Returns (nil, nil, nil) when the feature is disabled
 // or under-configured — the coordinator falls back to its 4-stage
 // pipeline.
-func buildGraphRAGStage(ctx context.Context) (pipeline.GraphRAGStage, *grpc.ClientConn, error) {
+//
+// The returned io.Closer wraps both the gRPC client connection and
+// the Redis client that backs the FalkorDB adapter, so the caller
+// can tear down everything with a single deferred Close() at
+// process shutdown. Without closing the Redis client its connection
+// pool and any pubsub goroutines would outlive the ingest binary —
+// the previous signature returned only the gRPC connection so the
+// Redis client leaked on every shutdown and on every error path
+// after redis.NewClient succeeded.
+func buildGraphRAGStage(ctx context.Context) (pipeline.GraphRAGStage, io.Closer, error) {
 	if !envBool("CONTEXT_ENGINE_GRAPHRAG_ENABLED") {
 		return nil, nil, nil
 	}
@@ -557,6 +567,7 @@ func buildGraphRAGStage(ctx context.Context) (pipeline.GraphRAGStage, *grpc.Clie
 		GraphPrefix: envOr("CONTEXT_ENGINE_FALKORDB_GRAPH_PREFIX", "hf-"),
 	})
 	if err != nil {
+		_ = rc.Close()
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("falkordb client: %w", err)
 	}
@@ -572,7 +583,35 @@ func buildGraphRAGStage(ctx context.Context) (pipeline.GraphRAGStage, *grpc.Clie
 		"falkor_prefix", envOr("CONTEXT_ENGINE_FALKORDB_GRAPH_PREFIX", "hf-"),
 	)
 	_ = ctx
-	return stage, conn, nil
+	return stage, &graphRAGResources{conn: conn, rc: rc}, nil
+}
+
+// graphRAGResources is the io.Closer returned alongside a live
+// GraphRAGStage. It owns the gRPC client connection to the GraphRAG
+// service and the Redis client that backs the FalkorDB adapter so
+// both can be torn down with a single deferred Close() at process
+// shutdown.
+type graphRAGResources struct {
+	conn *grpc.ClientConn
+	rc   *redis.Client
+}
+
+func (g *graphRAGResources) Close() error {
+	if g == nil {
+		return nil
+	}
+	var errs []error
+	if g.conn != nil {
+		if err := g.conn.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("graphrag grpc: %w", err))
+		}
+	}
+	if g.rc != nil {
+		if err := g.rc.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("falkordb redis: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // graphRAGGRPCClient adapts the generated graphragv1 stub to the
