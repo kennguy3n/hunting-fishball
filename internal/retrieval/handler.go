@@ -112,6 +112,22 @@ type HandlerConfig struct {
 	// before fan-out. nil → permissive default (Phase 1/3
 	// privacy-label filter only).
 	PolicyResolver PolicyResolver
+
+	// ShardVersionLookup returns the freshest on-device shard
+	// version for the request scope (tenant, channel,
+	// privacy_mode). Optional — when nil, the handler always
+	// reports `local_shard_version: 0`, which forces
+	// prefer_local=false from the device-first policy. Phase 6 /
+	// Task 15.
+	ShardVersionLookup ShardVersionLookup
+}
+
+// ShardVersionLookup is the narrow port the retrieval handler uses
+// to learn the freshest shard version for a request scope. The
+// production wiring delegates to internal/shard.Repository's
+// LatestVersion; tests use an in-memory fake.
+type ShardVersionLookup interface {
+	LatestShardVersion(ctx context.Context, tenantID, channelID, privacyMode string) (int64, error)
 }
 
 // Handler serves the retrieval HTTP API.
@@ -183,6 +199,14 @@ type RetrieveRequest struct {
 	// consumers may receive the result. Empty disables the
 	// recipient gate (legacy callers).
 	SkillID string `json:"skill_id,omitempty"`
+
+	// DeviceTier is the requesting device's effective tier
+	// (low/mid/high). Drives the on-device-first policy: when
+	// supplied as Mid or High and the channel + privacy mode
+	// permit it, the response carries `prefer_local: true` so the
+	// client can choose to serve from the on-device shard. Empty
+	// means "unknown", which collapses to remote-only behaviour.
+	DeviceTier string `json:"device_tier,omitempty"`
 }
 
 // RetrieveHit is one entry in the response.
@@ -251,6 +275,25 @@ type RetrieveResponse struct {
 	// traces. Empty when no tracer is active. See
 	// docs/ARCHITECTURE.md §4.1.
 	TraceID string `json:"trace_id,omitempty"`
+
+	// PreferLocal is the on-device-first hint. When true the client
+	// SHOULD serve the query from its local shard at
+	// `LocalShardVersion` and only fall back to the response Hits if
+	// the local coverage is insufficient (see
+	// `docs/contracts/local-first-retrieval.md` for the decision
+	// tree). Phase 6 / Task 15.
+	PreferLocal bool `json:"prefer_local"`
+
+	// LocalShardVersion is the freshest shard version the server
+	// observed for the request scope. Echoed even when PreferLocal
+	// is false so a client that has just upgraded its tier can
+	// see whether a shard is already on the device.
+	LocalShardVersion int64 `json:"local_shard_version,omitempty"`
+
+	// PreferLocalReason is a stable label explaining the
+	// PreferLocal decision: one of
+	// `device_tier_too_low|channel_disallowed|privacy_blocks_local|no_local_shard|prefer_local`.
+	PreferLocalReason string `json:"prefer_local_reason,omitempty"`
 }
 
 func (h *Handler) retrieve(c *gin.Context) {
@@ -353,6 +396,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 			for i := range resp.Hits {
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
+			h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
 			c.JSON(http.StatusOK, resp)
 
 			return
@@ -410,7 +454,40 @@ func (h *Handler) retrieve(c *gin.Context) {
 		_ = h.cfg.Cache.Set(c.Request.Context(), tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), h.cfg.CacheTTL)
 	}
 
+	h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
 	c.JSON(http.StatusOK, resp)
+}
+
+// applyDeviceFirst computes the on-device-first hint and writes it
+// onto resp. Caller invokes this after the response is otherwise
+// fully populated. Lookup errors are swallowed (log and treat as
+// no-shard) so a transient repository failure does not fail the
+// retrieval.
+//
+// The channel-level allow-local toggle is sourced from the
+// resolved PolicySnapshot. Per
+// `docs/contracts/local-first-retrieval.md` the contract default
+// is allow-local=true; PolicySnapshot expresses the inverse as
+// `DenyLocalRetrieval` so an unconfigured channel
+// (DenyLocalRetrieval==false) keeps the default-true semantics.
+// When admins flip the channel toggle the request takes the
+// `channel_disallowed` branch in policy.Decide.
+func (h *Handler) applyDeviceFirst(ctx context.Context, tenantID, channelID, privacyMode, deviceTier string, snapshot policy.PolicySnapshot, resp *RetrieveResponse) {
+	var shardVersion int64
+	if h.cfg.ShardVersionLookup != nil {
+		if v, lerr := h.cfg.ShardVersionLookup.LatestShardVersion(ctx, tenantID, channelID, privacyMode); lerr == nil {
+			shardVersion = v
+		}
+	}
+	decision := policy.Decide(policy.DeviceFirstInputs{
+		DeviceTier:          policy.DeviceTier(deviceTier),
+		AllowLocalRetrieval: !snapshot.DenyLocalRetrieval,
+		PrivacyMode:         policy.PrivacyMode(privacyMode),
+		LocalShardVersion:   shardVersion,
+	})
+	resp.PreferLocal = decision.PreferLocal
+	resp.LocalShardVersion = decision.LocalShardVersion
+	resp.PreferLocalReason = decision.Reason
 }
 
 // RetrieveWithSnapshot runs the retrieval pipeline against an

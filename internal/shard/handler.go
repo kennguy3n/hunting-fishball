@@ -57,15 +57,17 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 //
 //	GET    /v1/shards/:tenant_id            — list manifests for the tenant scope
 //	GET    /v1/shards/:tenant_id/delta      — delta against ?since=<version>
+//	GET    /v1/shards/:tenant_id/coverage   — local-shard coverage metadata
 //	DELETE /v1/tenants/:tenant_id/keys      — cryptographic forgetting trigger
 //
-// All three endpoints enforce the same tenant guard the rest of the
+// All four endpoints enforce the same tenant guard the rest of the
 // API uses: the path-supplied tenant_id MUST match the
 // authenticated tenant from the Gin context. A mismatch is returned
 // as 403 to avoid leaking the existence of other tenants.
 func (h *Handler) Register(rg *gin.RouterGroup) {
 	rg.GET("/v1/shards/:tenant_id", h.list)
 	rg.GET("/v1/shards/:tenant_id/delta", h.delta)
+	rg.GET("/v1/shards/:tenant_id/coverage", h.coverage)
 	if h.cfg.Forget != nil {
 		rg.DELETE("/v1/tenants/:tenant_id/keys", h.forget)
 	}
@@ -212,6 +214,94 @@ func (h *Handler) delta(c *gin.Context) {
 		Operations:  ops,
 		IsFullSync:  isFullSync,
 	})
+}
+
+// CoverageResponse is the JSON shape of
+// GET /v1/shards/:tenant_id/coverage. Documents how much of the
+// tenant's corpus is reachable from the on-device shard so the
+// client's local-first decision tree (see
+// docs/contracts/local-first-retrieval.md) can choose between
+// local and remote retrieval without re-deriving counts on every
+// query.
+type CoverageResponse struct {
+	TenantID        string  `json:"tenant_id"`
+	PrivacyMode     string  `json:"privacy_mode"`
+	ShardVersion    int64   `json:"shard_version"`
+	ShardChunks     int     `json:"shard_chunks"`
+	CorpusChunks    int     `json:"corpus_chunks"`
+	CoverageRatio   float64 `json:"coverage_ratio"`
+	IsAuthoritative bool    `json:"is_authoritative"`
+	Reason          string  `json:"reason,omitempty"`
+}
+
+// CoverageRepo extends HandlerRepo with the read used by
+// GET /v1/shards/:tenant_id/coverage. Implementations resolve the
+// total chunk count for the tenant scope (the denominator of the
+// coverage ratio). Optional — when the configured Repo does not
+// implement CoverageRepo the handler reports a coverage ratio of 0
+// and IsAuthoritative=false so the client falls back to remote.
+type CoverageRepo interface {
+	CorpusChunkCount(ctx context.Context, f ScopeFilter) (int, error)
+}
+
+func (h *Handler) coverage(c *gin.Context) {
+	tenantID, ok := h.tenantFromPath(c)
+	if !ok {
+		return
+	}
+	privacyMode := c.Query("privacy_mode")
+	if privacyMode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "privacy_mode is required"})
+		return
+	}
+	scope := ScopeFilter{
+		TenantID:    tenantID,
+		UserID:      c.Query("user_id"),
+		ChannelID:   c.Query("channel_id"),
+		PrivacyMode: privacyMode,
+	}
+	latest, err := h.cfg.Repo.LatestVersion(c.Request.Context(), scope)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	resp := CoverageResponse{
+		TenantID:    tenantID,
+		PrivacyMode: privacyMode,
+	}
+	if latest == 0 {
+		resp.Reason = "no_shard"
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+	manifest, err := h.cfg.Repo.GetByVersion(c.Request.Context(), scope, latest)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	resp.ShardVersion = manifest.ShardVersion
+	resp.ShardChunks = manifest.ChunksCount
+
+	corpusRepo, ok := h.cfg.Repo.(CoverageRepo)
+	if !ok {
+		resp.Reason = "corpus_size_unknown"
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+	corpus, err := corpusRepo.CorpusChunkCount(c.Request.Context(), scope)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	resp.CorpusChunks = corpus
+	if corpus > 0 {
+		resp.CoverageRatio = float64(manifest.ChunksCount) / float64(corpus)
+		if resp.CoverageRatio > 1 {
+			resp.CoverageRatio = 1
+		}
+		resp.IsAuthoritative = true
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) forget(c *gin.Context) {

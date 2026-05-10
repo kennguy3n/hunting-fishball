@@ -1,7 +1,7 @@
 # hunting-fishball
 
-> **Status.** Phases 0, 1, 2, 3, 4, 5 (server-side), 7, and 8 are in
-> `main` (all 🟡 partial — see
+> **Status.** Phases 0, 1, 2, 3, 4, 5, 6 (server-side), 7, and 8
+> are in `main` (all 🟡 partial — see
 > [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live checklist).
 > Phase 1 brings the Google Drive + Slack connectors, the Go Kafka
 > consumer, the 4-stage pipeline (fetch / parse / embed / store), the
@@ -29,10 +29,25 @@
 > **Phase 5 (server-side)** brings the on-device shard contract:
 > the manifest API (`GET /v1/shards/:tenant_id`), the policy-aware
 > generation worker, the delta sync protocol
-> (`GET /v1/shards/:tenant_id/delta?since=<v>`), and the
-> cryptographic-forgetting orchestrator
-> (`DELETE /v1/tenants/:tenant_id/keys`) — all in
-> `internal/shard/`.
+> (`GET /v1/shards/:tenant_id/delta?since=<v>`), the shard
+> coverage endpoint (`GET /v1/shards/:tenant_id/coverage`), the
+> client `ShardClientContract` interface
+> (`internal/shard/contract.go`) consumed by the iOS / Android /
+> desktop runtimes, the per-tier eviction policy
+> (`internal/shard/eviction.go`), and the cryptographic-forgetting
+> orchestrator (`DELETE /v1/tenants/:tenant_id/keys`) — all in
+> `internal/shard/`. The Bonsai-1.7B model catalog
+> (q4_0 / q8_0 / fp16) ships in `internal/models/` with
+> `GET /v1/models/catalog`. Per-platform contracts live in
+> [`docs/contracts/`](docs/contracts/).
+> **Phase 6 (server-side)** brings the B2C client SDK bootstrap
+> (`internal/b2c/`): `GET /v1/health`, `GET /v1/capabilities`, and
+> `GET /v1/sync/schedule`. The device-first policy
+> (`internal/policy/device_first.go`) returns a
+> `prefer_local` / `local_shard_version` / `prefer_local_reason`
+> hint on every `RetrieveResponse`. Per-platform render and
+> background-sync contracts live in
+> [`docs/contracts/`](docs/contracts/).
 > **Phase 7** brings ten new connectors (SharePoint, OneDrive,
 > Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab, Microsoft
 > Teams), bringing the production catalog to 12, plus per-connector
@@ -371,7 +386,16 @@ hunting-fishball/
 │   │                          # FalkorDB + Redis semantic cache
 │   ├── shard/                 # Phase 5: shard manifest API,
 │   │                          # generation worker, delta sync,
-│   │                          # cryptographic-forgetting orchestrator
+│   │                          # cryptographic-forgetting orchestrator,
+│   │                          # client contract (contract.go),
+│   │                          # coverage endpoint, version-lookup
+│   │                          # adapter, eviction policy (eviction.go)
+│   ├── models/                # Phase 5: model catalog
+│   │                          # (Bonsai-1.7B q4_0 / q8_0 / fp16) +
+│   │                          # GET /v1/models/catalog handler
+│   ├── b2c/                   # Phase 6: B2C client SDK bootstrap
+│   │                          # (/v1/health, /v1/capabilities,
+│   │                          # /v1/sync/schedule)
 │   ├── observability/         # Phase 8: OpenTelemetry tracing helper
 │   │                          # used by the pipeline + retrieval, plus
 │   │                          # Prometheus metrics + Gin middleware
@@ -402,9 +426,17 @@ hunting-fishball/
 │   └── capacity/              # Phase 8 capacity test (`make capacity-test`)
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
 │   │                          # / CUTOVER
-│   └── runbooks/              # Phase 7: per-connector ops runbooks
-│                              # (credential rotation, quotas, outages,
-│                              # error codes) — one Markdown per connector
+│   ├── runbooks/              # Phase 7: per-connector ops runbooks
+│   │                          # (credential rotation, quotas, outages,
+│   │                          # error codes) — one Markdown per connector
+│   └── contracts/             # Phase 5/6: client-side wire contracts
+│                              # (uniffi-ios.md, uniffi-android.md,
+│                              # napi-desktop.md,
+│                              # local-first-retrieval.md,
+│                              # bonsai-integration.md,
+│                              # b2c-retrieval-sdk.md,
+│                              # privacy-strip-render.md,
+│                              # background-sync.md)
 ├── deploy/                    # Phase 8: HorizontalPodAutoscaler manifests
 │                              # (hpa-api.yaml, hpa-ingest.yaml,
 │                              # hpa-docling.yaml, hpa-embedding.yaml)
