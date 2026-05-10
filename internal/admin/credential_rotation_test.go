@@ -149,6 +149,130 @@ func TestCredentialRotator_DefaultClock(t *testing.T) {
 	}
 }
 
+// TestCredentialRotator_TimestampConsistency is the regression
+// for the round-3 Devin Review finding that Rotate() called
+// `now()` at four separate sites (config blob expiry, config
+// blob rotated_at, DB updated_at, and the API response/audit
+// rotatedAt) producing four divergent wall-clock instants.
+//
+// The fix captures `now()` once at the top and reuses for every
+// timestamp. We verify here that:
+//   - The HTTP response RotatedAt equals the config blob's
+//     `credentials_rotated_at`.
+//   - The HTTP response PreviousExpiryAt equals the config blob's
+//     `previous_credentials_expires_at`.
+//   - The audit event's `rotated_at` and `previous_expires` match
+//     the HTTP response.
+//   - The DB `updated_at` column equals the response RotatedAt.
+//
+// The fake clock returns a counter-incremented timestamp each
+// call so a regression that re-introduces multiple now() calls
+// would be flagged immediately by mismatched values.
+func TestCredentialRotator_TimestampConsistency(t *testing.T) {
+	t.Parallel()
+	repo, _ := newSQLiteSourceRepo(t)
+	ctx := context.Background()
+
+	src := admin.NewSource("tenant-a", "google-drive", admin.JSONMap{
+		"credentials": []byte("OLD"),
+	}, nil)
+	if err := repo.Create(ctx, src); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Counter-incremented clock: each call returns a strictly
+	// later timestamp than the previous one. Any code path that
+	// calls now() more than once will be caught by the equality
+	// checks below because the values will diverge.
+	var calls int
+	base := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time {
+		calls++
+		return base.Add(time.Duration(calls) * time.Millisecond)
+	}
+
+	ad := &fakeAudit{}
+	rotator := &admin.CredentialRotator{
+		Repo:      repo,
+		Audit:     ad,
+		Validator: &fakeValidator{},
+		Now:       clock,
+	}
+	res, err := rotator.Rotate(ctx, "tenant-a", src.ID, admin.CredentialRotateRequest{
+		Credentials: []byte("NEW"),
+		Reason:      "scheduled",
+	})
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+
+	// 1. HTTP response RotatedAt vs config blob credentials_rotated_at.
+	got, err := repo.Get(ctx, "tenant-a", src.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cfgRotatedAtRaw, ok := got.Config["credentials_rotated_at"].(string)
+	if !ok {
+		t.Fatalf("config[credentials_rotated_at] not a string: %T", got.Config["credentials_rotated_at"])
+	}
+	cfgRotatedAt, err := time.Parse(time.RFC3339Nano, cfgRotatedAtRaw)
+	if err != nil {
+		t.Fatalf("parse credentials_rotated_at: %v", err)
+	}
+	if !cfgRotatedAt.Equal(res.RotatedAt) {
+		t.Fatalf("config credentials_rotated_at = %v; HTTP RotatedAt = %v; should be identical", cfgRotatedAt, res.RotatedAt)
+	}
+
+	// 2. HTTP response PreviousExpiryAt vs config blob previous_credentials_expires_at.
+	cfgExpiryRaw, ok := got.Config["previous_credentials_expires_at"].(string)
+	if !ok {
+		t.Fatalf("config[previous_credentials_expires_at] not a string: %T", got.Config["previous_credentials_expires_at"])
+	}
+	cfgExpiry, err := time.Parse(time.RFC3339Nano, cfgExpiryRaw)
+	if err != nil {
+		t.Fatalf("parse previous_credentials_expires_at: %v", err)
+	}
+	if !cfgExpiry.Equal(res.PreviousExpiryAt) {
+		t.Fatalf("config previous_credentials_expires_at = %v; HTTP PreviousExpiryAt = %v; should be identical", cfgExpiry, res.PreviousExpiryAt)
+	}
+
+	// 3. Expiry should be exactly RotatedAt + grace period.
+	wantExpiry := res.RotatedAt.Add(admin.CredentialGracePeriod)
+	if !res.PreviousExpiryAt.Equal(wantExpiry) {
+		t.Fatalf("PreviousExpiryAt = %v; want RotatedAt + grace = %v", res.PreviousExpiryAt, wantExpiry)
+	}
+
+	// 4. Audit event metadata must reference the same rotated_at
+	//    and previous_expires as the HTTP response.
+	logs := ad.auditLogs()
+	if len(logs) != 1 {
+		t.Fatalf("audit logs = %d; want 1", len(logs))
+	}
+	auditRotatedAt, ok := logs[0].Metadata["rotated_at"].(string)
+	if !ok {
+		t.Fatalf("audit metadata[rotated_at] missing or not a string: %v", logs[0].Metadata)
+	}
+	if auditRotatedAt != res.RotatedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("audit rotated_at = %s; response RotatedAt = %s", auditRotatedAt, res.RotatedAt.Format(time.RFC3339Nano))
+	}
+	auditExpiry, ok := logs[0].Metadata["previous_expires"].(string)
+	if !ok {
+		t.Fatalf("audit metadata[previous_expires] missing or not a string: %v", logs[0].Metadata)
+	}
+	if auditExpiry != res.PreviousExpiryAt.Format(time.RFC3339Nano) {
+		t.Fatalf("audit previous_expires = %s; response PreviousExpiryAt = %s", auditExpiry, res.PreviousExpiryAt.Format(time.RFC3339Nano))
+	}
+
+	// 5. The clock must have been called exactly once for the
+	//    rotation timestamp. (The defaulting closure assignment
+	//    in Rotate() doesn't invoke it; only the rotatedAt :=
+	//    now() call should.) If this assertion regresses the
+	//    callsite-reduction will be too — adjust as needed.
+	if calls != 1 {
+		t.Fatalf("now() called %d times; want exactly 1 (each call would produce a divergent timestamp)", calls)
+	}
+}
+
 func TestCredentialRotator_404OnUnknown(t *testing.T) {
 	t.Parallel()
 	repo, _ := newSQLiteSourceRepo(t)

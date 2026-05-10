@@ -155,6 +155,18 @@ func (r *CredentialRotator) Rotate(ctx context.Context, tenantID, sourceID strin
 		return CredentialRotateResponse{}, fmt.Errorf("validate: %w", err)
 	}
 
+	// Capture the rotation instant ONCE and reuse for every
+	// timestamp written in this call. The previous version called
+	// now() at four separate sites (config blob expiry, config blob
+	// rotated_at, DB updated_at, and the API response/audit
+	// rotatedAt) producing four divergent wall-clock instants. A
+	// downstream grace-period enforcer reading
+	// `previous_credentials_expires_at` from the config blob would
+	// then see a different expiry than what the operator saw in the
+	// HTTP response or what was recorded on the audit event.
+	rotatedAt := now()
+	expiry := rotatedAt.Add(CredentialGracePeriod)
+
 	// Stash the previous credentials and expiry on the config blob.
 	cfg := JSONMap{}
 	for k, v := range src.Config {
@@ -162,10 +174,10 @@ func (r *CredentialRotator) Rotate(ctx context.Context, tenantID, sourceID strin
 	}
 	if existing, ok := cfg["credentials"]; ok && existing != nil {
 		cfg["previous_credentials"] = existing
-		cfg["previous_credentials_expires_at"] = now().Add(CredentialGracePeriod).Format(time.RFC3339Nano)
+		cfg["previous_credentials_expires_at"] = expiry.Format(time.RFC3339Nano)
 	}
 	cfg["credentials"] = req.Credentials
-	cfg["credentials_rotated_at"] = now().Format(time.RFC3339Nano)
+	cfg["credentials_rotated_at"] = rotatedAt.Format(time.RFC3339Nano)
 
 	// We can't go through Update (it only accepts Status/Scopes), so
 	// flip the column directly. Safe because we own the row in this
@@ -176,7 +188,7 @@ func (r *CredentialRotator) Rotate(ctx context.Context, tenantID, sourceID strin
 			[]string{string(SourceStatusRemoving), string(SourceStatusRemoved)}).
 		Updates(map[string]any{
 			"config":     cfg,
-			"updated_at": now(),
+			"updated_at": rotatedAt,
 		})
 	if res.Error != nil {
 		return CredentialRotateResponse{}, fmt.Errorf("admin: update credentials: %w", res.Error)
@@ -185,12 +197,11 @@ func (r *CredentialRotator) Rotate(ctx context.Context, tenantID, sourceID strin
 		return CredentialRotateResponse{}, ErrSourceNotFound
 	}
 
-	rotatedAt := now()
-	expiry := rotatedAt.Add(CredentialGracePeriod)
 	actor := actorIDFromContextValue(ctx)
 	auditMeta := audit.JSONMap{
 		"reason":           req.Reason,
 		"previous_expires": expiry.Format(time.RFC3339Nano),
+		"rotated_at":       rotatedAt.Format(time.RFC3339Nano),
 	}
 	log := audit.NewAuditLog(tenantID, actor, audit.ActionSourceCredentialsRotated, "source", sourceID, auditMeta, "")
 	_ = r.Audit.Create(ctx, log)
