@@ -45,6 +45,8 @@ import (
 
 	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
+	"github.com/kennguy3n/hunting-fishball/internal/b2c"
+	"github.com/kennguy3n/hunting-fishball/internal/models"
 	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
 	"github.com/kennguy3n/hunting-fishball/internal/policy"
@@ -151,10 +153,17 @@ func run() error {
 	// the freshest live state.
 	liveResolver := policy.NewLiveResolverGORM(db)
 
+	// Phase 6 / Task 15: shard-version lookup feeds the device-first
+	// hint. The shard repository is constructed once here and reused
+	// by both the retrieval handler (read-only LatestVersion lookups)
+	// and the shard handler (full read/write surface) further down.
+	shardRepo := shard.NewRepository(db)
+
 	handlerCfg := retrieval.HandlerConfig{
-		VectorStore:    qdrant,
-		Embedder:       queryEmbedder,
-		PolicyResolver: liveResolver,
+		VectorStore:        qdrant,
+		Embedder:           queryEmbedder,
+		PolicyResolver:     liveResolver,
+		ShardVersionLookup: shard.VersionLookup{Repo: shardRepo},
 	}
 
 	// Phase 3: BM25, graph, semantic cache, Mem0. Each backend is
@@ -280,18 +289,39 @@ func run() error {
 
 	// Phase 5 server-side: shard sync API. The handler exposes
 	// `GET /v1/shards/:tenant_id`, `GET /v1/shards/:tenant_id/delta`,
-	// and (when a Forget orchestrator is wired)
-	// `DELETE /v1/tenants/:tenant_id/keys`. The actual sweepers (Qdrant,
-	// FalkorDB, Tantivy, Redis, Postgres) are tier-specific and live
-	// under cmd/ingest's wiring; the API binary only needs the read
-	// path to be live.
-	shardRepo := shard.NewRepository(db)
+	// `GET /v1/shards/:tenant_id/coverage`, and (when a Forget
+	// orchestrator is wired) `DELETE /v1/tenants/:tenant_id/keys`. The
+	// actual sweepers (Qdrant, FalkorDB, Tantivy, Redis, Postgres) are
+	// tier-specific and live under cmd/ingest's wiring; the API
+	// binary only needs the read path to be live.
 	shardHandlerCfg := shard.HandlerConfig{Repo: shardRepo}
 	shardHandler, err := shard.NewHandler(shardHandlerCfg)
 	if err != nil {
 		return fmt.Errorf("shard handler: %w", err)
 	}
 	shardHandler.Register(api)
+
+	// Phase 5 / Task 13: model catalog. The static provider lists
+	// the Bonsai-1.7B builds the on-device runtime is allowed to
+	// download, alongside the per-tier eviction policy that drives
+	// shard retention on-device.
+	modelHandler, err := models.NewHandler(models.NewStaticCatalog())
+	if err != nil {
+		return fmt.Errorf("models handler: %w", err)
+	}
+	modelHandler.Register(api)
+
+	// Phase 6 / Tasks 14 + 17: B2C client SDK surface. Mounts
+	// /v1/health, /v1/capabilities, and /v1/sync/schedule.
+	b2cHandler, err := b2c.NewHandler(b2c.HandlerConfig{
+		EnabledBackends: enabledBackends(handlerCfg),
+		LocalShardSync:  true,
+		DeviceFirst:     handlerCfg.ShardVersionLookup != nil,
+	})
+	if err != nil {
+		return fmt.Errorf("b2c handler: %w", err)
+	}
+	b2cHandler.Register(api)
 
 	// Phase 1 Task 19 retrieval optimisations: pre-warm Qdrant
 	// connections so the first user-facing /v1/retrieve doesn't pay
@@ -352,6 +382,28 @@ func authPlaceholder(c *gin.Context) {
 		c.Set(audit.ActorContextKey, actorID)
 	}
 	c.Next()
+}
+
+// enabledBackends inspects the assembled retrieval HandlerConfig
+// and returns the names of the fan-out backends that are wired (i.e.
+// have a non-nil client). The B2C capabilities endpoint surfaces
+// this list so clients can grey out UI affordances for backends the
+// server isn't configured to use.
+func enabledBackends(cfg retrieval.HandlerConfig) []string {
+	out := []string{}
+	if cfg.VectorStore != nil {
+		out = append(out, "vector")
+	}
+	if cfg.BM25 != nil {
+		out = append(out, "bm25")
+	}
+	if cfg.Graph != nil {
+		out = append(out, "graph")
+	}
+	if cfg.Memory != nil {
+		out = append(out, "memory")
+	}
+	return out
 }
 
 // queryEmbedAdapter satisfies retrieval.Embedder by calling

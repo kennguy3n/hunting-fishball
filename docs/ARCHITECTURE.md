@@ -597,7 +597,22 @@ hunting-fishball/
 │   │                          # generation worker (generator.go),
 │   │                          # delta protocol (delta.go),
 │   │                          # cryptographic-forgetting orchestrator
-│   │                          # (forget.go)
+│   │                          # (forget.go), client contract
+│   │                          # (contract.go) shared by iOS / Android /
+│   │                          # desktop on-device runtimes, coverage
+│   │                          # endpoint (handler.go::coverage),
+│   │                          # version-lookup adapter for the
+│   │                          # device-first hint (version_lookup.go),
+│   │                          # and per-tier eviction policy
+│   │                          # (eviction.go)
+│   ├── models/                # Phase 5 / Task 13: model catalog.
+│   │                          # ModelEntry / ModelCatalog / Provider /
+│   │                          # StaticProvider (catalog.go) and
+│   │                          # GET /v1/models/catalog (handler.go)
+│   ├── b2c/                   # Phase 6 / Tasks 14 + 17: B2C client SDK
+│   │                          # bootstrap. Mounts /v1/health,
+│   │                          # /v1/capabilities, and
+│   │                          # /v1/sync/schedule (handler.go)
 │   ├── observability/         # Phase 8: OpenTelemetry tracing
 │   │                          # helper + attribute-key constants
 │   │                          # (tracing.go); used by the pipeline
@@ -606,10 +621,14 @@ hunting-fishball/
 │   │                          # (metrics.go) and a Gin middleware
 │   │                          # (middleware.go) scraped at /metrics
 │   │                          # on cmd/api and cmd/ingest
-│   └── grpcpool/              # Phase 8: round-robin gRPC connection
-│                              # pool with per-call deadline +
-│                              # circuit breaker (closed → open →
-│                              # half-open) for the Python sidecars
+│   ├── grpcpool/              # Phase 8: round-robin gRPC connection
+│   │                          # pool with per-call deadline +
+│   │                          # circuit breaker (closed → open →
+│   │                          # half-open) for the Python sidecars
+│   └── policy/                # see Phase 4 entry above; Phase 6 /
+│                              # Task 15 added device_first.go
+│                              # (Decide → prefer_local hint) consumed
+│                              # by internal/retrieval/handler.go
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
@@ -644,12 +663,20 @@ hunting-fishball/
 │                              # CAPACITY_DURATION env tunables)
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES /
 │   │                          # PROGRESS / CUTOVER
-│   └── runbooks/              # Phase 7 per-connector ops runbooks
-│                              # (one Markdown file per connector +
-│                              # a README index): credential rotation,
-│                              # quota / rate-limit incidents, outage
-│                              # detection, and connector-specific
-│                              # error codes
+│   ├── runbooks/              # Phase 7 per-connector ops runbooks
+│   │                          # (one Markdown file per connector +
+│   │                          # a README index): credential rotation,
+│   │                          # quota / rate-limit incidents, outage
+│   │                          # detection, and connector-specific
+│   │                          # error codes
+│   └── contracts/             # Phase 5 / 6 client-side contracts:
+│                              # uniffi-ios.md, uniffi-android.md,
+│                              # napi-desktop.md,
+│                              # local-first-retrieval.md,
+│                              # bonsai-integration.md,
+│                              # b2c-retrieval-sdk.md,
+│                              # privacy-strip-render.md,
+│                              # background-sync.md
 ├── deploy/                    # Phase 8 HorizontalPodAutoscaler
 │                              # manifests: hpa-api.yaml,
 │                              # hpa-ingest.yaml, hpa-docling.yaml,
@@ -1051,3 +1078,194 @@ hunting-fishball/
   `tests/benchmark/p95_e2e_test.go::TestE2E_RetrieveP95` (build
   tag `e2e`, `make bench-e2e`) which fails the build if
   retrieval P95 > 500 ms or round-trip P95 > 1 s.
+
+### Tech choices added in Phase 6
+
+- **B2C client SDK bootstrap (`internal/b2c/`):** A single Gin
+  handler mounts three endpoints the B2C splash / boot path
+  consumes: `GET /v1/health` returns `status` + server time +
+  build version (cheap, no DB); `GET /v1/capabilities` reports
+  enabled retrieval backends + supported privacy modes + the
+  `device_first` / `local_shard_sync` feature flags so a B2C UI
+  built three months ago can still degrade gracefully against a
+  newer server; `GET /v1/sync/schedule` returns recommended
+  foreground / background polling intervals (defaults: 60 s
+  foreground, 15 min background, ±30 s jitter, 30 s / 5 min
+  hard floors). The wire format is contract-pinned in
+  `docs/contracts/b2c-retrieval-sdk.md` and
+  `docs/contracts/background-sync.md`.
+- **Device-first policy (`internal/policy/device_first.go`):**
+  `Decide(DeviceFirstInputs) DeviceFirstDecision` is a pure
+  function that returns a structured `prefer_local` hint with a
+  stable failure label (`device_tier_too_low`,
+  `channel_disallowed`, `privacy_blocks_local`,
+  `no_local_shard`, `prefer_local`). The retrieval handler
+  consults it on every successful `POST /v1/retrieve` (cache
+  hit + fresh fan-out) and surfaces the result on the response
+  envelope (`RetrieveResponse.prefer_local`,
+  `.local_shard_version`, `.prefer_local_reason`).
+  `shard.VersionLookup` adapts the GORM-backed shard repository
+  to the retrieval handler's narrow `ShardVersionLookup` port —
+  shards live in a separate package from retrieval to avoid an
+  import cycle, and lookup errors fail closed to
+  `prefer_local=false` so a transient DB hiccup degrades
+  gracefully.
+
+### Tech choices added in Phase 5 (Tasks 9-13, 19)
+
+- **Client contract interface (`internal/shard/contract.go`):**
+  `ShardClientContract` is the four-method contract every
+  on-device runtime (iOS XCFramework, Android AAR, Electron
+  N-API addon) must implement. The Go-side interface lives in
+  the shard package and is mirrored in
+  `docs/contracts/uniffi-ios.md`,
+  `docs/contracts/uniffi-android.md`, and
+  `docs/contracts/napi-desktop.md`. The supporting wire types
+  (`ShardScope`, `ShardDelta`, `LocalQuery`,
+  `LocalRetrievalResult`, `LocalHit`) carry JSON tags that match
+  the on-device runtime's serialization so the same struct
+  round-trips between Go and Rust without translation.
+- **Shard coverage endpoint
+  (`internal/shard/handler.go::coverage`):** `GET /v1/shards/`
+  `:tenant_id/coverage?privacy_mode=...` returns
+  `CoverageResponse` (shard chunks, corpus chunks,
+  coverage_ratio, is_authoritative). Clients use it to run the
+  decision tree in `docs/contracts/local-first-retrieval.md`.
+  The `CoverageRepo` port is optional; when no implementation
+  is wired, the handler returns `is_authoritative=false` so the
+  client treats the ratio as advisory and falls back to remote.
+- **Model catalog (`internal/models/`):** `ModelCatalog`,
+  `ModelEntry`, and `Provider` give the API binary a typed
+  surface for the on-device model manifest;
+  `StaticProvider` ships a hard-coded baseline of three
+  Bonsai-1.7B builds (q4_0 / q8_0 / fp16) with the per-tier
+  `EvictionPolicy` baked into the response. `Validate()` runs
+  on construction so a typo in a hard-coded entry can't ship.
+  `EligibleForTier(tier)` returns the smallest model whose
+  `tier_floor` ≤ the device's reported tier.
+  `GET /v1/models/catalog` is the wire endpoint; the contract
+  is documented in `docs/contracts/bonsai-integration.md`.
+- **Eviction policy (`internal/shard/eviction.go`):**
+  `EvictionPolicy` carries `MaxShardSizeMB`,
+  `MinFreeMemoryMB`, and `ThermalEvictMultiplier`;
+  `ShouldEvict(EvictionInputs) EvictionDecision` is a pure
+  function returning a stable reason
+  (`unknown_tier` / `shard_too_large` / `memory_pressure` / `keep`).
+  `DefaultEvictionPolicies()` ships baseline policies for Low /
+  Mid / High; the policies are part of the catalog response so
+  they can be tuned server-side without an on-device release.
+
+### Tech choices added in Phase 8 (Bonsai contract)
+
+- **Bonsai benchmark contract
+  (`tests/benchmark/bonsai_contract_test.go`):**
+  `BonsaiContract` is a Go-side slice of `TierBenchmark` rows
+  defining min tokens/sec, max first-token latency, and max
+  memory per tier. `SatisfiesContract(tier, tps, ttft, mem)`
+  is the helper the on-device repos (`kennguy3n/knowledge`,
+  `kennguy3n/llama.cpp`) call against measured numbers; an
+  unknown tier or any out-of-envelope tuple returns a stable
+  failure label so on-device CI can fail fast with a clear
+  diagnostic.
+
+---
+
+## 10. Deployment & Scaling
+
+### 10.1 Kubernetes deployments
+
+Both Go binaries (`context-engine-api`, `context-engine-ingest`)
+and the three Python sidecars (`docling`, `embedding`, `memory`)
+are deployed as Kubernetes `Deployment`s with explicit
+`resources.requests` and `resources.limits`. The HPA manifests
+in [`deploy/`](../deploy/) target each deployment by name:
+
+| Manifest | Target | Replicas (min/max) | Trigger metric |
+|----------|--------|--------------------|----------------|
+| `deploy/hpa-api.yaml` | `context-engine-api` | 2 / 20 | CPU 70% + `context_engine_api_requests_per_second` |
+| `deploy/hpa-ingest.yaml` | `context-engine-ingest` | 2 / 16 | CPU 70% + `context_engine_kafka_consumer_lag` |
+| `deploy/hpa-docling.yaml` | `docling` | 2 / 12 | CPU 80% + memory 80% + `docling_parse_queue_depth` |
+| `deploy/hpa-embedding.yaml` | `embedding` | 2 / 16 | CPU 80% + memory 85% + `embedding_queue_depth` |
+
+Each manifest sets explicit
+`behavior.scaleUp.stabilizationWindowSeconds` (60 s) and
+`behavior.scaleDown.stabilizationWindowSeconds` (300 s) so the
+autoscaler does not thrash under bursty traffic. The custom
+metrics are exposed on the deployment's `/metrics` endpoint and
+scraped by the cluster's Prometheus adapter, which projects them
+into the Kubernetes `external.metrics.k8s.io` / `pods/` API the
+HPA consumes.
+
+### 10.2 Resource sizing guidance
+
+The defaults below are starting points; tune against measured
+load.
+
+| Workload | CPU request | CPU limit | Memory request | Memory limit | Notes |
+|----------|-------------|-----------|----------------|--------------|-------|
+| `context-engine-api` | 500m | 2 | 512 Mi | 1 Gi | Gin handlers + Qdrant / FalkorDB / Mem0 fan-out; the long pole is the embedder gRPC call so memory stays modest |
+| `context-engine-ingest` | 500m | 2 | 512 Mi | 1 Gi | Kafka consumer + 4-stage pipeline; bump for high-fanout connectors |
+| `docling` | 1 | 4 | 1 Gi | 4 Gi | Parsing is CPU-heavy; PDF / DOCX peaks dominate |
+| `embedding` | 2 | 8 | 2 Gi | 8 Gi | sentence-transformers loads a 90 MB model; memory floor is 2 Gi |
+| `memory` (Mem0) | 200m | 1 | 256 Mi | 1 Gi | Lightweight gRPC wrapper |
+
+The Postgres pool size (`CONTEXT_ENGINE_PG_MAX_OPEN`) and the
+Redis pool size (`CONTEXT_ENGINE_REDIS_POOL_SIZE`) should track
+the API binary's CPU limit (one connection per ~125m of CPU
+limit is a defensible starting point); the Qdrant pool
+(`CONTEXT_ENGINE_QDRANT_POOL_SIZE`) tracks the expected QPS
+divided by the average vector-search latency.
+
+### 10.3 Probes and readiness
+
+Both Go binaries expose `/healthz` (cheap liveness) and
+`/readyz` (dependency-aware readiness) on the same listener as
+`/metrics`. The API binary checks Postgres + Redis + Qdrant; the
+ingest binary checks Postgres + Redis + every Kafka broker via
+`net.DialTimeout`. A single Kubernetes `livenessProbe` /
+`readinessProbe` selector covers both binaries.
+
+### 10.4 Stage-aware concurrency
+
+The ingest binary's per-stage worker pools
+(`pipeline.StageConfig`) live alongside the deployment's CPU
+request: the four `*Workers` env vars
+(`CONTEXT_ENGINE_FETCH_WORKERS`,
+`CONTEXT_ENGINE_PARSE_WORKERS`,
+`CONTEXT_ENGINE_EMBED_WORKERS`,
+`CONTEXT_ENGINE_STORE_WORKERS`) crank up parallelism on the
+goroutine side without pushing the pod to a higher replica
+count. The embedder is normally the long-pole, so
+`EMBED_WORKERS` is the first knob to turn.
+
+### 10.5 Rollout strategy
+
+API binary deployments use `RollingUpdate` with `maxSurge: 1`
+and `maxUnavailable: 0` so retrieval availability stays
+constant during a release. Ingest deployments allow
+`maxUnavailable: 1` since Kafka consumer rebalances are
+sticky-tuned (`pipeline.ConsumerTuning`) and a brief partition
+re-assignment is acceptable.
+
+The Python sidecars use `RollingUpdate` with `maxSurge: 1` and
+`maxUnavailable: 0` plus a 30 s `terminationGracePeriodSeconds`
+so an in-flight gRPC call can drain.
+
+### 10.6 On-device tier scaling
+
+The on-device tier does not scale horizontally — each device
+runs its own runtime. Scaling concerns instead surface as:
+
+1. **Model catalog updates** — `GET /v1/models/catalog` ships a
+   per-tier eviction policy (`eviction_config`) so server
+   operators can tune shard retention without an on-device
+   release. See `docs/contracts/bonsai-integration.md`.
+2. **Sync schedule updates** — `GET /v1/sync/schedule` lets the
+   server shorten polling during a heavy reindex (e.g. when a
+   tenant adds a new connector with millions of documents) so
+   the on-device shard catches up faster, then relax once the
+   catch-up is done. See `docs/contracts/background-sync.md`.
+3. **Benchmark contract** — `BonsaiContract` defines the
+   per-tier performance floor each on-device measurement must
+   clear; failing tiers stop publishing the affected platform
+   release.

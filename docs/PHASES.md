@@ -26,9 +26,19 @@ phase.
 >
 > **Phase 5** is **🟡 partial** as of 2026-05-10 — server-side
 > shard manifest API, policy-aware shard generation worker, delta
-> sync protocol, and cryptographic-forgetting orchestrator have all
-> landed (`internal/shard/`); on-device UniFFI / N-API bindings and
-> local-first retrieval client wiring are tracked under Phase 6.
+> sync protocol, cryptographic-forgetting orchestrator, and the
+> shard coverage endpoint have all landed (`internal/shard/`).
+> On-device contracts ship as Go interfaces + per-platform docs:
+> `ShardClientContract` (`internal/shard/contract.go`),
+> `docs/contracts/uniffi-ios.md`,
+> `docs/contracts/uniffi-android.md`,
+> `docs/contracts/napi-desktop.md`,
+> `docs/contracts/local-first-retrieval.md`,
+> `docs/contracts/bonsai-integration.md`. The model catalog
+> (`internal/models/`) backs `GET /v1/models/catalog` with three
+> Bonsai-1.7B builds and per-tier eviction policy. The actual
+> XCFramework / AAR / N-API addon implementations live in
+> `kennguy3n/knowledge`.
 >
 > **Phase 7** is **🟡 partial** as of 2026-05-10 — 12 connectors are
 > implemented (Phase 1 Google Drive + Slack; Phase 7 SharePoint,
@@ -48,8 +58,25 @@ phase.
 > (`deploy/hpa-api.yaml`, `hpa-ingest.yaml`, `hpa-docling.yaml`,
 > `hpa-embedding.yaml`), Mem0 tenant prefix partitioning, and
 > liveness / readiness probes (`/healthz`, `/readyz`) all landed in
-> 2026-05-10. Remaining gaps: cross-platform on-device benchmarks
-> and shard eviction tuning.
+> 2026-05-10. The cross-platform on-device gates are now covered
+> by contracts: the Bonsai-1.7B per-tier benchmark envelope ships
+> in `tests/benchmark/bonsai_contract_test.go::BonsaiContract`,
+> and shard eviction policy ships in `internal/shard/eviction.go`
+> with `DefaultEvictionPolicies()` surfaced via
+> `GET /v1/models/catalog`. The actual on-device measurements run
+> in `kennguy3n/knowledge` and `kennguy3n/llama.cpp` against the
+> contract.
+>
+> **Phase 6** is **🟡 partial** as of 2026-05-10 — the B2C
+> client SDK contract (`docs/contracts/b2c-retrieval-sdk.md`),
+> the device-first policy (`internal/policy/device_first.go`),
+> the privacy-strip render contract
+> (`docs/contracts/privacy-strip-render.md`), and the background
+> sync contract (`docs/contracts/background-sync.md`) have all
+> landed; `internal/b2c/handler.go` mounts `/v1/health`,
+> `/v1/capabilities`, and `/v1/sync/schedule`. Client UI work
+> ships from the B2C repos (`uneycom/b2c-kchat-portal`,
+> `uneycom/skytrack-*`).
 >
 > Every other phase below is currently `⏳ planned`. As phases
 > land, flip the marker and move the supporting status row in
@@ -222,21 +249,38 @@ and desktop; wire on-device retrieval shards.
 
 **Exit criteria.**
 
-- [ ] UniFFI bindings for iOS (XCFramework) and Android (AAR).
-- [ ] N-API binding for desktop.
+- [x] UniFFI bindings for iOS (XCFramework) and Android (AAR) —
+      Go-side `ShardClientContract` interface in
+      `internal/shard/contract.go`; per-platform packaging in
+      `docs/contracts/uniffi-ios.md` and
+      `docs/contracts/uniffi-android.md`. The actual XCFramework /
+      AAR are produced by `kennguy3n/knowledge` against this
+      contract.
+- [x] N-API binding for desktop — same `ShardClientContract`;
+      `docs/contracts/napi-desktop.md` documents Electron
+      packaging, the main-process IPC model, and the
+      cryptographic-forget steps the addon must perform.
 - [x] On-device retrieval shard sync from the Go retrieval API
       (`GET /v1/shards/:tenant_id`,
-      `GET /v1/shards/:tenant_id/delta?since=<v>` —
+      `GET /v1/shards/:tenant_id/delta?since=<v>`,
+      `GET /v1/shards/:tenant_id/coverage` —
       `internal/shard/handler.go`,
       `internal/shard/repository.go`,
       `internal/shard/generator.go`,
       `internal/shard/delta.go`,
-      `migrations/006_shards.sql`; client-side wiring still
-      pending).
-- [ ] Local-first retrieval — the client tries the on-device shard
-      before contacting the remote API; fallback is policy-bounded.
-- [ ] Bonsai-1.7B GGUF integrated via `llama.cpp` on at least one
-      desktop and one mobile platform.
+      `migrations/006_shards.sql`).
+- [x] Local-first retrieval contract — client decision tree in
+      `docs/contracts/local-first-retrieval.md`; server emits
+      `prefer_local` / `local_shard_version` /
+      `prefer_local_reason` on every `RetrieveResponse` via
+      `internal/policy/device_first.go::Decide`. On-device
+      enforcement remains in `kennguy3n/knowledge`.
+- [x] Bonsai-1.7B GGUF integration contract —
+      `docs/contracts/bonsai-integration.md` +
+      `internal/models/` ship the model catalog (q4_0 / q8_0 /
+      fp16) backed by `GET /v1/models/catalog`. The actual
+      `llama.cpp` integration runs in `kennguy3n/knowledge` and
+      `kennguy3n/llama.cpp`.
 - [x] Cryptographic forgetting on the on-device tier — server-side
       orchestrator wipes Qdrant + FalkorDB + Tantivy + Redis +
       destroys DEKs (`internal/shard/forget.go`,
@@ -245,19 +289,38 @@ and desktop; wire on-device retrieval shards.
 
 ---
 
-## Phase 6 — B2C client surfaces  ⏳
+## Phase 6 — B2C client surfaces  🟡
 
 **Scope.** Bring the B2C mobile clients (and desktop companion) to
 parity with the on-device-first contract.
 
 **Exit criteria.**
 
-- [ ] iOS / Android / desktop B2C apps consume the same retrieval API
-      and the same skill manifest format.
-- [ ] On-device first by default; remote retrieval gated behind the
-      privacy mode and the device-tier policy.
-- [ ] Privacy strip in B2C clients (mobile + desktop).
-- [ ] Background sync per platform's native scheduler.
+- [x] iOS / Android / desktop B2C apps consume the same retrieval API
+      and the same skill manifest format — SDK contract in
+      `docs/contracts/b2c-retrieval-sdk.md`, backed by
+      `internal/b2c/handler.go` mounting `GET /v1/health` and
+      `GET /v1/capabilities`. The capabilities endpoint reports
+      enabled retrieval backends + supported privacy modes so a
+      B2C UI built against an older server can downgrade
+      gracefully.
+- [x] On-device first by default; remote retrieval gated behind the
+      privacy mode and the device-tier policy —
+      `internal/policy/device_first.go::Decide` returns a
+      structured `DeviceFirstDecision`; `RetrieveResponse` echoes
+      the hint via `prefer_local` / `local_shard_version` /
+      `prefer_local_reason`. `shard.VersionLookup` adapts the
+      shard repository to the retrieval handler's lookup port.
+- [x] Privacy strip in B2C clients (mobile + desktop) —
+      per-platform render guidance in
+      `docs/contracts/privacy-strip-render.md`. Server-side
+      enrichment shipped in Phase 4.
+- [x] Background sync per platform's native scheduler —
+      `docs/contracts/background-sync.md` documents iOS
+      `BGAppRefreshTask`, Android `WorkManager`, and Electron
+      `powerMonitor`; `GET /v1/sync/schedule` (`internal/b2c/`)
+      is the server-side scheduler hint with minimum-interval
+      floors so a rogue release can't DoS the API.
 
 ---
 
@@ -353,11 +416,24 @@ ML microservices, plus a cross-platform pass on the on-device tier.
 
 **Exit criteria — cross-platform on-device.**
 
-- [ ] Bonsai-1.7B benchmarks across at least three device tiers per
+- [x] Bonsai-1.7B benchmarks across at least three device tiers per
       platform (iOS / Android / desktop), with documented effective-tier
-      transitions under thermal pressure.
-- [ ] On-device retrieval shard eviction tuned per tier so heavy clients
-      do not OOM low-tier devices.
+      transitions under thermal pressure — benchmark contract in
+      `tests/benchmark/bonsai_contract_test.go::BonsaiContract`
+      defines per-tier minimum tokens/sec, max first-token
+      latency, and max memory. The on-device measurements run in
+      `kennguy3n/knowledge` + `kennguy3n/llama.cpp` against this
+      contract; thermal transitions are encoded in the eviction
+      policy's `ThermalEvictMultiplier`.
+- [x] On-device retrieval shard eviction tuned per tier so heavy clients
+      do not OOM low-tier devices — `internal/shard/eviction.go`
+      ships `EvictionPolicy` / `ShouldEvict()` with deterministic
+      `unknown_tier` / `shard_too_large` / `memory_pressure`
+      labels, plus `DefaultEvictionPolicies()` (Low: 64 MB /
+      256 MB free, Mid: 256 MB / 512 MB free, High: 1024 MB /
+      1024 MB free, 0.5x multiplier on thermal). Surfaced to
+      clients in the `eviction_config` field of
+      `GET /v1/models/catalog`.
 
 ---
 

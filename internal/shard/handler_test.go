@@ -351,9 +351,150 @@ func TestHandler_Forget_PropagatesError(t *testing.T) {
 	}
 }
 
+// fakeCoverageRepo extends fakeRepo with a CoverageRepo so the
+// coverage endpoint test can drive the corpus-size denominator.
+type fakeCoverageRepo struct {
+	fakeRepo
+	corpus    int
+	corpusErr error
+}
+
+func (r *fakeCoverageRepo) CorpusChunkCount(_ context.Context, _ shard.ScopeFilter) (int, error) {
+	if r.corpusErr != nil {
+		return 0, r.corpusErr
+	}
+	return r.corpus, nil
+}
+
+func TestHandler_Coverage_NoShard(t *testing.T) {
+	t.Parallel()
+	r := newTestHandler(t, &fakeRepo{}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/shards/tenant-a/coverage?privacy_mode=internal", nil)
+	req.Header.Set("X-Tenant-ID", "tenant-a")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body shard.CoverageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Reason != "no_shard" {
+		t.Fatalf("reason=%q", body.Reason)
+	}
+	if body.IsAuthoritative {
+		t.Fatalf("expected non-authoritative")
+	}
+}
+
+func TestHandler_Coverage_RequiresPrivacyMode(t *testing.T) {
+	t.Parallel()
+	r := newTestHandler(t, &fakeRepo{}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/shards/tenant-a/coverage", nil)
+	req.Header.Set("X-Tenant-ID", "tenant-a")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandler_Coverage_TenantMismatch(t *testing.T) {
+	t.Parallel()
+	r := newTestHandler(t, &fakeRepo{}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/shards/tenant-a/coverage?privacy_mode=internal", nil)
+	req.Header.Set("X-Tenant-ID", "tenant-b")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+}
+
+func TestHandler_Coverage_NoCoverageRepo(t *testing.T) {
+	t.Parallel()
+	repo := &fakeRepo{
+		manifests: map[string]*shard.ShardManifest{
+			"01": {ID: "01", TenantID: "tenant-a", PrivacyMode: "internal", ShardVersion: 7, ChunksCount: 80, Status: shard.ShardStatusReady},
+		},
+	}
+	r := newTestHandler(t, repo, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/shards/tenant-a/coverage?privacy_mode=internal", nil)
+	req.Header.Set("X-Tenant-ID", "tenant-a")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body shard.CoverageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.ShardChunks != 80 {
+		t.Fatalf("shard_chunks=%d", body.ShardChunks)
+	}
+	if body.IsAuthoritative {
+		t.Fatalf("expected non-authoritative when CoverageRepo is missing")
+	}
+	if body.Reason != "corpus_size_unknown" {
+		t.Fatalf("reason=%q", body.Reason)
+	}
+}
+
+func TestHandler_Coverage_AuthoritativeRatio(t *testing.T) {
+	t.Parallel()
+	repo := &fakeCoverageRepo{
+		fakeRepo: fakeRepo{
+			manifests: map[string]*shard.ShardManifest{
+				"01": {ID: "01", TenantID: "tenant-a", PrivacyMode: "internal", ShardVersion: 4, ChunksCount: 60, Status: shard.ShardStatusReady},
+			},
+		},
+		corpus: 200,
+	}
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		if v := c.Request.Header.Get("X-Tenant-ID"); v != "" {
+			c.Set(audit.TenantContextKey, v)
+		}
+		c.Next()
+	})
+	h, herr := shard.NewHandler(shard.HandlerConfig{Repo: repo})
+	if herr != nil {
+		t.Fatalf("NewHandler: %v", herr)
+	}
+	rg := engine.Group("")
+	h.Register(rg)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/shards/tenant-a/coverage?privacy_mode=internal", nil)
+	req.Header.Set("X-Tenant-ID", "tenant-a")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body shard.CoverageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.ShardChunks != 60 || body.CorpusChunks != 200 {
+		t.Fatalf("counts: shard=%d corpus=%d", body.ShardChunks, body.CorpusChunks)
+	}
+	want := 60.0 / 200.0
+	if body.CoverageRatio < want-1e-9 || body.CoverageRatio > want+1e-9 {
+		t.Fatalf("ratio: got %v want %v", body.CoverageRatio, want)
+	}
+	if !body.IsAuthoritative {
+		t.Fatalf("expected authoritative")
+	}
+}
+
 // Compile-time checks that the fixture satisfies the production
 // interface — keeps the test honest if HandlerRepo grows.
 var _ shard.HandlerRepo = (*fakeRepo)(nil)
+var _ shard.HandlerRepo = (*fakeCoverageRepo)(nil)
+var _ shard.CoverageRepo = (*fakeCoverageRepo)(nil)
 
 func TestHandler_NewHandler_RequiresRepo(t *testing.T) {
 	t.Parallel()
