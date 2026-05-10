@@ -16,6 +16,10 @@ COPY services/gen_protos.sh /srv/services/gen_protos.sh
 RUN bash /srv/services/gen_protos.sh && \
     test -f /srv/services/_proto/graphrag/v1/graphrag_pb2.py
 
+# Shared Prometheus scaffolding (`_metrics`); kept available so any
+# future graphrag-server import resolves without a Dockerfile change.
+COPY services/_metrics.py /srv/services/_metrics.py
+
 COPY services/graphrag /srv/services/graphrag
 
 ENV PYTHONPATH=/srv/services

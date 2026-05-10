@@ -20,6 +20,10 @@ COPY services/gen_protos.sh /srv/services/gen_protos.sh
 RUN bash /srv/services/gen_protos.sh && \
     test -f /srv/services/_proto/embedding/v1/embedding_pb2.py
 
+# Shared Prometheus scaffolding imported as `_metrics` from the
+# embedding server (PYTHONPATH=/srv/services).
+COPY services/_metrics.py /srv/services/_metrics.py
+
 COPY services/embedding /srv/services/embedding
 
 ENV PYTHONPATH=/srv/services

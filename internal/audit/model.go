@@ -48,6 +48,21 @@ const (
 	ActionTenantDeletionRequested  Action = "tenant.deletion_requested"
 	ActionTenantDeleted            Action = "tenant.deleted"
 	ActionReindexRequested         Action = "reindex.requested"
+	// Round-5 admin lifecycle additions.
+	ActionSourceTokenRefreshed     Action = "source.token_refreshed"
+	ActionSourceCredentialExpiring Action = "source.credential_expiring"
+	ActionSourceCredentialExpired  Action = "source.credential_expired"
+	ActionSourceBackfillCompleted  Action = "source.backfill_completed"
+	ActionWebhookReceived          Action = "webhook.received"
+	ActionWebhookProcessed         Action = "webhook.processed"
+	ActionWebhookFailed            Action = "webhook.failed"
+	ActionRetrievalFeedback        Action = "retrieval.feedback"
+	ActionPolicyRolledBack         Action = "policy.rolled_back"
+	ActionTenantExportRequested    Action = "tenant.export_requested"
+	ActionTenantExportCompleted    Action = "tenant.export_completed"
+	ActionIndexAutoReindex         Action = "index.auto_reindex_triggered"
+	ActionConnectorPreviewed       Action = "connector.previewed"
+	ActionDLQReplayedBatch         Action = "dlq.replayed_batch"
 )
 
 // AuditLog is a single audit event. The table is append-only — there is

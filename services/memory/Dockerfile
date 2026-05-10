@@ -19,6 +19,10 @@ COPY services/gen_protos.sh /srv/services/gen_protos.sh
 RUN bash /srv/services/gen_protos.sh && \
     test -f /srv/services/_proto/memory/v1/memory_pb2.py
 
+# Shared Prometheus scaffolding (`_metrics`); kept available so any
+# future memory-server import resolves without a Dockerfile change.
+COPY services/_metrics.py /srv/services/_metrics.py
+
 COPY services/memory /srv/services/memory
 
 ENV PYTHONPATH=/srv/services

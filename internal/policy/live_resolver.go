@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
 )
@@ -82,12 +83,49 @@ func (r *LiveResolverGORM) Resolve(ctx context.Context, tenantID, channelID stri
 		return PolicySnapshot{}, fmt.Errorf("policy: load recipient rules: %w", err)
 	}
 
+	namespaces, err := loadNamespacePolicies(t, tenantID)
+	if err != nil {
+		return PolicySnapshot{}, fmt.Errorf("policy: load namespace policies: %w", err)
+	}
+
 	return PolicySnapshot{
 		EffectiveMode:      effective,
 		ACL:                acl,
 		Recipient:          recipient,
 		DenyLocalRetrieval: channelDenyLocal,
+		NamespacePolicies:  namespaces,
 	}, nil
+}
+
+// loadNamespacePolicies returns the per-namespace privacy mode
+// overrides for tenantID. The map is keyed by namespace_id and the
+// value is the validated PrivacyMode pulled from the
+// namespace_policies table (Round-5 Task 8). A row with an unknown
+// privacy_mode column is silently skipped — the strictest-wins
+// merge already guarantees that the absence of a known override
+// cannot widen policy.
+func loadNamespacePolicies(tx *gorm.DB, tenantID string) (map[string]PrivacyMode, error) {
+	var rows []namespacePolicyRow
+	err := tx.Where("tenant_id = ?", tenantID).Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]PrivacyMode, len(rows))
+	for _, r := range rows {
+		mode, ok := ParsePrivacyMode(r.PrivacyMode)
+		if !ok {
+			continue
+		}
+		ns := strings.TrimRight(r.NamespaceID, " ")
+		if ns == "" {
+			continue
+		}
+		out[ns] = mode
+	}
+	return out, nil
 }
 
 // loadTenantMode returns the privacy mode for tenantID. A missing

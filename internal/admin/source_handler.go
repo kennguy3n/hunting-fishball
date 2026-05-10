@@ -234,15 +234,22 @@ func (h *Handler) list(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing tenant context"})
 		return
 	}
-	out, err := h.cfg.Repo.List(c.Request.Context(), ListFilter{
+	limit, err := parsePageLimit(c.Query("limit"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	res, err := h.cfg.Repo.List(c.Request.Context(), ListFilter{
 		TenantID: tenantID,
 		Status:   SourceStatus(c.Query("status")),
+		Cursor:   c.Query("cursor"),
+		PageSize: limit,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": out})
+	c.JSON(http.StatusOK, gin.H{"items": res.Items, "next_cursor": res.NextCursor})
 }
 
 func (h *Handler) get(c *gin.Context) {

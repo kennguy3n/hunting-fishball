@@ -82,34 +82,67 @@ func (r *SourceRepository) Get(ctx context.Context, tenantID, id string) (*Sourc
 type ListFilter struct {
 	TenantID string
 	Status   SourceStatus
+	// PageSize is the soft cap on returned rows (default 50, max
+	// 200). Mirrors the audit / DLQ pagination shape so callers
+	// can use the same client logic across the admin surface.
 	PageSize int
+	// Cursor is the opaque page-cursor returned by the previous
+	// call's NextCursor (empty for the first page). For the
+	// sources list we use the row id directly: rows are ordered
+	// id DESC, so a cursor of "01XYZ" returns id < "01XYZ".
+	Cursor string
 }
 
-// List returns sources for tenantID, ordered by id DESC.
-func (r *SourceRepository) List(ctx context.Context, f ListFilter) ([]Source, error) {
-	if f.TenantID == "" {
-		return nil, errors.New("admin: ListFilter.TenantID is required")
-	}
-	pageSize := f.PageSize
-	if pageSize <= 0 {
-		pageSize = 50
-	}
-	if pageSize > 200 {
-		pageSize = 200
-	}
+// ListResult bundles a page of rows with the cursor a caller passes
+// back to fetch the next page. Empty NextCursor means no more pages.
+type ListResult struct {
+	Items      []Source
+	NextCursor string
+}
 
+// effectivePageSize clamps PageSize to the documented [1, 200] range
+// and falls back to 50 when unset. Exposed for handler-side reuse.
+func effectivePageSize(requested int) int {
+	if requested <= 0 {
+		return 50
+	}
+	if requested > 200 {
+		return 200
+	}
+	return requested
+}
+
+// List returns one page of sources for tenantID, ordered by id DESC,
+// with a cursor for the subsequent page.
+//
+// The cursor is the id of the last row on the current page. Reads
+// `pageSize+1` rows so we can detect whether another page exists
+// without an extra COUNT(*) round-trip.
+func (r *SourceRepository) List(ctx context.Context, f ListFilter) (ListResult, error) {
+	if f.TenantID == "" {
+		return ListResult{}, errors.New("admin: ListFilter.TenantID is required")
+	}
+	pageSize := effectivePageSize(f.PageSize)
 	q := r.db.WithContext(ctx).
 		Where("tenant_id = ?", f.TenantID).
 		Order("id DESC").
-		Limit(pageSize)
+		Limit(pageSize + 1)
 	if f.Status != "" {
 		q = q.Where("status = ?", f.Status)
 	}
+	if f.Cursor != "" {
+		q = q.Where("id < ?", f.Cursor)
+	}
 	var out []Source
 	if err := q.Find(&out).Error; err != nil {
-		return nil, fmt.Errorf("admin: list sources: %w", err)
+		return ListResult{}, fmt.Errorf("admin: list sources: %w", err)
 	}
-	return out, nil
+	res := ListResult{Items: out}
+	if len(out) > pageSize {
+		res.Items = out[:pageSize]
+		res.NextCursor = res.Items[len(res.Items)-1].ID
+	}
+	return res, nil
 }
 
 // UpdatePatch describes the subset of fields a PATCH request may
@@ -170,6 +203,83 @@ func (r *SourceRepository) Update(ctx context.Context, tenantID, id string, patc
 	}
 
 	return r.Get(ctx, tenantID, id)
+}
+
+// GetByID resolves a source by its primary key alone — without
+// the usual tenant_id scoping. Used only by the inbound webhook
+// router (Round-5 Task 5), where the upstream SaaS caller doesn't
+// know which tenant the source belongs to. The handler
+// re-derives the tenant from the returned row and never trusts
+// any tenant value from the request.
+func (r *SourceRepository) GetByID(ctx context.Context, id string) (*Source, error) {
+	if id == "" {
+		return nil, ErrSourceNotFound
+	}
+	var s Source
+	err := r.db.WithContext(ctx).Where("id = ?", id).First(&s).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrSourceNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("admin: get source by id: %w", err)
+	}
+	return &s, nil
+}
+
+// ListAllActive returns every active source across all tenants in
+// id-ascending order. Used by background workers (token refresh,
+// credential expiry monitor) that intentionally span tenants. The
+// HTTP admin surface NEVER calls this — request-scoped reads must
+// always go through List which enforces tenant scoping.
+func (r *SourceRepository) ListAllActive(ctx context.Context) ([]Source, error) {
+	var out []Source
+	if err := r.db.WithContext(ctx).
+		Where("status = ?", string(SourceStatusActive)).
+		Order("id ASC").
+		Find(&out).Error; err != nil {
+		return nil, fmt.Errorf("admin: list all active sources: %w", err)
+	}
+	return out, nil
+}
+
+// ListAllForTenant returns every source row for tenantID regardless
+// of status. Used by the GDPR data-export worker (Round-5 Task 7)
+// which needs to dump connector metadata for the data subject; the
+// HTTP admin surface still goes through List which paginates and
+// excludes terminal-status rows by default.
+func (r *SourceRepository) ListAllForTenant(ctx context.Context, tenantID string) ([]Source, error) {
+	if tenantID == "" {
+		return nil, errors.New("admin: empty tenant_id")
+	}
+	var out []Source
+	if err := r.db.WithContext(ctx).
+		Where("tenant_id = ?", tenantID).
+		Order("id ASC").
+		Find(&out).Error; err != nil {
+		return nil, fmt.Errorf("admin: list tenant sources: %w", err)
+	}
+	return out, nil
+}
+
+// UpdateConfig overwrites the JSONB config blob and bumps updated_at
+// for (tenant_id, id). Used by token refresh and credential expiry
+// workers that need to write back the refreshed access_token without
+// changing any other column on the row.
+func (r *SourceRepository) UpdateConfig(ctx context.Context, tenantID, id string, cfg JSONMap) error {
+	if tenantID == "" || id == "" {
+		return ErrSourceNotFound
+	}
+	res := r.db.WithContext(ctx).
+		Model(&Source{}).
+		Where("tenant_id = ? AND id = ? AND status NOT IN ?", tenantID, id, []string{string(SourceStatusRemoving), string(SourceStatusRemoved)}).
+		Updates(map[string]any{"config": cfg, "updated_at": time.Now().UTC()})
+	if res.Error != nil {
+		return fmt.Errorf("admin: update source config: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrSourceNotFound
+	}
+	return nil
 }
 
 // MarkRemoving flips a source to status=removing. Idempotent — a

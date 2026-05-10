@@ -65,6 +65,15 @@ func (s *memDLQStore) List(_ context.Context, f pipeline.DLQListFilter) ([]pipel
 		if f.OriginalTopic != "" && r.OriginalTopic != f.OriginalTopic {
 			continue
 		}
+		if f.SourceID != "" && r.SourceID != f.SourceID {
+			continue
+		}
+		if !f.MinCreatedAt.IsZero() && r.CreatedAt.Before(f.MinCreatedAt) {
+			continue
+		}
+		if !f.MaxCreatedAt.IsZero() && !r.CreatedAt.Before(f.MaxCreatedAt) {
+			continue
+		}
 		if !f.IncludeReplayed && r.ReplayedAt != nil {
 			continue
 		}

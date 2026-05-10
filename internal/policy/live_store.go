@@ -203,6 +203,74 @@ func (r *channelPolicyRow) AfterFind(_ *gorm.DB) error {
 	return nil
 }
 
+// namespacePolicyRow is the GORM model for namespace_policies
+// (migrations/016_namespace_policies.sql). Round-5 Task 8 layers
+// these rows underneath tenant_policies + channel_policies; the
+// retrieval handler merges the three via
+// EffectiveModeForNamespace.
+type namespacePolicyRow struct {
+	TenantID    string    `gorm:"type:varchar(26);primaryKey;column:tenant_id"`
+	NamespaceID string    `gorm:"type:varchar(128);primaryKey;column:namespace_id"`
+	PrivacyMode string    `gorm:"type:varchar(32);not null;column:privacy_mode"`
+	CreatedAt   time.Time `gorm:"not null;default:now();column:created_at"`
+	UpdatedAt   time.Time `gorm:"not null;default:now();column:updated_at"`
+}
+
+func (namespacePolicyRow) TableName() string { return "namespace_policies" }
+
+// AfterFind trims trailing CHAR-padding spaces. Mirrors
+// channelPolicyRow.AfterFind so namespace ID lookups behave the
+// same on Postgres and SQLite-backed fixtures.
+func (r *namespacePolicyRow) AfterFind(_ *gorm.DB) error {
+	r.NamespaceID = strings.TrimRight(r.NamespaceID, " ")
+	return nil
+}
+
+// UpsertNamespacePolicy installs or updates a per-namespace privacy
+// mode override. Round-5 Task 8 surfaces this through the admin
+// handler; the policy promotion workflow does NOT touch namespace
+// rows because they are managed independently of channel-scoped
+// drafts. Tenant-scoped: a tenantA admin cannot upsert tenantB's
+// row.
+func (s *LiveStoreGORM) UpsertNamespacePolicy(ctx context.Context, tenantID, namespaceID string, mode PrivacyMode) error {
+	if tenantID == "" {
+		return errors.New("policy: UpsertNamespacePolicy requires tenantID")
+	}
+	if namespaceID == "" {
+		return errors.New("policy: UpsertNamespacePolicy requires namespaceID")
+	}
+	if !IsValidPrivacyMode(string(mode)) {
+		return fmt.Errorf("policy: invalid privacy mode %q", mode)
+	}
+	row := namespacePolicyRow{
+		TenantID:    tenantID,
+		NamespaceID: namespaceID,
+		PrivacyMode: string(mode),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	return s.db.WithContext(ctx).Save(&row).Error
+}
+
+// DeleteNamespacePolicy removes the override for (tenant, namespace).
+// A missing row is not an error.
+func (s *LiveStoreGORM) DeleteNamespacePolicy(ctx context.Context, tenantID, namespaceID string) error {
+	if tenantID == "" || namespaceID == "" {
+		return errors.New("policy: DeleteNamespacePolicy requires tenantID and namespaceID")
+	}
+	return s.db.WithContext(ctx).
+		Where("tenant_id = ? AND namespace_id = ?", tenantID, namespaceID).
+		Delete(&namespacePolicyRow{}).Error
+}
+
+// ListNamespacePolicies returns every namespace override for tenantID,
+// ordered by namespace_id ASC. Used by the admin GET handler.
+func (s *LiveStoreGORM) ListNamespacePolicies(ctx context.Context, tenantID string) (map[string]PrivacyMode, error) {
+	if tenantID == "" {
+		return nil, errors.New("policy: ListNamespacePolicies requires tenantID")
+	}
+	return loadNamespacePolicies(s.db.WithContext(ctx), tenantID)
+}
+
 // aclRuleRow is the GORM model for policy_acl_rules.
 type aclRuleRow struct {
 	ID          string    `gorm:"type:char(26);primaryKey;column:id"`

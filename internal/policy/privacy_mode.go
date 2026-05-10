@@ -119,6 +119,30 @@ func EffectiveMode(tenantMode, channelMode PrivacyMode) PrivacyMode {
 	return channelMode
 }
 
+// EffectiveModeForNamespace picks the strictest of (tenant, channel,
+// namespace). When the namespace map is missing the requested key,
+// the call collapses to EffectiveMode(tenant, channel). Empty
+// namespaceID returns EffectiveMode(tenant, channel) too — the
+// retrieval pipeline emits "" for chunks that have not been
+// classified into a namespace yet, and we don't want unclassified
+// chunks to inherit an unrelated namespace's stricter setting.
+//
+// Strictest-wins is the only rule: namespace overrides can lower
+// the policy mode (no-ai over remote) but can never raise it,
+// guaranteeing that a permissive namespace key cannot widen a
+// tenant/channel policy that is already restrictive.
+func EffectiveModeForNamespace(tenantMode, channelMode PrivacyMode, namespaces map[string]PrivacyMode, namespaceID string) PrivacyMode {
+	base := EffectiveMode(tenantMode, channelMode)
+	if namespaceID == "" {
+		return base
+	}
+	nsMode, ok := namespaces[namespaceID]
+	if !ok {
+		return base
+	}
+	return EffectiveMode(base, nsMode)
+}
+
 // AllowsAtLeast reports whether `actual` is at least as permissive
 // as `required`. Used by the retrieval handler to decide whether a
 // channel's effective mode is high enough to satisfy a per-skill

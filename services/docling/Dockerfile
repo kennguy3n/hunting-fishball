@@ -22,6 +22,10 @@ COPY services/gen_protos.sh /srv/services/gen_protos.sh
 RUN bash /srv/services/gen_protos.sh && \
     test -f /srv/services/_proto/docling/v1/docling_pb2.py
 
+# Shared Prometheus scaffolding imported as `_metrics` from the
+# docling server (PYTHONPATH=/srv/services).
+COPY services/_metrics.py /srv/services/_metrics.py
+
 # Copy server code.
 COPY services/docling /srv/services/docling
 

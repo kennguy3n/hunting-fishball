@@ -124,6 +124,11 @@ alerts-check:
 	@echo "Validating Prometheus alert YAML..."
 	$(GO) run ./internal/observability/alertcheck deploy/alerts.yaml
 
+.PHONY: eval
+eval:
+	@echo "Running retrieval eval CI gate against tests/eval/golden_corpus.json..."
+	$(GO) test -tags=eval -count=1 -timeout 5m ./tests/eval/...
+
 .PHONY: fuzz
 fuzz:
 	$(GO) test -run=^$ -fuzz=. -fuzztime=30s ./internal/retrieval/...

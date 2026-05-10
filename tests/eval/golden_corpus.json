@@ -1,0 +1,141 @@
+{
+  "name": "round5-golden-corpus",
+  "tenant_id": "tenant-eval",
+  "description": "Curated retrieval gold-set used by `make eval` and the CI quality gate. Cases cover the four fan-out backends (vector / bm25 / graph / memory). expected_chunk_ids names the canonical chunk(s) every backend stub returns; expected_min_score ensures we don't silently regress on absolute relevance. backend is a documentation hint matching tests/eval/eval_ci_test.go which routes the case to the matching fake.",
+  "default_k": 5,
+  "thresholds": {
+    "min_precision_at_k": 0.6,
+    "min_recall_at_k":    0.6,
+    "min_mrr":            0.7,
+    "min_ndcg":           0.7,
+    "max_failed_cases":   2
+  },
+  "cases": [
+    {
+      "backend": "vector",
+      "query": "How do we rotate connector credentials safely?",
+      "expected_chunk_ids": ["chunk-cred-rotation-runbook"],
+      "expected_min_score": 0.6,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "vector",
+      "query": "What is the on-device shard policy for low-tier devices?",
+      "expected_chunk_ids": ["chunk-device-tier-policy"],
+      "expected_min_score": 0.55,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "vector",
+      "query": "Where does the privacy strip get rendered?",
+      "expected_chunk_ids": ["chunk-privacy-strip-render"],
+      "expected_min_score": 0.5,
+      "skill_id": "summarizer"
+    },
+    {
+      "backend": "vector",
+      "query": "How does the semantic cache key requests?",
+      "expected_chunk_ids": ["chunk-semantic-cache-key"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "vector",
+      "query": "What deadline does the retrieval fan-out apply per backend?",
+      "expected_chunk_ids": ["chunk-fanout-deadline"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "bm25",
+      "query": "Slack webhook signature verification HMAC secret",
+      "expected_chunk_ids": ["chunk-slack-webhook-hmac"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "bm25",
+      "query": "GraphRAG FalkorDB subgraph prune delete document",
+      "expected_chunk_ids": ["chunk-graphrag-prune"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "bm25",
+      "query": "Kafka consumer commit offset DLQ poison pill",
+      "expected_chunk_ids": ["chunk-dlq-poison-pill"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "bm25",
+      "query": "Postgres migration 014 tenant usage metering",
+      "expected_chunk_ids": ["chunk-tenant-usage-014"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "bm25",
+      "query": "Reciprocal rank fusion merger weights",
+      "expected_chunk_ids": ["chunk-rrf-merger"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "Which entities link a Notion page to its parent workspace?",
+      "expected_chunk_ids": ["chunk-notion-graph-parent"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "What chunks share an author with the credential rotation runbook?",
+      "expected_chunk_ids": ["chunk-cred-rotation-runbook", "chunk-cred-rotation-related"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "How are retention rules linked to namespace IDs?",
+      "expected_chunk_ids": ["chunk-retention-namespace-link"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "Which DLQ messages share a root_cause edge with index health failures?",
+      "expected_chunk_ids": ["chunk-dlq-index-edge"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "memory",
+      "query": "Remind me what we agreed about cursor pagination defaults.",
+      "expected_chunk_ids": ["chunk-mem-cursor-default"],
+      "expected_min_score": 0.55,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "memory",
+      "query": "What did Jane decide about RBAC roles last sprint?",
+      "expected_chunk_ids": ["chunk-mem-rbac-decision"],
+      "expected_min_score": 0.55,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "memory",
+      "query": "Recall the eval threshold the team committed to in the runbook.",
+      "expected_chunk_ids": ["chunk-mem-eval-thresholds"],
+      "expected_min_score": 0.55,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "vector",
+      "query": "Does the connector dry-run preview persist credentials anywhere?",
+      "expected_chunk_ids": ["chunk-dry-run-no-persist"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "bm25",
+      "query": "Idempotency key middleware Redis 24h cache POST PATCH DELETE",
+      "expected_chunk_ids": ["chunk-idempotency-middleware"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "vector",
+      "query": "How does the index watchdog auto-trigger reindex when a backend is unhealthy?",
+      "expected_chunk_ids": ["chunk-index-watchdog"],
+      "expected_min_score": 0.5
+    }
+  ]
+}

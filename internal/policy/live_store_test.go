@@ -52,6 +52,15 @@ CREATE TABLE recipient_policies (
     action      TEXT NOT NULL,
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE namespace_policies (
+    tenant_id    TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    privacy_mode TEXT NOT NULL,
+    created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, namespace_id)
+);
 `
 
 func newSQLiteLiveStore(t *testing.T) (*policy.LiveStoreGORM, *gorm.DB) {

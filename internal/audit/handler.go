@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/kennguy3n/hunting-fishball/internal/util/strutil"
 )
 
 // TenantContextKey is the Gin context key auth middleware writes the
@@ -125,16 +127,33 @@ func (h *Handler) list(c *gin.Context) {
 		}
 		filter.Until = t
 	}
-	if ps := c.Query("page_size"); ps != "" {
+	// Round-5 Task 3: accept the canonical `limit` / `cursor`
+	// query parameters in addition to the existing `page_size` /
+	// `page_token` aliases used by the audit handler since Phase 2.
+	//
+	// Fix for BUG_pr-review-job-96794a4ddef143afb93842117129455d_0002:
+	// previously this rejected `limit=0` with `n < 1`, but the DLQ
+	// and source handlers accept `limit=0` and fall back to the
+	// default page size (parsePageLimit in
+	// internal/admin/pagination.go uses `n < 0`). The audit handler
+	// now matches that contract: only strictly negative values are
+	// rejected; `limit=0` falls through and the default page size
+	// is applied by the repository layer.
+	if ps := firstNonEmpty(c.Query("limit"), c.Query("page_size")); ps != "" {
 		n, err := strconv.Atoi(ps)
-		if err != nil || n < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "page_size must be a positive integer"})
+		if err != nil || n < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a non-negative integer"})
 
 			return
 		}
-		filter.PageSize = n
+		if n > maxPageLimit {
+			n = maxPageLimit
+		}
+		if n > 0 {
+			filter.PageSize = n
+		}
 	}
-	filter.PageToken = c.Query("page_token")
+	filter.PageToken = firstNonEmpty(c.Query("cursor"), c.Query("page_token"))
 
 	res, err := h.reader.List(c.Request.Context(), filter)
 	if err != nil {
@@ -146,6 +165,7 @@ func (h *Handler) list(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"items":           res.Items,
 		"next_page_token": res.NextPageToken,
+		"next_cursor":     res.NextPageToken,
 	})
 }
 
@@ -178,6 +198,20 @@ func (h *Handler) get(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, log)
+}
+
+// maxPageLimit caps the audit list page size so a misbehaving caller
+// can't request an unbounded scan. Mirrors the cap in
+// internal/admin/pagination.go.
+const maxPageLimit = 200
+
+// firstNonEmpty is a thin alias preserving the package-private
+// call sites (cursor / page_token aliasing). The implementation
+// lives in internal/util/strutil so admin and audit handlers
+// share a single source of truth. Addresses
+// FLAG_pr-review-job-b10ff0a8305841f98c7f1ed361d5ee8b_0004.
+func firstNonEmpty(args ...string) string {
+	return strutil.FirstNonEmpty(args...)
 }
 
 // tenantIDFromContext pulls the authenticated tenant ID out of the Gin
