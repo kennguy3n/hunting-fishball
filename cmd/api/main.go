@@ -360,6 +360,13 @@ func run() error {
 	}
 	admin.NewSyncProgressHandler(syncProgressStore).Register(api)
 
+	// Round-4 Task 18: server-sent-events feed for live sync progress.
+	// Mounts GET /v1/admin/sources/:id/sync/stream and pushes
+	// discovered / processed / failed / completed events as the
+	// per-namespace counters change. Polls the same store as the
+	// snapshot endpoint at StreamPollInterval (5s).
+	admin.NewProgressStreamHandler(syncProgressStore).Register(api)
+
 	// Phase 8 / Task 7: optional reindex admin surface. Wires a Kafka
 	// SyncProducer into a pipeline.ReindexOrchestrator so an admin
 	// can re-emit EventReindex envelopes for an entire (tenant_id,
