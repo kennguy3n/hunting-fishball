@@ -242,6 +242,25 @@ func (r *SourceRepository) ListAllActive(ctx context.Context) ([]Source, error) 
 	return out, nil
 }
 
+// ListAllForTenant returns every source row for tenantID regardless
+// of status. Used by the GDPR data-export worker (Round-5 Task 7)
+// which needs to dump connector metadata for the data subject; the
+// HTTP admin surface still goes through List which paginates and
+// excludes terminal-status rows by default.
+func (r *SourceRepository) ListAllForTenant(ctx context.Context, tenantID string) ([]Source, error) {
+	if tenantID == "" {
+		return nil, errors.New("admin: empty tenant_id")
+	}
+	var out []Source
+	if err := r.db.WithContext(ctx).
+		Where("tenant_id = ?", tenantID).
+		Order("id ASC").
+		Find(&out).Error; err != nil {
+		return nil, fmt.Errorf("admin: list tenant sources: %w", err)
+	}
+	return out, nil
+}
+
 // UpdateConfig overwrites the JSONB config blob and bumps updated_at
 // for (tenant_id, id). Used by token refresh and credential expiry
 // workers that need to write back the refreshed access_token without
