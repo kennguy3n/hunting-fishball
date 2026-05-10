@@ -63,8 +63,32 @@ type DLQListFilter struct {
 	TenantID        string
 	OriginalTopic   string
 	IncludeReplayed bool
-	PageSize        int
-	PageToken       string
+	// PageSize is the LIMIT clause. <=0 falls back to
+	// DefaultDLQPageSize. Values > MaxDLQPageSize are clamped.
+	PageSize  int
+	PageToken string
+}
+
+// DefaultDLQPageSize and MaxDLQPageSize bound the LIMIT clause on
+// GET /v1/admin/dlq pagination. Defaults match the audit log surface
+// so the two admin endpoints feel consistent in the operator portal.
+const (
+	DefaultDLQPageSize = 50
+	MaxDLQPageSize     = 200
+)
+
+// EffectiveDLQPageSize resolves a requested page size against the
+// default + cap. Exported so the admin handler can compute the same
+// value the store uses, drive its fetch-N+1 trim logic from it, and
+// stay in sync if the bounds change.
+func EffectiveDLQPageSize(requested int) int {
+	if requested <= 0 {
+		return DefaultDLQPageSize
+	}
+	if requested > MaxDLQPageSize {
+		return MaxDLQPageSize
+	}
+	return requested
 }
 
 // DLQConsumerConfig configures a DLQConsumer.

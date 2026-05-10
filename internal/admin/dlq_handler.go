@@ -115,9 +115,22 @@ func (h *DLQHandler) list(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// Fetch-N+1 pagination: the store returns up to
+	// effectivePageSize+1 rows. We only emit next_page_token when the
+	// store actually returned more than the caller asked for. This
+	// avoids two prior bugs:
+	//   1) page_size unset — every non-empty response would emit a
+	//      token because the old guard short-circuited on
+	//      filter.PageSize == 0, forcing clients to make at least one
+	//      extra empty round-trip.
+	//   2) page_size set exactly to the page boundary — a last page
+	//      that ended on a multiple of pageSize would still emit a
+	//      phantom token because the old guard used >= rather than >.
+	effectivePageSize := pipeline.EffectiveDLQPageSize(filter.PageSize)
 	var nextToken string
-	if len(rows) > 0 && (filter.PageSize == 0 || len(rows) >= filter.PageSize) {
-		nextToken = rows[len(rows)-1].ID
+	if len(rows) > effectivePageSize {
+		nextToken = rows[effectivePageSize-1].ID
+		rows = rows[:effectivePageSize]
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"items":           rows,

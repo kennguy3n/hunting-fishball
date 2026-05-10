@@ -42,24 +42,25 @@ func (s *DLQStoreGORM) Insert(ctx context.Context, msg *DLQMessage) error {
 	return s.db.WithContext(ctx).Create(msg).Error
 }
 
-// List returns up to filter.PageSize rows for the supplied tenant.
+// List returns up to EffectiveDLQPageSize(filter.PageSize)+1 rows
+// for the supplied tenant. The trailing +1 is the standard
+// fetch-N+1 pagination probe: the admin handler emits a
+// next_page_token only when the store actually returned more rows
+// than the caller asked for, avoiding the phantom-token regression
+// where every full page (or every non-empty response under the
+// default page size) suggested another page existed.
+//
 // Cursor pagination is keyed on id (ULIDs are time-ordered) so the
 // admin portal can scroll cheaply.
 func (s *DLQStoreGORM) List(ctx context.Context, filter DLQListFilter) ([]DLQMessage, error) {
 	if filter.TenantID == "" {
 		return nil, errors.New("dlq store: missing tenant_id")
 	}
-	pageSize := filter.PageSize
-	if pageSize <= 0 {
-		pageSize = 50
-	}
-	if pageSize > 200 {
-		pageSize = 200
-	}
+	pageSize := EffectiveDLQPageSize(filter.PageSize)
 	q := s.db.WithContext(ctx).
 		Where("tenant_id = ?", filter.TenantID).
 		Order("id DESC").
-		Limit(pageSize)
+		Limit(pageSize + 1)
 
 	if filter.OriginalTopic != "" {
 		q = q.Where("original_topic = ?", filter.OriginalTopic)
