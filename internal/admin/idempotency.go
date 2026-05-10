@@ -247,6 +247,6 @@ func (w *capturingResponseWriter) flush() {
 	}
 	w.flushed = true
 	if w.status == 0 {
-		w.status = w.ResponseWriter.Status()
+		w.status = w.Status()
 	}
 }
