@@ -57,6 +57,13 @@ type ProgressReader interface {
 type ProgressStreamHandler struct {
 	reader ProgressReader
 
+	// Emitter, when non-nil, records the source.backfill_completed
+	// audit event and notifies cross-connection subscribers when
+	// this stream observes a 100% completion. Optional — the
+	// stream still emits the wire-level `completed` event when
+	// nil (Round-5 Task 13 SSE notification path).
+	Emitter *BackfillCompletionEmitter
+
 	// Poll overrides StreamPollInterval (test seam).
 	Poll time.Duration
 
@@ -67,6 +74,14 @@ type ProgressStreamHandler struct {
 // NewProgressStreamHandler constructs the handler.
 func NewProgressStreamHandler(reader ProgressReader) *ProgressStreamHandler {
 	return &ProgressStreamHandler{reader: reader}
+}
+
+// WithEmitter wires the backfill completion emitter for audit +
+// cross-connection notification. Returns the handler so it can be
+// chained with the existing constructor.
+func (h *ProgressStreamHandler) WithEmitter(em *BackfillCompletionEmitter) *ProgressStreamHandler {
+	h.Emitter = em
+	return h
 }
 
 // Register mounts the endpoint.
@@ -157,6 +172,9 @@ func (h *ProgressStreamHandler) stream(c *gin.Context) {
 					settledAt = time.Now()
 				} else if time.Since(settledAt) >= CompletionGracePeriod {
 					h.send(c, "completed", map[string]any{"source_id": sourceID})
+					if h.Emitter != nil {
+						_, _ = h.Emitter.Emit(c.Request.Context(), tenantID, sourceID, actorIDFromContext(c))
+					}
 					return
 				}
 			} else {
