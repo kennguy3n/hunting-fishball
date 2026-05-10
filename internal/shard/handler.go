@@ -158,6 +158,18 @@ func (h *Handler) delta(c *gin.Context) {
 		c.JSON(http.StatusOK, deltaResponse{From: since, To: 0, PrivacyMode: privacyMode})
 		return
 	}
+	// Client is already at (or somehow ahead of) the freshest
+	// manifest. Return an empty delta — emitting every chunk as an
+	// add op would force the device to redo work it has already
+	// completed and waste bandwidth.
+	if since > 0 && since >= latest {
+		c.JSON(http.StatusOK, deltaResponse{
+			From:        since,
+			To:          latest,
+			PrivacyMode: privacyMode,
+		})
+		return
+	}
 
 	currManifest, err := h.cfg.Repo.GetByVersion(c.Request.Context(), scope, latest)
 	if err != nil {
@@ -171,7 +183,7 @@ func (h *Handler) delta(c *gin.Context) {
 	}
 
 	var prevChunks []string
-	isFullSync := since == 0 || since >= latest
+	isFullSync := since == 0
 	if since > 0 && since < latest {
 		prevManifest, err := h.cfg.Repo.GetByVersion(c.Request.Context(), scope, since)
 		if err != nil && !errors.Is(err, ErrShardNotFound) {
@@ -213,7 +225,11 @@ func (h *Handler) forget(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"tenant_id": tenantID, "state": string(LifecyclePendingDeletion)})
+	// Forget runs the full workflow synchronously (mark pending →
+	// drain → sweep → mark deleted). On a nil error every tier has
+	// been swept and the lifecycle row is now `deleted`, so that's
+	// the state we surface to the caller.
+	c.JSON(http.StatusAccepted, gin.H{"tenant_id": tenantID, "state": string(LifecycleDeleted)})
 }
 
 // tenantFromPath verifies the path-supplied tenant matches the

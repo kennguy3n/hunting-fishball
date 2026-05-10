@@ -93,10 +93,11 @@ type Pool struct {
 	conns []*grpc.ClientConn
 	idx   uint64
 
-	mu       sync.Mutex
-	state    State
-	failures int
-	openedAt time.Time
+	mu            sync.Mutex
+	state         State
+	failures      int
+	openedAt      time.Time
+	trialInFlight bool // half-open: a trial call is already running
 }
 
 // New constructs a Pool by dialing Size connections to Target.
@@ -178,10 +179,19 @@ func (p *Pool) allow() bool {
 		if time.Since(p.openedAt) < p.cfg.OpenFor {
 			return false
 		}
+		// First call after OpenFor elapses transitions to
+		// half-open and claims the single trial slot.
 		p.state = StateHalfOpen
-		// The next Borrow call gets the trial.
+		p.trialInFlight = true
 		return true
 	case StateHalfOpen:
+		// While a trial is in flight every other caller is
+		// rejected — we don't want a burst to flood a recovering
+		// backend. The trial's report() releases the slot.
+		if p.trialInFlight {
+			return false
+		}
+		p.trialInFlight = true
 		return true
 	}
 	return true
@@ -190,15 +200,20 @@ func (p *Pool) allow() bool {
 func (p *Pool) report(success bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	wasHalfOpen := p.state == StateHalfOpen
 	if success {
 		p.failures = 0
 		p.state = StateClosed
+		if wasHalfOpen {
+			p.trialInFlight = false
+		}
 		return
 	}
 	p.failures++
-	if p.state == StateHalfOpen {
+	if wasHalfOpen {
 		p.state = StateOpen
 		p.openedAt = time.Now()
+		p.trialInFlight = false
 		return
 	}
 	if p.failures >= p.cfg.Threshold {

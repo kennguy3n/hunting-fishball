@@ -245,6 +245,50 @@ func TestHandler_Delta_FullSync(t *testing.T) {
 	}
 }
 
+// TestHandler_Delta_AlreadyAtLatest exercises the case where a
+// client's `since` is already at (or beyond) the freshest manifest.
+// We must NOT re-emit every chunk as an add — the device is already
+// up to date. The response should be empty operations and is_full_sync
+// false.
+func TestHandler_Delta_AlreadyAtLatest(t *testing.T) {
+	t.Parallel()
+	repo := &fakeRepo{
+		manifests: map[string]*shard.ShardManifest{
+			"v3": {ID: "v3", TenantID: "tenant-a", PrivacyMode: "internal", ShardVersion: 3, Status: shard.ShardStatusReady},
+		},
+		chunks: map[string][]string{"v3": {"a", "b", "c", "d", "e"}},
+	}
+	r := newTestHandler(t, repo, nil)
+
+	for _, since := range []string{"3", "4"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/shards/tenant-a/delta?since="+since+"&privacy_mode=internal", nil)
+		req.Header.Set("X-Tenant-ID", "tenant-a")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("since=%s status=%d body=%s", since, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			From       int64           `json:"from_version"`
+			To         int64           `json:"to_version"`
+			Operations []shard.DeltaOp `json:"operations"`
+			IsFullSync bool            `json:"is_full_sync"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.IsFullSync {
+			t.Fatalf("since=%s: expected partial (empty) sync, got full sync", since)
+		}
+		if len(resp.Operations) != 0 {
+			t.Fatalf("since=%s: expected no operations when already at latest, got %d: %+v", since, len(resp.Operations), resp.Operations)
+		}
+		if resp.To != 3 {
+			t.Fatalf("since=%s: expected to=3, got %d", since, resp.To)
+		}
+	}
+}
+
 func TestHandler_Delta_RequiresPrivacyMode(t *testing.T) {
 	t.Parallel()
 	r := newTestHandler(t, &fakeRepo{}, nil)
@@ -272,6 +316,24 @@ func TestHandler_Forget(t *testing.T) {
 	}
 	if !forget.called || forget.tenantID != "tenant-a" || forget.actor != "admin-1" {
 		t.Fatalf("forget not invoked correctly: %+v", forget)
+	}
+	// On a successful nil-error return from Forget, the orchestrator
+	// has already swept every storage tier and stamped the row as
+	// `deleted`. The handler must echo that terminal state — surfacing
+	// `pending_deletion` here would mislead clients into thinking the
+	// workflow was still running.
+	var body struct {
+		TenantID string `json:"tenant_id"`
+		State    string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.State != string(shard.LifecycleDeleted) {
+		t.Fatalf("expected state=%q, got %q", shard.LifecycleDeleted, body.State)
+	}
+	if body.TenantID != "tenant-a" {
+		t.Fatalf("expected tenant_id=tenant-a, got %q", body.TenantID)
 	}
 }
 
