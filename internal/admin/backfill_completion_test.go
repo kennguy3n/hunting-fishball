@@ -179,3 +179,101 @@ func TestBackfillCompletion_NilEmitter_NoPanic(t *testing.T) {
 	}()
 	_ = admin.NewBackfillCompletionEmitter(nil)
 }
+
+// TestBackfillCompletion_ConcurrentEmitAndUnsubscribe is the
+// regression test for BUG_pr-review-job-96794a4ddef143afb93842117129455d_0001:
+// the previous Emit implementation snapshotted e.subscribers under
+// the lock and then ranged over the snapshot unlocked. An
+// interleaved Unsubscribe could close a channel that was still in
+// the snapshot, causing the next `ch <- evt` to panic with
+// "send on closed channel".
+//
+// This test races many goroutines:
+//   - 8 subscriber goroutines that repeatedly Subscribe, drain a
+//     few events, and Unsubscribe (the unsubscribe closes the
+//     channel under the lock).
+//   - 4 emitter goroutines that call Emit on a rotating set of
+//     (tenant, source) pairs so the dedup map doesn't suppress
+//     every call.
+//
+// Run under `-race`: any send on a closed channel will panic and
+// fail the test; the race detector also flags any unsynchronized
+// access between Emit's send loop and Unsubscribe's close.
+func TestBackfillCompletion_ConcurrentEmitAndUnsubscribe(t *testing.T) {
+	t.Parallel()
+	au := &auditCapture{}
+	em := admin.NewBackfillCompletionEmitter(au)
+
+	const (
+		subscribers = 8
+		emitters    = 4
+		emissions   = 5000
+	)
+
+	stop := make(chan struct{})
+	var subWg, emWg sync.WaitGroup
+
+	// Subscriber churn: keep running until `stop` is closed.
+	for i := 0; i < subscribers; i++ {
+		subWg.Add(1)
+		go func() {
+			defer subWg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				ch := em.Subscribe()
+				// Drain a few events non-blocking, then unsubscribe.
+				// The non-blocking drain keeps each goroutine cycling
+				// quickly through Subscribe/Unsubscribe, which is
+				// where the race manifests.
+				for j := 0; j < 4; j++ {
+					select {
+					case <-ch:
+					default:
+					}
+				}
+				em.Unsubscribe(ch)
+			}
+		}()
+	}
+
+	// Emitters: each goroutine cycles through a unique (tenant,
+	// source) pair so the dedup map doesn't make every call a
+	// no-op. With the buggy implementation, one of these sends
+	// would panic on a closed channel before the loop finishes.
+	for e := 0; e < emitters; e++ {
+		emWg.Add(1)
+		go func(eid int) {
+			defer emWg.Done()
+			for k := 0; k < emissions; k++ {
+				tenant := "tenant-x"
+				src := "src-" + string(rune('a'+eid)) + "-" + itoa(k)
+				_, _ = em.Emit(context.Background(), tenant, src, "actor")
+			}
+		}(e)
+	}
+
+	// Wait for all emitters to finish, then stop subscriber churn.
+	emWg.Wait()
+	close(stop)
+	subWg.Wait()
+}
+
+// itoa is a tiny strconv-free integer formatter used by the
+// concurrency test to keep imports minimal.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}

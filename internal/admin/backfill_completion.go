@@ -71,6 +71,17 @@ func (e *BackfillCompletionEmitter) Subscribe() <-chan BackfillCompletedEvent {
 
 // Unsubscribe removes ch from the subscriber list and closes it.
 // Idempotent — calling twice is safe.
+//
+// The fan-out path (Emit) holds the same `e.mu` while iterating
+// over `e.subscribers` and performing non-blocking sends. Because
+// the slice mutation and `close(c)` happen here under the lock,
+// Emit can never observe a half-removed-but-still-closed channel:
+// either the channel is in the slice and open (Emit's send
+// proceeds), or it has been removed and closed (Emit doesn't see
+// it at all). This eliminates the BUG_0001 race where Emit
+// snapshotted under the lock then sent unlocked, allowing an
+// interleaved Unsubscribe to close a channel still in the
+// snapshot.
 func (e *BackfillCompletionEmitter) Unsubscribe(ch <-chan BackfillCompletedEvent) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -107,29 +118,43 @@ func (e *BackfillCompletionEmitter) Emit(ctx context.Context, tenantID, sourceID
 	}
 	key := backfillKey(tenantID, sourceID)
 
-	// Critical-section discipline (FLAG_pr-review-job_0001):
-	// We hold e.mu only long enough to (1) check + flip the dedup
-	// flag and (2) snapshot the subscribers slice into a local
-	// copy. The audit DB write and the channel sends below run
-	// without the lock held. This is intentional and safe:
-	//   - Subscribe / Unsubscribe mutate the canonical slice
-	//     under the same lock, so the snapshot is a stable
-	//     point-in-time view; later subscribers simply miss this
-	//     particular event (next poll will catch them up).
-	//   - audit.Create can block on Postgres; running it inside
-	//     the lock would serialize all completion emissions
-	//     globally and make a slow audit DB freeze every SSE
-	//     subscriber.
-	//   - The channel sends are non-blocking (default branch of
-	//     the select); a stuck subscriber cannot back-pressure
-	//     the emitter.
+	// Critical-section discipline (FLAG_pr-review-job_0001 + fix
+	// for BUG_pr-review-job-96794a4ddef143afb93842117129455d_0001):
+	//
+	// Two short critical sections; the blocking audit DB write runs
+	// between them with no lock held.
+	//
+	//   1. First lock: dedup check + flip. Returns early on a
+	//      duplicate without touching the DB.
+	//   2. Audit write: unlocked. audit.Create can block on
+	//      Postgres; running it under the lock would serialize
+	//      every completion emission globally and make a slow audit
+	//      DB freeze every SSE subscriber.
+	//   3. Second lock: non-blocking send to each current
+	//      subscriber. We iterate over `e.subscribers` directly
+	//      (no snapshot) so a subscriber that called Unsubscribe
+	//      before the loop started is already gone from the slice
+	//      and we never attempt a send on its closed channel.
+	//
+	// Why not the previous snapshot-then-send pattern? The previous
+	// implementation snapshotted under the lock and ranged over the
+	// snapshot unlocked. An Unsubscribe interleaved between the
+	// snapshot and a send would close a channel still referenced by
+	// the snapshot, and the next `ch <- evt` would panic with
+	// "send on closed channel". The select{...default:} guard only
+	// protects against a full buffer, not a closed channel.
+	//
+	// Lock-hold time during fanout is bounded: each iteration is a
+	// non-blocking select with a default branch, so total time is
+	// O(len(subscribers)) channel-state checks — microseconds even
+	// with hundreds of subscribers. Subscribe/Unsubscribe only
+	// briefly contend on the slice mutation under the same lock.
 	e.mu.Lock()
 	if e.seen[key] {
 		e.mu.Unlock()
 		return false, nil
 	}
 	e.seen[key] = true
-	subs := append([]chan BackfillCompletedEvent(nil), e.subscribers...)
 	e.mu.Unlock()
 
 	err := e.audit.Create(ctx, audit.NewAuditLog(
@@ -138,9 +163,12 @@ func (e *BackfillCompletionEmitter) Emit(ctx context.Context, tenantID, sourceID
 	))
 	// Notify subscribers regardless of audit success — an SSE client
 	// already saw the wire-level `completed` event; the audit row is
-	// for the persistent record. Best-effort fanout.
+	// for the persistent record. Best-effort fanout under the lock
+	// so concurrent Unsubscribe (which removes + closes) is
+	// serialized against this loop.
 	evt := BackfillCompletedEvent{TenantID: tenantID, SourceID: sourceID}
-	for _, ch := range subs {
+	e.mu.Lock()
+	for _, ch := range e.subscribers {
 		select {
 		case ch <- evt:
 		default:
@@ -148,6 +176,7 @@ func (e *BackfillCompletionEmitter) Emit(ctx context.Context, tenantID, sourceID
 			// they'll catch up via the next poll.
 		}
 	}
+	e.mu.Unlock()
 	return true, err
 }
 
