@@ -55,6 +55,23 @@ type WatchdogConfig struct {
 	Audit     AuditWriter
 	Logger    *slog.Logger
 	Now       func() time.Time // test seam
+
+	// BackendSourceFilter optionally narrows the set of sources
+	// auto-reindexed for a given unhealthy backend. It receives the
+	// list of unhealthy backend names and the full active-source set,
+	// and returns only the sources that should be reindexed (e.g.
+	// only the sources whose connector type writes to the
+	// unhealthy backend).
+	//
+	// Default (when nil): reindex every active source — addresses
+	// FLAG_pr-review-job_0002 by making the broad behavior
+	// explicitly configurable rather than implicit. The default
+	// remains broad because Qdrant + Postgres are core backends
+	// every source writes through, so an unhealthy core backend
+	// genuinely affects every source. Operators wiring graph- or
+	// memory-only watchdog checkers should supply this filter to
+	// scope reindexes to the affected connectors only.
+	BackendSourceFilter func(unhealthy []string, srcs []Source) []Source
 }
 
 // IndexWatchdog monitors backend health and auto-triggers
@@ -120,6 +137,9 @@ func (w *IndexWatchdog) Tick(ctx context.Context) {
 	if err != nil {
 		w.cfg.Logger.Error("index_watchdog: list sources", "error", err)
 		return
+	}
+	if w.cfg.BackendSourceFilter != nil {
+		srcs = w.cfg.BackendSourceFilter(unhealthy, srcs)
 	}
 	tenants := uniqueTenants(srcs)
 	for tenantID, srcIDs := range tenants {

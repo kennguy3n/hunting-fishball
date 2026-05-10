@@ -38,6 +38,14 @@ func (f *fakeReindexer) callCount() int {
 	return len(f.calls)
 }
 
+func (f *fakeReindexer) callsSnapshot() []pipeline.ReindexRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]pipeline.ReindexRequest, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
 func TestIndexWatchdog_NoTriggerOnHealthy(t *testing.T) {
 	t.Parallel()
 	ri := &fakeReindexer{}
@@ -149,6 +157,47 @@ func TestIndexWatchdog_MultiTenantReindex(t *testing.T) {
 	// All 3 source×tenant pairs trigger.
 	if ri.callCount() != 3 {
 		t.Fatalf("expected 3 reindex calls, got %d", ri.callCount())
+	}
+}
+
+// TestIndexWatchdog_BackendSourceFilterScopesReindex regression-tests
+// FLAG_pr-review-job_0002: when an unhealthy backend is one only a
+// subset of sources writes to (e.g. graph), an operator-supplied
+// filter must scope the reindex to those sources only.
+func TestIndexWatchdog_BackendSourceFilterScopesReindex(t *testing.T) {
+	t.Parallel()
+	ck := &fakeChecker{name: "graph", err: errors.New("fail")}
+	ri := &fakeReindexer{}
+	srcs := []admin.Source{
+		{ID: "s-graph", TenantID: "tenant-a", ConnectorType: "github", Status: admin.SourceStatusActive},
+		{ID: "s-blob", TenantID: "tenant-a", ConnectorType: "s3_blob", Status: admin.SourceStatusActive},
+		{ID: "s-graph2", TenantID: "tenant-b", ConnectorType: "github", Status: admin.SourceStatusActive},
+	}
+	w, _ := admin.NewIndexWatchdog(admin.WatchdogConfig{
+		Checkers:  []admin.BackendChecker{ck},
+		Lister:    &fakeMonitorLister{srcs: srcs},
+		Reindexer: ri,
+		BackendSourceFilter: func(unhealthy []string, all []admin.Source) []admin.Source {
+			// Only sources whose connector writes to the graph
+			// backend should be reindexed when graph is unhealthy.
+			out := make([]admin.Source, 0, len(all))
+			for _, s := range all {
+				if s.ConnectorType == "github" {
+					out = append(out, s)
+				}
+			}
+			return out
+		},
+	})
+	w.Tick(context.Background())
+	w.Tick(context.Background())
+	if ri.callCount() != 2 {
+		t.Fatalf("filter should reindex only github sources (s-graph, s-graph2): got %d", ri.callCount())
+	}
+	for _, c := range ri.callsSnapshot() {
+		if c.SourceID == "s-blob" {
+			t.Fatalf("filter let s-blob through; reindex should be scoped: %+v", c)
+		}
 	}
 }
 

@@ -107,6 +107,22 @@ func (e *BackfillCompletionEmitter) Emit(ctx context.Context, tenantID, sourceID
 	}
 	key := backfillKey(tenantID, sourceID)
 
+	// Critical-section discipline (FLAG_pr-review-job_0001):
+	// We hold e.mu only long enough to (1) check + flip the dedup
+	// flag and (2) snapshot the subscribers slice into a local
+	// copy. The audit DB write and the channel sends below run
+	// without the lock held. This is intentional and safe:
+	//   - Subscribe / Unsubscribe mutate the canonical slice
+	//     under the same lock, so the snapshot is a stable
+	//     point-in-time view; later subscribers simply miss this
+	//     particular event (next poll will catch them up).
+	//   - audit.Create can block on Postgres; running it inside
+	//     the lock would serialize all completion emissions
+	//     globally and make a slow audit DB freeze every SSE
+	//     subscriber.
+	//   - The channel sends are non-blocking (default branch of
+	//     the select); a stuck subscriber cannot back-pressure
+	//     the emitter.
 	e.mu.Lock()
 	if e.seen[key] {
 		e.mu.Unlock()
