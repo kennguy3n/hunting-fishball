@@ -125,7 +125,7 @@ func (o *DLQObserver) observeMessage(msg *sarama.ConsumerMessage) {
 		// Still bump the counter — operators want to alert on the
 		// fact that a DLQ message arrived, not just on the ones we
 		// could decode.
-		observability.DLQMessagesTotal.WithLabelValues("unknown", msg.Topic).Inc()
+		observability.DLQMessagesTotal.WithLabelValues(msg.Topic).Inc()
 		return
 	}
 
@@ -149,7 +149,7 @@ func (o *DLQObserver) observeMessage(msg *sarama.ConsumerMessage) {
 		slog.Int64("offset", msg.Offset),
 		slog.Int("partition", int(msg.Partition)),
 	)
-	observability.DLQMessagesTotal.WithLabelValues(env.Event.TenantID, originalTopic).Inc()
+	observability.DLQMessagesTotal.WithLabelValues(originalTopic).Inc()
 }
 
 // headerValue returns the first matching header value, or nil. The

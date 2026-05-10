@@ -33,13 +33,10 @@ type HandlerConfig struct {
 	Repo   HandlerRepo
 	Forget ForgetTrigger
 
-	// CoverageRepo, when non-nil, supplies the corpus-side count
-	// for the coverage endpoint. Optional: if it is nil, the
-	// handler falls back to asserting Repo onto CoverageRepo (so
-	// existing wirings that hand a Repository implementing both
-	// interfaces still work). When neither path yields a CoverageRepo,
-	// the handler reports IsAuthoritative=false with reason
-	// "corpus_size_unknown".
+	// CoverageRepo supplies the corpus-side chunk count for the
+	// `/v1/shards/:tenant_id/coverage` endpoint. Optional: when
+	// nil, the handler reports IsAuthoritative=false with reason
+	// "corpus_size_unknown" instead of fabricating a denominator.
 	CoverageRepo CoverageRepo
 
 	// MaxPageSize bounds the list response. Defaults to 200.
@@ -243,12 +240,12 @@ type CoverageResponse struct {
 	Reason          string  `json:"reason,omitempty"`
 }
 
-// CoverageRepo extends HandlerRepo with the read used by
+// CoverageRepo is the read used by
 // GET /v1/shards/:tenant_id/coverage. Implementations resolve the
 // total chunk count for the tenant scope (the denominator of the
-// coverage ratio). Optional — when the configured Repo does not
-// implement CoverageRepo the handler reports a coverage ratio of 0
-// and IsAuthoritative=false so the client falls back to remote.
+// coverage ratio). Optional — when no CoverageRepo is wired the
+// handler reports a coverage ratio of 0 and IsAuthoritative=false
+// so the client falls back to remote retrieval.
 type CoverageRepo interface {
 	CorpusChunkCount(ctx context.Context, f ScopeFilter) (int, error)
 }
@@ -293,14 +290,9 @@ func (h *Handler) coverage(c *gin.Context) {
 
 	corpusRepo := h.cfg.CoverageRepo
 	if corpusRepo == nil {
-		// Backwards-compat: legacy callers pass a Repo that itself
-		// implements CoverageRepo. Honour that path so we don't break
-		// any wirings that haven't migrated to the explicit field.
-		if rc, isCoverage := h.cfg.Repo.(CoverageRepo); isCoverage {
-			corpusRepo = rc
-		}
-	}
-	if corpusRepo == nil {
+		// Without an explicit CoverageRepo wired in, the corpus
+		// denominator is unknowable; surface that honestly rather
+		// than emitting a fabricated 1.0 ratio.
 		resp.Reason = "corpus_size_unknown"
 		c.JSON(http.StatusOK, resp)
 		return

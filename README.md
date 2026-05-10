@@ -68,8 +68,10 @@
 > (`tests/benchmark/p95_e2e_test.go` for the Phase 1 round-trip,
 > `tests/benchmark/p95_retrieval_test.go` for the stricter Phase 3
 > retrieval-only budget; `make bench-e2e`). 2026-05-10 also wired
-> structured JSON logging through both binaries
-> (`internal/observability/logger.go` + `GinLoggerMiddleware`),
+> structured JSON logging through both binaries via
+> `internal/observability/logger.go` (with `GinLoggerMiddleware`
+> on the authed `cmd/api` route group; `cmd/ingest` uses
+> `slog.SetDefault` since it serves probes via `net/http`),
 > the DLQ observer (`internal/pipeline/dlq_observer.go`), and the
 > 5-step `TenantDeleter` workflow
 > (`internal/admin/tenant_delete.go`,

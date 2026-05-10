@@ -460,7 +460,7 @@ func TestHandler_Coverage_AuthoritativeRatio(t *testing.T) {
 		}
 		c.Next()
 	})
-	h, herr := shard.NewHandler(shard.HandlerConfig{Repo: repo})
+	h, herr := shard.NewHandler(shard.HandlerConfig{Repo: repo, CoverageRepo: repo})
 	if herr != nil {
 		t.Fatalf("NewHandler: %v", herr)
 	}

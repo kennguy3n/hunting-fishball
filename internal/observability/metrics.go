@@ -66,14 +66,18 @@ var (
 		[]string{"stage"},
 	)
 	// DLQMessagesTotal counts dead-letter messages observed by the
-	// pipeline DLQ observer, broken down by tenant. Operators alert
-	// on a non-zero rate of this counter.
+	// pipeline DLQ observer, broken down by the original topic the
+	// message was rerouted from. Operators alert on a non-zero
+	// rate of this counter; per-tenant breakdowns live in the
+	// structured logs (tenant_id field) where Loki / Splunk index
+	// them without the cardinality blow-up that a Prometheus label
+	// would carry on a multi-tenant fleet.
 	DLQMessagesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "context_engine_dlq_messages_total",
-			Help: "Total dead-letter messages observed on the ingest DLQ topic.",
+			Help: "Total dead-letter messages observed on the ingest DLQ topic, by original topic.",
 		},
-		[]string{"tenant_id", "original_topic"},
+		[]string{"original_topic"},
 	)
 )
 

@@ -235,7 +235,7 @@ func run() error {
 	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	r.GET("/readyz", apiReadyzHandler(db, sharedRedis, qdrant))
 
-	api := r.Group("/", authPlaceholder)
+	api := r.Group("/", authPlaceholder, observability.GinLoggerMiddleware("api"))
 	audit.NewHandler(auditRepo).Register(api)
 	retrievalHandler.Register(api)
 

@@ -122,7 +122,7 @@ func (d *TenantDeleter) Delete(ctx context.Context, tenantID, requestedBy string
 	if err := d.cfg.Status.UpsertStatus(ctx, tenantID, TenantStatusPendingDeletion); err != nil {
 		return fmt.Errorf("admin: mark pending: %w", err)
 	}
-	d.emitAudit(ctx, tenantID, requestedBy, audit.Action("tenant.deletion_requested"))
+	d.emitAudit(ctx, tenantID, requestedBy, audit.Action("tenant.deletion_requested"), "requested")
 
 	// Step 2: drain. The pipeline consumer pauses partitions for
 	// the tenant once it sees the pending_deletion status, but the
@@ -149,11 +149,11 @@ func (d *TenantDeleter) Delete(ctx context.Context, tenantID, requestedBy string
 	if err := d.cfg.Status.UpsertStatus(ctx, tenantID, TenantStatusDeleted); err != nil {
 		return fmt.Errorf("admin: mark deleted: %w", err)
 	}
-	d.emitAudit(ctx, tenantID, requestedBy, audit.Action("tenant.deleted"))
+	d.emitAudit(ctx, tenantID, requestedBy, audit.Action("tenant.deleted"), "completed")
 	return nil
 }
 
-func (d *TenantDeleter) emitAudit(ctx context.Context, tenantID, actor string, action audit.Action) {
+func (d *TenantDeleter) emitAudit(ctx context.Context, tenantID, actor string, action audit.Action, phase string) {
 	if d.cfg.Audit == nil {
 		return
 	}
@@ -163,7 +163,7 @@ func (d *TenantDeleter) emitAudit(ctx context.Context, tenantID, actor string, a
 		action,
 		"tenant",
 		tenantID,
-		audit.JSONMap{"phase": "completed"},
+		audit.JSONMap{"phase": phase},
 		"",
 	))
 }
@@ -270,7 +270,15 @@ func (h *TenantDeleteHandler) delete(c *gin.Context) {
 	}
 	actor, _ := c.Get(audit.ActorContextKey)
 	actorID, _ := actor.(string)
-	if err := h.deleter.Delete(c.Request.Context(), tenantID, actorID); err != nil {
+	// Decouple the sweep from the HTTP client's lifetime: a 30 s
+	// drain plus per-tier sweep can exceed typical reverse-proxy
+	// idle timeouts, and a client disconnect mid-sweep would
+	// otherwise leave the tenant stuck in pending_deletion. We
+	// keep the request context's values (audit / trace) but drop
+	// its cancellation so the workflow can complete or fail on
+	// its own merits.
+	sweepCtx := context.WithoutCancel(c.Request.Context())
+	if err := h.deleter.Delete(sweepCtx, tenantID, actorID); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}

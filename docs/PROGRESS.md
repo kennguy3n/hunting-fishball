@@ -502,11 +502,13 @@ ships, the matrix is empty. Each row records:
       `LoggerFromContext(ctx)` extracts the active logger
       pre-bound with the request scope.
     - `GinLoggerMiddleware(component)` parses W3C `traceparent`
-      (with `X-Trace-ID` fallback) and the `X-Tenant-ID` /
-      auth-tenant context to inject the per-request logger.
-      Wired into both `cmd/api/main.go` and `cmd/ingest/main.go`
-      so every `log.Printf` is replaced with structured
-      `slog` output.
+      (with `X-Trace-ID` fallback) and reads the
+      `audit.TenantContextKey` set by the auth layer (with an
+      `X-Tenant-Id` header fallback) to inject the per-request
+      logger. Mounted on the authed `cmd/api` route group; the
+      `cmd/ingest` binary uses `net/http` and gets the same
+      structured `slog` JSON output via `slog.SetDefault` instead
+      of a Gin middleware.
   - **Quality / robustness**:
     - `internal/policy/device_first_test.go` adds the
       `TestDecide_FullMatrix` 5×3 truth table over privacy modes

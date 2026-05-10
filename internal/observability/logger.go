@@ -27,6 +27,8 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/kennguy3n/hunting-fishball/internal/audit"
 )
 
 type ctxKey int
@@ -182,7 +184,7 @@ func GinLoggerMiddleware(component string) gin.HandlerFunc {
 		// Tenant ID: read from the audit/admin context key the rest
 		// of the API uses. Falls back to a header for binaries that
 		// don't run an auth layer.
-		if tenantVal, ok := c.Get("auth.tenant_id"); ok {
+		if tenantVal, ok := c.Get(audit.TenantContextKey); ok {
 			if t, _ := tenantVal.(string); t != "" {
 				ctx = WithTenantID(ctx, t)
 			}

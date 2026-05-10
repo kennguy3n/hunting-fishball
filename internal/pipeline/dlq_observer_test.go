@@ -17,10 +17,13 @@ import (
 
 // readMetricCount returns the current value of the
 // `context_engine_dlq_messages_total` counter for the supplied
-// label set. We pull the value directly off the Prometheus
+// `original_topic`. We pull the value directly off the Prometheus
 // registry rather than wrapping a fake collector — a wrapper would
-// hide bugs in the production label tuple.
-func readMetricCount(t *testing.T, tenantID, originalTopic string) float64 {
+// hide bugs in the production label tuple. tenant_id is
+// deliberately not a Prometheus label (cardinality risk on a
+// multi-tenant fleet); per-tenant breakdowns live in the structured
+// log lines this test also asserts on.
+func readMetricCount(t *testing.T, originalTopic string) float64 {
 	t.Helper()
 	mfs, err := observability.Registry.Gather()
 	if err != nil {
@@ -35,7 +38,7 @@ func readMetricCount(t *testing.T, tenantID, originalTopic string) float64 {
 			for _, lp := range m.GetLabel() {
 				labels[lp.GetName()] = lp.GetValue()
 			}
-			if labels["tenant_id"] == tenantID && labels["original_topic"] == originalTopic {
+			if labels["original_topic"] == originalTopic {
 				return m.GetCounter().GetValue()
 			}
 		}
@@ -80,7 +83,7 @@ func TestDLQObserver_LogsAndCounts(t *testing.T) {
 
 	pipeline.ObserveMessageForTest(obs, msg)
 
-	got := readMetricCount(t, "tenant-a", "ingest")
+	got := readMetricCount(t, "ingest")
 	if got != 1 {
 		t.Fatalf("counter=%v want 1", got)
 	}
@@ -123,7 +126,7 @@ func TestDLQObserver_FallsBackToDLQTopicLabel(t *testing.T) {
 
 	pipeline.ObserveMessageForTest(obs, msg)
 
-	if got := readMetricCount(t, "tenant-z", "ingest.dlq"); got != 1 {
+	if got := readMetricCount(t, "ingest.dlq"); got != 1 {
 		t.Fatalf("counter for fallback topic=%v want 1", got)
 	}
 }
@@ -147,7 +150,7 @@ func TestDLQObserver_UndecodableMessageStillIncrementsCounter(t *testing.T) {
 		Value: []byte("not-json"),
 	})
 
-	if got := readMetricCount(t, "unknown", "ingest.dlq"); got != 1 {
+	if got := readMetricCount(t, "ingest.dlq"); got != 1 {
 		t.Fatalf("counter for poison message=%v want 1", got)
 	}
 	if !strings.Contains(buf.String(), "undecodable envelope") {
