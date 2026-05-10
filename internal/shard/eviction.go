@@ -159,14 +159,16 @@ func (t *EvictionPolicyTable) All() []EvictionPolicy {
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return tierRank(out[i].Tier) < tierRank(out[j].Tier)
+		return TierRank(out[i].Tier) < TierRank(out[j].Tier)
 	})
 	return out
 }
 
-// tierRank orders the tiers so the JSON encoding is stable. Low
-// is the strictest (rank 0) and High is the most permissive.
-func tierRank(t DeviceTier) int {
+// TierRank orders the tiers so callers can compare them ordinally.
+// Low is the strictest (rank 0), High is the most permissive
+// (rank 2). Unknown returns -1 so it sorts before every real tier
+// and never satisfies a `>=` comparison against a real tier.
+func TierRank(t DeviceTier) int {
 	switch t {
 	case DeviceTierLow:
 		return 0

@@ -26,6 +26,18 @@ type PolicySnapshot struct {
 	// Recipient is the per-(tenant, channel) recipient policy. nil
 	// → default-allow for every skill.
 	Recipient *RecipientPolicy
+
+	// DenyLocalRetrieval is the channel-level toggle that forbids
+	// the on-device shard from serving a query for this channel.
+	// The contract documented in
+	// `docs/contracts/local-first-retrieval.md` defines
+	// channel-level allow-local as **default-true**, so the zero
+	// value (false) here means "local retrieval is allowed";
+	// admins flip it to `true` to force every query through the
+	// remote API regardless of device tier or shard freshness.
+	// `device_first.Decide` reads the inverted value through
+	// DeviceFirstInputs.AllowLocalRetrieval.
+	DenyLocalRetrieval bool
 }
 
 // Clone returns a deep copy of the snapshot. Used by the simulator
@@ -35,7 +47,10 @@ type PolicySnapshot struct {
 // RecipientPolicy.Rules are slice-copied so a caller appending a rule
 // to the clone does not mutate the live snapshot's underlying array.
 func (s PolicySnapshot) Clone() PolicySnapshot {
-	out := PolicySnapshot{EffectiveMode: s.EffectiveMode}
+	out := PolicySnapshot{
+		EffectiveMode:      s.EffectiveMode,
+		DenyLocalRetrieval: s.DenyLocalRetrieval,
+	}
 	if s.ACL != nil {
 		acl := *s.ACL
 		acl.Rules = append([]ACLRule(nil), s.ACL.Rules...)

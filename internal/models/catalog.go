@@ -182,17 +182,23 @@ func (p *StaticProvider) Catalog() ModelCatalog {
 	return cp
 }
 
-// EligibleForTier returns the catalog entry whose TierFloor
-// matches tier exactly. When multiple entries match (the High tier
-// has q8_0 and fp16), the smallest one is returned so the runtime
-// gets a sensible default. Returns nil when no entry matches.
+// EligibleForTier returns the smallest catalog entry whose
+// TierFloor is ≤ tier — i.e. every model the device is permitted
+// to run, ranked by SizeMB. The contract documented in
+// `docs/contracts/bonsai-integration.md` and `docs/ARCHITECTURE.md`
+// §10 specifies `tier_floor ≤ tier` semantics so a High-tier device
+// can fall back to a Mid-tier (smaller, lower-precision) build when
+// storage is constrained. Unknown tiers are treated as Low (no
+// model eligible) — TierRank(Unknown) is -1, which fails the
+// floor ≤ tier check against every real entry.
 func (c *ModelCatalog) EligibleForTier(tier shard.DeviceTier) *ModelEntry {
 	if tier == shard.DeviceTierUnknown {
 		return nil
 	}
+	deviceRank := shard.TierRank(tier)
 	var best *ModelEntry
 	for i, m := range c.Models {
-		if m.TierFloor != tier {
+		if shard.TierRank(m.TierFloor) > deviceRank {
 			continue
 		}
 		if best == nil || m.SizeMB < best.SizeMB {

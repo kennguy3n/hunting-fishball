@@ -95,14 +95,36 @@ func TestModelCatalog_EligibleForTier(t *testing.T) {
 	if mid == nil || mid.ID != "bonsai-1.7b-q4_0" {
 		t.Fatalf("mid tier eligible: %+v", mid)
 	}
+	// High-tier devices are eligible for q4_0 (Mid floor),
+	// q8_0, and fp16. Per the `tier_floor ≤ tier` contract the
+	// smallest one wins — q4_0 at 1024 MB.
 	high := cat.EligibleForTier(shard.DeviceTierHigh)
-	// Two entries are eligible at High; the smallest (q8_0,
-	// 1800 MB) should win over fp16 (3400 MB).
-	if high == nil || high.ID != "bonsai-1.7b-q8_0" {
+	if high == nil || high.ID != "bonsai-1.7b-q4_0" {
 		t.Fatalf("high tier eligible: %+v", high)
 	}
 	if got := cat.EligibleForTier(shard.DeviceTierUnknown); got != nil {
 		t.Fatalf("unknown tier eligible: %+v", got)
+	}
+}
+
+// TestModelCatalog_EligibleForTier_FloorOnly verifies the
+// floor-walking semantics in isolation: a catalog with only High-
+// floor entries is INELIGIBLE for a Mid-tier device, even though
+// the Mid device might technically have the RAM. The runtime
+// downgrades; the catalog never silently promotes a model floor.
+func TestModelCatalog_EligibleForTier_FloorOnly(t *testing.T) {
+	t.Parallel()
+	cat := models.ModelCatalog{
+		CatalogVersion: 1,
+		Models: []models.ModelEntry{
+			{ID: "high-only", Family: "f", TierFloor: shard.DeviceTierHigh, SizeMB: 100},
+		},
+	}
+	if got := cat.EligibleForTier(shard.DeviceTierMid); got != nil {
+		t.Fatalf("mid tier should not match a high-floor model, got %+v", got)
+	}
+	if got := cat.EligibleForTier(shard.DeviceTierHigh); got == nil || got.ID != "high-only" {
+		t.Fatalf("high tier eligible: %+v", got)
 	}
 }
 

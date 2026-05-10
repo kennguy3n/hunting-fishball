@@ -396,7 +396,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 			for i := range resp.Hits {
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
-			h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, &resp)
+			h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
 			c.JSON(http.StatusOK, resp)
 
 			return
@@ -454,7 +454,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 		_ = h.cfg.Cache.Set(c.Request.Context(), tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), h.cfg.CacheTTL)
 	}
 
-	h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, &resp)
+	h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -463,7 +463,16 @@ func (h *Handler) retrieve(c *gin.Context) {
 // fully populated. Lookup errors are swallowed (log and treat as
 // no-shard) so a transient repository failure does not fail the
 // retrieval.
-func (h *Handler) applyDeviceFirst(ctx context.Context, tenantID, channelID, privacyMode, deviceTier string, resp *RetrieveResponse) {
+//
+// The channel-level allow-local toggle is sourced from the
+// resolved PolicySnapshot. Per
+// `docs/contracts/local-first-retrieval.md` the contract default
+// is allow-local=true; PolicySnapshot expresses the inverse as
+// `DenyLocalRetrieval` so an unconfigured channel
+// (DenyLocalRetrieval==false) keeps the default-true semantics.
+// When admins flip the channel toggle the request takes the
+// `channel_disallowed` branch in policy.Decide.
+func (h *Handler) applyDeviceFirst(ctx context.Context, tenantID, channelID, privacyMode, deviceTier string, snapshot policy.PolicySnapshot, resp *RetrieveResponse) {
 	var shardVersion int64
 	if h.cfg.ShardVersionLookup != nil {
 		if v, lerr := h.cfg.ShardVersionLookup.LatestShardVersion(ctx, tenantID, channelID, privacyMode); lerr == nil {
@@ -472,7 +481,7 @@ func (h *Handler) applyDeviceFirst(ctx context.Context, tenantID, channelID, pri
 	}
 	decision := policy.Decide(policy.DeviceFirstInputs{
 		DeviceTier:          policy.DeviceTier(deviceTier),
-		AllowLocalRetrieval: true,
+		AllowLocalRetrieval: !snapshot.DenyLocalRetrieval,
 		PrivacyMode:         policy.PrivacyMode(privacyMode),
 		LocalShardVersion:   shardVersion,
 	})

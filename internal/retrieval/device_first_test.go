@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/retrieval"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
@@ -140,6 +141,55 @@ func TestDeviceFirst_LookupErrorTreatedAsNoShard(t *testing.T) {
 	}
 	if got.PreferLocalReason != "no_local_shard" {
 		t.Fatalf("reason=%q", got.PreferLocalReason)
+	}
+}
+
+// TestDeviceFirst_ChannelDisallowed_StaysRemote verifies that a
+// channel which has explicitly opted out of local retrieval (via
+// PolicySnapshot.DenyLocalRetrieval=true on the resolved snapshot)
+// gets `prefer_local=false` with a `channel_disallowed` reason —
+// regardless of device tier or shard freshness. This is the path
+// `policy.Decide` exposes via the `AllowLocalRetrieval=false`
+// branch; before this path was wired the reason was unreachable in
+// production.
+func TestDeviceFirst_ChannelDisallowed_StaysRemote(t *testing.T) {
+	t.Parallel()
+	vs := &fakeVectorStore{
+		hits: []storage.QdrantHit{{ID: "c1", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}}},
+	}
+	denyResolver := policy.ResolverFunc(func(_ context.Context, _, _ string) (policy.PolicySnapshot, error) {
+		return policy.PolicySnapshot{
+			EffectiveMode:      policy.PrivacyModeHybrid,
+			DenyLocalRetrieval: true,
+		}, nil
+	})
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore:        vs,
+		Embedder:           &fakeEmbedder{vec: []float32{1, 2}},
+		ShardVersionLookup: &fakeShardLookup{version: 9},
+		PolicyResolver:     denyResolver,
+	})
+	r := newRouter(t, h, "tenant-a")
+	w := doPost(r, retrieval.RetrieveRequest{
+		Query:       "hello",
+		PrivacyMode: "hybrid",
+		DeviceTier:  "high",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	var got retrieval.RetrieveResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.PreferLocal {
+		t.Fatalf("expected prefer_local=false for disallowed channel")
+	}
+	if got.PreferLocalReason != "channel_disallowed" {
+		t.Fatalf("reason=%q (want channel_disallowed)", got.PreferLocalReason)
+	}
+	if got.LocalShardVersion != 9 {
+		t.Fatalf("local_shard_version=%d (want echoed even when disallowed)", got.LocalShardVersion)
 	}
 }
 
