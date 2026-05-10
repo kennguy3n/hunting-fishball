@@ -1,0 +1,175 @@
+# Prometheus alerting rules for hunting-fishball / context-engine.
+#
+# Round-4 Task 10: production-grade alert rules covering ingestion
+# health, retrieval latency, DLQ rate, source health, and pipeline
+# stage anomalies. The file format is the standard Prometheus
+# Operator PrometheusRule manifest so it can be applied directly
+# via kubectl in environments running prometheus-operator.
+#
+# Alert lifecycle conventions:
+#   * `severity: critical` → page; user-visible breakage.
+#   * `severity: warning`  → ticket; SLO at risk but service still up.
+#   * `severity: info`     → dashboard; trend monitoring only.
+#
+# Every alert includes:
+#   * `summary`     — single-line headline for the pager.
+#   * `description` — multi-line context with hints for triage.
+#   * `runbook_url` — pointer into docs/RUNBOOKS.md (placeholder
+#                     until the runbook docs land).
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: context-engine-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: context-engine
+    app.kubernetes.io/component: alerts
+spec:
+  groups:
+    # -------------------------------------------------------------
+    # Ingestion: Kafka consumer health
+    # -------------------------------------------------------------
+    - name: context-engine.ingestion
+      interval: 30s
+      rules:
+        - alert: IngestionLagHigh
+          expr: max by (topic, group) (context_engine_kafka_consumer_lag) > 10000
+          for: 5m
+          labels:
+            severity: critical
+            service: context-engine
+          annotations:
+            summary: "Kafka consumer lag > 10k for 5m"
+            description: |
+              Consumer group {{ $labels.group }} has been more than 10,000
+              messages behind on topic {{ $labels.topic }} for over 5 minutes.
+              Verify ingest pod count, broker health, and parse/embed
+              gRPC service availability.
+            runbook_url: "https://docs/RUNBOOKS.md#ingestion-lag-high"
+
+        - alert: IngestionLagSustained
+          expr: max by (topic, group) (context_engine_kafka_consumer_lag) > 50000
+          for: 15m
+          labels:
+            severity: critical
+            service: context-engine
+          annotations:
+            summary: "Kafka consumer lag > 50k for 15m"
+            description: |
+              Catastrophic ingestion stall. Lag exceeds 50k for 15 minutes —
+              capacity is insufficient for the inbound message rate.
+              Page the on-call and either scale ingest or pause source
+              ingestion until the backlog drains.
+            runbook_url: "https://docs/RUNBOOKS.md#ingestion-lag-sustained"
+
+    # -------------------------------------------------------------
+    # Pipeline: dead-letter queue
+    # -------------------------------------------------------------
+    - name: context-engine.dlq
+      interval: 30s
+      rules:
+        - alert: DLQRateHigh
+          expr: sum(rate(context_engine_dlq_messages_total[5m])) > 1
+          for: 5m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "DLQ rate > 1 msg/s for 5m"
+            description: |
+              The pipeline is dead-lettering more than one message per
+              second on average. Inspect the most recent DLQ rows in
+              the admin UI and check connector / parser / embedding
+              service health.
+            runbook_url: "https://docs/RUNBOOKS.md#dlq-rate-high"
+
+    # -------------------------------------------------------------
+    # API: retrieval latency
+    # -------------------------------------------------------------
+    - name: context-engine.api
+      interval: 30s
+      rules:
+        - alert: RetrievalP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le, path) (rate(context_engine_api_request_duration_seconds_bucket{path=~"/v1/retrieval.*"}[5m]))
+            ) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Retrieval p95 latency > 500ms"
+            description: |
+              p95 retrieval latency is above 500ms on path {{ $labels.path }}.
+              Inspect Qdrant pool saturation, BM25 index size, and
+              policy resolver cache hit rate.
+            runbook_url: "https://docs/RUNBOOKS.md#retrieval-p95-high"
+
+        - alert: RetrievalP99High
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le, path) (rate(context_engine_api_request_duration_seconds_bucket{path=~"/v1/retrieval.*"}[5m]))
+            ) > 1.5
+          for: 10m
+          labels:
+            severity: critical
+            service: context-engine
+          annotations:
+            summary: "Retrieval p99 latency > 1.5s"
+            description: |
+              p99 retrieval latency exceeds the SLO. Check downstream
+              backend health and consider enabling degraded fallback.
+            runbook_url: "https://docs/RUNBOOKS.md#retrieval-p99-high"
+
+    # -------------------------------------------------------------
+    # Pipeline: per-stage duration anomalies
+    # -------------------------------------------------------------
+    - name: context-engine.pipeline
+      interval: 30s
+      rules:
+        - alert: PipelineStageSlow
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (stage, le) (rate(context_engine_pipeline_stage_duration_seconds_bucket[5m]))
+            ) > 30
+          for: 10m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Pipeline stage {{ $labels.stage }} p95 > 30s"
+            description: |
+              Stage {{ $labels.stage }} p95 has exceeded 30s for 10 minutes.
+              Healthy stages typically sit under 5s. Inspect gRPC
+              backend health and storage write contention.
+            runbook_url: "https://docs/RUNBOOKS.md#pipeline-stage-slow"
+
+    # -------------------------------------------------------------
+    # Source health: connector errors
+    # -------------------------------------------------------------
+    - name: context-engine.sources
+      interval: 60s
+      rules:
+        - alert: SourceUnhealthy
+          # source-health gauges are populated by the
+          # internal/admin/health package. The alert fires on the
+          # error_count rolling counter.
+          expr: max by (tenant_id, source_id) (context_engine_source_error_count) > 25
+          for: 10m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Source {{ $labels.source_id }} error_count > 25"
+            description: |
+              Connector for tenant={{ $labels.tenant_id }}
+              source={{ $labels.source_id }} has accumulated more
+              than 25 errors over the rolling window. Check the
+              source's Health page for the most recent failure
+              reason and rotate credentials if relevant.
+            runbook_url: "https://docs/RUNBOOKS.md#source-unhealthy"

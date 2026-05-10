@@ -55,6 +55,17 @@ func (f *fakeAudit) actions() []audit.Action {
 	return out
 }
 
+// auditLogs returns a snapshot of the recorded audit logs. It is
+// the read-side companion to actions() for tests that need to
+// inspect AuditLog metadata (e.g. timestamp consistency checks).
+func (f *fakeAudit) auditLogs() []*audit.AuditLog {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*audit.AuditLog, len(f.logs))
+	copy(out, f.logs)
+	return out
+}
+
 // fakeValidator implements admin.ConnectorValidator without touching
 // the real connector registry.
 type fakeValidator struct {

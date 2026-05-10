@@ -71,6 +71,31 @@ phase.
 > (`docs/openapi.yaml`). See `docs/PROGRESS.md` 2026-05-10
 > changelog entry for the per-task breakdown.
 >
+> **Round-4 next-20 batch (2026-05-10).** Layered on top of the
+> Phase 8 batch: a retrieval evaluation harness (`internal/eval/`,
+> `migrations/012_eval_suites.sql`, `GET /v1/admin/eval/run`), an
+> opt-in GraphRAG Stage 3b (`proto/graphrag/v1/`,
+> `services/graphrag/`, `internal/pipeline/graphrag.go`), shared
+> webhook HMAC verification (`internal/connector/webhook_verify.go`)
+> across GitHub / GitLab / Jira / Teams / Slack, a retention
+> enforcement worker (`internal/admin/retention_worker.go`), a
+> source-sync cron scheduler (`internal/admin/scheduler.go` +
+> `migrations/013_sync_schedules.sql`), structured error catalog
+> (`internal/errors/`), per-tenant API rate-limit middleware
+> (`internal/admin/api_ratelimit.go`), Kafka request-id
+> propagation, Prometheus alert rules (`deploy/alerts.yaml` +
+> `make alerts-check`), retrieval fuzz tests + `make fuzz`, full
+> in-process pipeline integration test, proto contract tests,
+> chaos / fault injection (`internal/storage/fault.go`), regression
+> manifest (`tests/regression/manifest.go`), connector credential
+> rotation API (`POST /v1/admin/sources/:id/rotate-credentials`),
+> tenant usage metering (`GET /v1/admin/tenants/:id/usage`),
+> sync-progress SSE (`GET /v1/admin/sources/:id/sync/stream`),
+> index health-check (`GET /v1/admin/health/indexes`), and per-
+> migration rollback scripts (`migrations/rollback/` +
+> `make migrate-rollback`). See `docs/PROGRESS.md` 2026-05-10
+> Round-4 changelog entry for the per-task breakdown.
+>
 > **Phase 8** is **🟡 partial** as of 2026-05-10 — OpenTelemetry
 > trace instrumentation, configurable per-stage worker pools,
 > tunable Kafka rebalance config, storage connection-pool sizing,

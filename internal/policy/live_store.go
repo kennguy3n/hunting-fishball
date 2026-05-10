@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -194,6 +195,14 @@ type channelPolicyRow struct {
 
 func (channelPolicyRow) TableName() string { return "channel_policies" }
 
+// AfterFind trims trailing CHAR-padding spaces. Defensive parity with
+// migrations/011_varchar_ids.sql so reads from any pre-migration
+// snapshot still produce well-formed scope keys.
+func (r *channelPolicyRow) AfterFind(_ *gorm.DB) error {
+	r.ChannelID = strings.TrimRight(r.ChannelID, " ")
+	return nil
+}
+
 // aclRuleRow is the GORM model for policy_acl_rules.
 type aclRuleRow struct {
 	ID          string    `gorm:"type:char(26);primaryKey;column:id"`
@@ -209,6 +218,17 @@ type aclRuleRow struct {
 
 func (aclRuleRow) TableName() string { return "policy_acl_rules" }
 
+// AfterFind trims CHAR-padding spaces from the wildcard sentinels so
+// `r.SourceID == ""`, `r.ChannelID == ""`, and the namespace check in
+// ruleMatches all behave the same way they do for SQLite/in-memory
+// fixtures. Without this, Postgres-backed reads carried 26 spaces in
+// the ID columns and the ACL rule never matched the chunk attrs.
+func (r *aclRuleRow) AfterFind(_ *gorm.DB) error {
+	r.ChannelID = strings.TrimRight(r.ChannelID, " ")
+	r.SourceID = strings.TrimRight(r.SourceID, " ")
+	return nil
+}
+
 // recipientRuleRow is the GORM model for recipient_policies.
 type recipientRuleRow struct {
 	ID        string    `gorm:"type:char(26);primaryKey;column:id"`
@@ -220,3 +240,9 @@ type recipientRuleRow struct {
 }
 
 func (recipientRuleRow) TableName() string { return "recipient_policies" }
+
+// AfterFind trims CHAR-padding spaces. See aclRuleRow.AfterFind.
+func (r *recipientRuleRow) AfterFind(_ *gorm.DB) error {
+	r.ChannelID = strings.TrimRight(r.ChannelID, " ")
+	return nil
+}

@@ -333,6 +333,11 @@ func (noopEvents) EmitSourceConnected(_ context.Context, _, _, _ string) error {
 // instance's Validate.
 type registryValidator struct{}
 
+// NewRegistryValidator returns the default ConnectorValidator
+// implementation. Round-4 Task 16 needs it from cmd/api to wire
+// the credential rotator without exporting the unexported type.
+func NewRegistryValidator() ConnectorValidator { return registryValidator{} }
+
 func (registryValidator) Validate(ctx context.Context, connectorType string, cfg connector.ConnectorConfig) error {
 	factory, err := connector.GetSourceConnector(connectorType)
 	if err != nil {

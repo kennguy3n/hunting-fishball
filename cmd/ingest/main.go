@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,9 +33,12 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
+
 	// Blank-imports register each connector in the global registry via
 	// init(). Order is alphabetical to keep diffs minimal.
+	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/config"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
@@ -55,6 +59,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 	doclingv1 "github.com/kennguy3n/hunting-fishball/proto/docling/v1"
 	embeddingv1 "github.com/kennguy3n/hunting-fishball/proto/embedding/v1"
+	graphragv1 "github.com/kennguy3n/hunting-fishball/proto/graphrag/v1"
 )
 
 func main() {
@@ -176,12 +181,26 @@ func run() error {
 		EmbedWorkers: stageWorkerEnv("CONTEXT_ENGINE_EMBED_WORKERS"),
 		StoreWorkers: stageWorkerEnv("CONTEXT_ENGINE_STORE_WORKERS"),
 	}
+	// Phase 3 Stage 3b: opt-in GraphRAG entity extraction. When
+	// CONTEXT_ENGINE_GRAPHRAG_ENABLED=true and both the gRPC target
+	// and FalkorDB connection string are configured we wire the
+	// stage hook so the coordinator enriches each ingested
+	// document into the per-tenant graph.
+	graphRAG, graphRAGCloser, err := buildGraphRAGStage(context.Background())
+	if err != nil {
+		return fmt.Errorf("graphrag: %w", err)
+	}
+	if graphRAGCloser != nil {
+		defer func() { _ = graphRAGCloser.Close() }()
+	}
+
 	coord, err := pipeline.NewCoordinator(pipeline.CoordinatorConfig{
-		Fetch:   fetcher,
-		Parse:   parser,
-		Embed:   embedder,
-		Store:   storer,
-		Workers: stageWorkers,
+		Fetch:    fetcher,
+		Parse:    parser,
+		Embed:    embedder,
+		Store:    storer,
+		Workers:  stageWorkers,
+		GraphRAG: graphRAG,
 	})
 	if err != nil {
 		return fmt.Errorf("coordinator: %w", err)
@@ -214,9 +233,50 @@ func run() error {
 		return fmt.Errorf("consumer: %w", err)
 	}
 
+	// Round-4 Task 5: source-sync cron scheduler. The scheduler
+	// loop reads sync_schedules every minute and emits a
+	// pipeline.IngestEvent for any (tenant, source) whose
+	// next_run_at is overdue. Wired here because cmd/ingest already
+	// owns the Kafka producer and DB; cmd/api exposes the HTTP
+	// surface but does not produce.
+	ingestProducer, err := sarama.NewSyncProducer(brokerList, saramaCfg)
+	if err != nil {
+		return fmt.Errorf("kafka ingest producer: %w", err)
+	}
+	defer func() { _ = ingestProducer.Close() }()
+	ingestTopic := strings.SplitN(topics, ",", 2)[0]
+	syncProducer, err := pipeline.NewProducer(pipeline.ProducerConfig{
+		Producer: ingestProducer, Topic: ingestTopic,
+	})
+	if err != nil {
+		return fmt.Errorf("scheduler producer: %w", err)
+	}
+
 	// ---- Run + signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	scheduler, err := admin.NewScheduler(admin.SchedulerConfig{
+		DB: db,
+		Emitter: admin.SyncEmitterFunc(func(ctx context.Context, tenantID, sourceID string) error {
+			// Re-use the source.connected kick-off envelope so the
+			// existing backfill orchestrator picks the schedule
+			// fire up without a new code path.
+			return syncProducer.EmitSourceConnected(ctx, tenantID, sourceID, "")
+		}),
+		Logger: slog.Default(),
+	})
+	if err != nil {
+		return fmt.Errorf("scheduler: %w", err)
+	}
+	if err := scheduler.AutoMigrate(ctx); err != nil {
+		return fmt.Errorf("scheduler migrate: %w", err)
+	}
+	go func() {
+		if err := scheduler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("ingest: scheduler", slog.String("error", err.Error()))
+		}
+	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -283,7 +343,10 @@ func run() error {
 		deleter := pipeline.NewComboRetentionDeleter(pgStore, qdrant)
 		retWorker, werr := pipeline.NewRetentionWorker(pipeline.RetentionWorkerConfig{
 			Chunks: chunkSrc, Policies: policySrc, Deleter: deleter,
-			Logger: slog.Default(), Interval: interval,
+			Logger:   slog.Default(),
+			Interval: interval,
+			Audit:    audit.NewRepository(db),
+			Actor:    envOr("CONTEXT_ENGINE_RETENTION_ACTOR", ""),
 		})
 		if werr != nil {
 			return fmt.Errorf("retention worker: %w", werr)
@@ -452,4 +515,129 @@ func parseInt(s string) (int, error) {
 	}
 
 	return n, nil
+}
+
+// buildGraphRAGStage returns a non-nil pipeline.GraphRAGStage when
+// CONTEXT_ENGINE_GRAPHRAG_ENABLED is truthy and the supporting
+// dependencies (graphrag gRPC target + falkordb url) are
+// configured. Returns (nil, nil, nil) when the feature is disabled
+// or under-configured — the coordinator falls back to its 4-stage
+// pipeline.
+//
+// The returned io.Closer wraps both the gRPC client connection and
+// the Redis client that backs the FalkorDB adapter, so the caller
+// can tear down everything with a single deferred Close() at
+// process shutdown. Without closing the Redis client its connection
+// pool and any pubsub goroutines would outlive the ingest binary —
+// the previous signature returned only the gRPC connection so the
+// Redis client leaked on every shutdown and on every error path
+// after redis.NewClient succeeded.
+func buildGraphRAGStage(ctx context.Context) (pipeline.GraphRAGStage, io.Closer, error) {
+	if !envBool("CONTEXT_ENGINE_GRAPHRAG_ENABLED") {
+		return nil, nil, nil
+	}
+	target := os.Getenv("CONTEXT_ENGINE_GRAPHRAG_TARGET")
+	if target == "" {
+		observability.NewLogger("ingest").Warn(
+			"graphrag enabled but CONTEXT_ENGINE_GRAPHRAG_TARGET unset; skipping",
+		)
+		return nil, nil, nil
+	}
+	falkorURL := os.Getenv("CONTEXT_ENGINE_FALKORDB_URL")
+	if falkorURL == "" {
+		observability.NewLogger("ingest").Warn(
+			"graphrag enabled but CONTEXT_ENGINE_FALKORDB_URL unset; skipping",
+		)
+		return nil, nil, nil
+	}
+
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial graphrag: %w", err)
+	}
+
+	opts, err := redis.ParseURL(falkorURL)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("parse falkordb url: %w", err)
+	}
+	rc := redis.NewClient(opts)
+	falkor, err := storage.NewFalkorDBClient(storage.FalkorDBConfig{
+		Client:      &falkorRedisAdapter{rc: rc},
+		GraphPrefix: envOr("CONTEXT_ENGINE_FALKORDB_GRAPH_PREFIX", "hf-"),
+	})
+	if err != nil {
+		_ = rc.Close()
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("falkordb client: %w", err)
+	}
+
+	stage := &pipeline.GraphRAGStageGRPC{
+		Client:  &graphRAGGRPCClient{stub: graphragv1.NewGraphRAGServiceClient(conn)},
+		Writer:  falkor,
+		ModelID: os.Getenv("CONTEXT_ENGINE_GRAPHRAG_MODEL"),
+	}
+	observability.NewLogger("ingest").Info(
+		"graphrag stage 3b enabled",
+		"target", target,
+		"falkor_prefix", envOr("CONTEXT_ENGINE_FALKORDB_GRAPH_PREFIX", "hf-"),
+	)
+	_ = ctx
+	return stage, &graphRAGResources{conn: conn, rc: rc}, nil
+}
+
+// graphRAGResources is the io.Closer returned alongside a live
+// GraphRAGStage. It owns the gRPC client connection to the GraphRAG
+// service and the Redis client that backs the FalkorDB adapter so
+// both can be torn down with a single deferred Close() at process
+// shutdown.
+type graphRAGResources struct {
+	conn *grpc.ClientConn
+	rc   *redis.Client
+}
+
+func (g *graphRAGResources) Close() error {
+	if g == nil {
+		return nil
+	}
+	var errs []error
+	if g.conn != nil {
+		if err := g.conn.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("graphrag grpc: %w", err))
+		}
+	}
+	if g.rc != nil {
+		if err := g.rc.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("falkordb redis: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// graphRAGGRPCClient adapts the generated graphragv1 stub to the
+// narrow pipeline.GraphRAGClient contract.
+type graphRAGGRPCClient struct {
+	stub graphragv1.GraphRAGServiceClient
+}
+
+func (c *graphRAGGRPCClient) ExtractEntities(ctx context.Context, req *graphragv1.ExtractRequest) (*graphragv1.ExtractResponse, error) {
+	return c.stub.ExtractEntities(ctx, req)
+}
+
+// falkorRedisAdapter projects the *redis.Client into the narrow
+// storage.FalkorDB contract (Do(ctx, args...) FalkorCmd).
+type falkorRedisAdapter struct {
+	rc *redis.Client
+}
+
+func (a *falkorRedisAdapter) Do(ctx context.Context, args ...any) storage.FalkorCmd {
+	return a.rc.Do(ctx, args...)
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

@@ -49,6 +49,8 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/b2c"
 	"github.com/kennguy3n/hunting-fishball/internal/config"
+	errcat "github.com/kennguy3n/hunting-fishball/internal/errors"
+	"github.com/kennguy3n/hunting-fishball/internal/eval"
 	"github.com/kennguy3n/hunting-fishball/internal/lifecycle"
 	"github.com/kennguy3n/hunting-fishball/internal/migrate"
 	"github.com/kennguy3n/hunting-fishball/internal/models"
@@ -254,6 +256,12 @@ func run() error {
 	// header, and trace span carries the X-Request-ID.
 	r.Use(observability.RequestIDMiddleware())
 	r.Use(observability.PrometheusMiddleware())
+	// Round-4 Task 7: structured error envelope. The middleware
+	// converts any *errors.Error attached via c.Error() into a
+	// JSON envelope keyed by stable codes so log scanners and
+	// SDK clients can branch on machine-readable identifiers
+	// rather than HTTP status codes alone.
+	r.Use(errcat.Middleware())
 	r.GET("/metrics", gin.WrapH(observability.Handler()))
 	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	r.GET("/readyz", apiReadyzHandler(db, sharedRedis, qdrant))
@@ -306,6 +314,36 @@ func run() error {
 	}
 	adminHandler.Register(api)
 
+	// Round-4 Task 17: tenant usage metering endpoint. Maintains
+	// the tenant_usage rollup table and exposes
+	// GET /v1/admin/tenants/:id/usage. The store is also held by
+	// the API binary for hot-path increment counters.
+	meteringStore := admin.NewMeteringStoreGORM(db)
+	if err := meteringStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("tenant_usage migrate: %w", err)
+	}
+	admin.NewMeteringHandler(meteringStore).Register(api)
+
+	// Round-4 Task 16: connector credential rotation endpoint.
+	// Mounts POST /v1/admin/sources/:id/rotate-credentials. The
+	// rotator validates new credentials via the connector's
+	// Validate before swapping; the previous credential is kept
+	// for CredentialGracePeriod so in-flight requests drain.
+	(&admin.CredentialRotator{
+		Repo:      sourceRepo,
+		Audit:     auditRepo,
+		Validator: admin.NewRegistryValidator(),
+	}).Register(api)
+
+	// Round-4 Task 5: per-source cron scheduler endpoints.
+	// Mounts POST/GET/DELETE /v1/admin/sources/:id/schedule. The
+	// scheduler goroutine itself runs in cmd/ingest; the API
+	// surface only manages the schedule rows.
+	if err := db.AutoMigrate(&admin.SyncSchedule{}); err != nil {
+		return fmt.Errorf("sync_schedules migrate: %w", err)
+	}
+	admin.NewSchedulerHandler(db).Register(api)
+
 	// Phase 8 / Task 19: connector / pipeline / retrieval health
 	// dashboard endpoint. Metrics provider is optional — when nil the
 	// handler returns just connector health.
@@ -321,6 +359,42 @@ func run() error {
 		return fmt.Errorf("sync_progress migrate: %w", err)
 	}
 	admin.NewSyncProgressHandler(syncProgressStore).Register(api)
+
+	// Round-4 Task 19: per-backend index health endpoint.
+	// Mounts GET /v1/admin/health/indexes — one Ping per backend
+	// in parallel, returns 200 when all green and 503 when any
+	// backend is unhealthy. The DB checker is the GORM connection
+	// itself; vector + cache pings are wired off the existing
+	// clients.
+	indexCheckers := []admin.BackendChecker{
+		admin.PingChecker{
+			BackendName: "postgres",
+			PingFn: func(ctx context.Context) error {
+				sqlDB, err := db.DB()
+				if err != nil {
+					return err
+				}
+				return sqlDB.PingContext(ctx)
+			},
+		},
+		admin.PingChecker{BackendName: "qdrant", PingFn: qdrant.Ping},
+	}
+	if sharedRedis != nil {
+		indexCheckers = append(indexCheckers, admin.PingChecker{
+			BackendName: "redis",
+			PingFn: func(ctx context.Context) error {
+				return sharedRedis.Ping(ctx).Err()
+			},
+		})
+	}
+	admin.NewIndexHealthHandler(indexCheckers...).Register(api)
+
+	// Round-4 Task 18: server-sent-events feed for live sync progress.
+	// Mounts GET /v1/admin/sources/:id/sync/stream and pushes
+	// discovered / processed / failed / completed events as the
+	// per-namespace counters change. Polls the same store as the
+	// snapshot endpoint at StreamPollInterval (5s).
+	admin.NewProgressStreamHandler(syncProgressStore).Register(api)
 
 	// Phase 8 / Task 7: optional reindex admin surface. Wires a Kafka
 	// SyncProducer into a pipeline.ReindexOrchestrator so an admin
@@ -415,6 +489,23 @@ func run() error {
 		return fmt.Errorf("simulator handler: %w", err)
 	}
 	simHandler.Register(api)
+
+	// Phase 6 / Tasks 1: retrieval evaluation harness. Mounts
+	// /v1/admin/eval/{suites,run} so operators can replay a labelled
+	// corpus against the live retrieval handler and score
+	// Precision@K, Recall@K, MRR, NDCG. The retriever closure
+	// adapts retrievalHandler.Retrieve into the eval package's
+	// neutral request/hit shape so eval stays a leaf package.
+	evalSuiteRepo := eval.NewSuiteRepository(db)
+	evalHandler, err := eval.NewHandler(eval.HandlerConfig{
+		Suites:   evalSuiteRepo,
+		Audit:    auditRepo,
+		Retrieve: evalRetriever(retrievalHandler, liveResolver),
+	})
+	if err != nil {
+		return fmt.Errorf("eval handler: %w", err)
+	}
+	evalHandler.Register(api)
 
 	// Phase 5 server-side: shard sync API. The handler exposes
 	// `GET /v1/shards/:tenant_id`, `GET /v1/shards/:tenant_id/delta`,
@@ -608,6 +699,36 @@ func simulatorRetriever(h *retrieval.Handler) policy.RetrieverFunc {
 				Sources:      hit.Sources,
 				Metadata:     hit.Metadata,
 			})
+		}
+		return out, nil
+	}
+}
+
+// evalRetriever bridges the eval runner's neutral RetrieveFunc to
+// retrieval.Handler.RetrieveWithSnapshotCached. We deliberately
+// re-use the live path (resolver + cache + fan-out + merge + ACL
+// gate) so the eval harness scores the system the same way
+// production traffic experiences it. When the resolver fails the
+// closure returns the error so the runner records a per-case
+// failure rather than silently masking the regression.
+func evalRetriever(h *retrieval.Handler, resolver policy.PolicyResolver) eval.RetrieveFunc {
+	return func(ctx context.Context, req eval.RetrieveRequest) ([]eval.RetrieveHit, error) {
+		snap, err := resolver.Resolve(ctx, req.TenantID, "")
+		if err != nil {
+			return nil, err
+		}
+		resp, err := h.RetrieveWithSnapshotCached(ctx, req.TenantID, retrieval.RetrieveRequest{
+			Query:       req.Query,
+			TopK:        req.TopK,
+			SkillID:     req.SkillID,
+			PrivacyMode: req.PrivacyMode,
+		}, snap)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]eval.RetrieveHit, 0, len(resp.Hits))
+		for _, hit := range resp.Hits {
+			out = append(out, eval.RetrieveHit{ID: hit.ID, Score: hit.Score})
 		}
 		return out, nil
 	}

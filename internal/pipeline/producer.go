@@ -9,7 +9,19 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
+
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
+
+// requestIDFromContext returns the X-Request-ID bound on ctx by
+// observability.RequestIDMiddleware (or "" when absent). Split out
+// so producer_test can stub the lookup without importing gin.
+func requestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	return observability.RequestIDFromContext(ctx)
+}
 
 // SyncProducer is the narrow contract the producer needs from a
 // sarama.SyncProducer. *sarama.SyncProducer satisfies it; tests
@@ -50,13 +62,20 @@ func NewProducer(cfg ProducerConfig) (*Producer, error) {
 }
 
 // EmitEvent publishes a fully-formed IngestEvent. Used by the
-// backfill orchestrator and re-scope flow.
-func (p *Producer) EmitEvent(_ context.Context, evt IngestEvent) error {
+// backfill orchestrator and re-scope flow. The Kafka envelope
+// (and a sidecar `X-Request-ID` Kafka header) carries the request
+// id read from ctx via observability.RequestIDFromContext, so the
+// consumer side can reconstitute the same correlation id without
+// every caller having to populate evt.RequestID by hand.
+func (p *Producer) EmitEvent(ctx context.Context, evt IngestEvent) error {
 	if evt.TenantID == "" || evt.SourceID == "" {
 		return errors.New("producer: missing tenant/source")
 	}
 	if evt.DocumentID == "" {
 		return errors.New("producer: missing document_id")
+	}
+	if evt.RequestID == "" {
+		evt.RequestID = requestIDFromContext(ctx)
 	}
 	body, err := json.Marshal(evt)
 	if err != nil {
@@ -69,10 +88,40 @@ func (p *Producer) EmitEvent(_ context.Context, evt IngestEvent) error {
 		Value:     sarama.ByteEncoder(body),
 		Timestamp: time.Now().UTC(),
 	}
+	if evt.RequestID != "" {
+		msg.Headers = []sarama.RecordHeader{{
+			Key:   []byte(KafkaRequestIDHeader),
+			Value: []byte(evt.RequestID),
+		}}
+	}
 	if _, _, err := p.cfg.Producer.SendMessage(msg); err != nil {
 		return fmt.Errorf("producer: send: %w", err)
 	}
 	return nil
+}
+
+// KafkaRequestIDHeader is the Kafka record header used to carry the
+// originating HTTP request id. Consumers extract it via
+// RequestIDFromKafkaMessage so the pipeline stage logs and DLQ
+// rows can echo the same correlation id without parsing the JSON
+// payload.
+const KafkaRequestIDHeader = "x-request-id"
+
+// RequestIDFromKafkaMessage returns the request id stored on the
+// supplied sarama message headers, falling back to "".
+func RequestIDFromKafkaMessage(msg *sarama.ConsumerMessage) string {
+	if msg == nil {
+		return ""
+	}
+	for _, h := range msg.Headers {
+		if h == nil {
+			continue
+		}
+		if strings.EqualFold(string(h.Key), KafkaRequestIDHeader) {
+			return string(h.Value)
+		}
+	}
+	return ""
 }
 
 // EmitSourceConnected emits a kick-off event for a newly connected

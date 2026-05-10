@@ -1,0 +1,4 @@
+# Phase 3 GraphRAG entity-extraction microservice runtime deps.
+grpcio==1.80.0
+grpcio-tools==1.80.0
+protobuf>=6.0.0,<8.0.0

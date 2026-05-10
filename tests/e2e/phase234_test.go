@@ -151,7 +151,7 @@ func TestSmoke_AdminSourceCRUD(t *testing.T) {
 	// 4. DELETE — flips status to "removing"; the forget worker
 	// drains derived rows out-of-band.
 	delW := doRoute(r, http.MethodDelete, "/v1/admin/sources/"+created.ID, nil)
-	if delW.Code != http.StatusNoContent && delW.Code != http.StatusOK {
+	if delW.Code != http.StatusNoContent && delW.Code != http.StatusOK && delW.Code != http.StatusAccepted {
 		t.Fatalf("DELETE sources/:id: %d body=%s", delW.Code, delW.Body.String())
 	}
 

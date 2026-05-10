@@ -199,6 +199,14 @@ type IngestEvent struct {
 	// The coordinator paces backfill events so they don't starve the
 	// steady-state stream. Empty defaults to steady.
 	SyncMode SyncMode `json:"sync_mode,omitempty"`
+
+	// RequestID is the X-Request-ID stamped onto the originating
+	// HTTP request by observability.RequestIDMiddleware. The
+	// producer copies it into the Kafka envelope so every pipeline
+	// stage logs the same correlation id and the DLQ can echo it
+	// back into the audit row. Empty when the event was emitted
+	// from a non-HTTP source (cron scheduler, webhook receiver).
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // SyncMode classifies an IngestEvent as backfill (initial seed of a

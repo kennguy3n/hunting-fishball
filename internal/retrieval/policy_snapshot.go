@@ -47,7 +47,7 @@ func applyPolicySnapshot(allowed []*Match, snap PolicySnapshot, skillID string) 
 		if m == nil {
 			continue
 		}
-		path, _ := metadataString(m.Metadata, "path")
+		path, _ := matchPath(m)
 		nsID, _ := metadataString(m.Metadata, "namespace_id")
 		v := snap.ACL.Evaluate(policy.ChunkAttrs{
 			SourceID: m.SourceID, NamespaceID: nsID, Path: path,
@@ -123,6 +123,7 @@ func filterCachedBySnapshot(c *storage.CachedResult, snap PolicySnapshot, skillI
 		shadows[i] = &Match{
 			ID:       h.ID,
 			SourceID: h.SourceID,
+			URI:      h.URI,
 			Metadata: h.Metadata,
 		}
 	}

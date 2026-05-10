@@ -226,17 +226,26 @@ func matchFromCachedHit(h RetrieveHit) *Match {
 // matchPath extracts a path-like string from a Match. Different
 // backend adapters stuff the path in different metadata keys; we
 // probe the common ones and return the first hit so the ACL
-// evaluator has something to glob against.
+// evaluator has something to glob against. The pipeline projects
+// the canonical path into the match's URI field, so URI is the
+// final fallback after the metadata probes — without this fallback,
+// Qdrant-backed hits would never satisfy a path-glob ACL rule
+// because matchFromQdrant strips "uri" out of the metadata map.
 func matchPath(m *Match) (string, bool) {
-	if m == nil || m.Metadata == nil {
+	if m == nil {
 		return "", false
 	}
-	for _, key := range []string{"path", "uri_path", "doc_path"} {
-		if v, ok := m.Metadata[key]; ok {
-			if s, sok := v.(string); sok && s != "" {
-				return s, true
+	if m.Metadata != nil {
+		for _, key := range []string{"path", "uri_path", "doc_path"} {
+			if v, ok := m.Metadata[key]; ok {
+				if s, sok := v.(string); sok && s != "" {
+					return s, true
+				}
 			}
 		}
+	}
+	if m.URI != "" {
+		return m.URI, true
 	}
 	return "", false
 }

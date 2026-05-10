@@ -435,6 +435,129 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-10: Round-4 next-20 batch (eval harness, GraphRAG
+  Stage 3b, production hardening, testing depth, operational
+  tooling). Each task ships unit tests; full suite passes
+  under `-race`. CI Task 0 stabilised the failing full-lane
+  e2e tests (Postgres CHAR(N) blank-padding fix, retrieval ACL
+  path resolution, healthcheck blocks for docling/embedding/
+  memory). Remaining 20 tasks:
+  - **Task 1: Retrieval evaluation harness**
+    (`internal/eval/`, `migrations/012_eval_suites.sql`,
+    `GET /v1/admin/eval/run`). EvalSuite holds (query,
+    expected_chunk_ids, expected_min_score) tuples;
+    `metrics.go` computes Precision@K / Recall@K / MRR / NDCG
+    against the retrieval handler; the runner returns an
+    EvalReport; the admin handler exposes the run trigger.
+  - **Task 2: GraphRAG Stage 3b entity extraction**
+    (`proto/graphrag/v1/graphrag.proto`,
+    `services/graphrag/`, `internal/pipeline/graphrag.go`).
+    Optional pipeline hook after Embed and before Store,
+    gated by `CONTEXT_ENGINE_GRAPHRAG_ENABLED`. Writes
+    nodes/edges to FalkorDB through
+    `internal/storage/falkordb.go`.
+  - **Task 3: Webhook HMAC signature verification**
+    (`internal/connector/webhook_verify.go`). GitHub /
+    GitLab / Jira / Teams / Slack signature schemes all
+    funnel through one `VerifyHMAC(secret, payload, signature, algo)`.
+    Per-connector tests cover valid/invalid signatures.
+  - **Task 4: Retention policy enforcement worker**
+    (`internal/admin/retention_worker.go`). Periodic
+    sweeper queries chunks past their tenant TTL, fans out
+    to ForgetSweeper implementations, emits the
+    `chunk.expired` audit action.
+  - **Task 5: Source sync cron scheduler**
+    (`internal/admin/scheduler.go`,
+    `internal/admin/cron.go`,
+    `migrations/013_sync_schedules.sql`). In-house cron
+    parser drives the per-(tenant, source) schedule;
+    scheduler goroutine in `cmd/ingest` emits Kafka ingest
+    events when `next_run_at <= now()`.
+  - **Task 6: Startup config validation**
+    (`internal/config/validate.go`). Validates required
+    `CONTEXT_ENGINE_*` env vars on boot; checks numeric
+    ranges and parseable URLs; logs warnings for unset
+    optional vars with their defaults. Wired into both
+    `cmd/api` and `cmd/ingest` as the first startup step.
+  - **Task 7: Structured error catalog**
+    (`internal/errors/catalog.go`,
+    `internal/errors/middleware.go`). Typed error codes
+    (`ERR_TENANT_NOT_FOUND`, `ERR_RATE_LIMITED`, ...) with
+    HTTP status + retry hint; Gin error middleware maps
+    Go errors to structured JSON.
+  - **Task 8: Per-tenant API rate limiting middleware**
+    (`internal/admin/api_ratelimit.go`). Redis sliding
+    window distinct from the per-source ratelimit; per-
+    endpoint-class limits (retrieval 100/min, admin
+    30/min); `429 Too Many Requests` with `Retry-After`.
+  - **Task 9: Request ID propagation through Kafka**
+    (`pipeline.IngestEvent.RequestID`). Producer pulls
+    request_id from gin context; consumer logs it on
+    every stage; DLQ records the original request id.
+  - **Task 10: Prometheus alerting rules**
+    (`deploy/alerts.yaml`,
+    `internal/observability/alertcheck/`). PrometheusRule
+    manifest with IngestionLagHigh / DLQRateHigh /
+    RetrievalP95High / SourceUnhealthy / pipeline-stage
+    duration. `make alerts-check` validates the YAML.
+  - **Task 11: Fuzz tests for retrieval query parsing**
+    (`internal/retrieval/handler_fuzz_test.go`). Three Go
+    native fuzz targets cover JSON unmarshal robustness,
+    ACL evaluation with random rules, privacy-mode
+    coercion. `make fuzz` target.
+  - **Task 12: Full pipeline integration test**
+    (`tests/integration/pipeline_full_test.go`). In-process
+    Stage 1→4 with fakes for fetch/parse/embed/store;
+    happy-path + DLQ-routing + request-id-propagation
+    cases.
+  - **Task 13: Proto contract tests**
+    (`tests/integration/proto_compat_test.go`). Static
+    shape validation of Go and Python proto stubs;
+    field-number preservation; backward-compat (no
+    duplicate field numbers).
+  - **Task 14: Chaos / fault injection hooks**
+    (`internal/storage/fault.go`). FaultInjector wraps
+    storage clients; configurable error rate, latency,
+    timeout. Off by default; opt-in via
+    `CONTEXT_ENGINE_FAULT_INJECTION=true`.
+  - **Task 15: Regression test suite for PR #12 bug fixes**
+    (`tests/regression/manifest.go`). Catalogues each PR
+    #12 finding alongside the regression test that pins
+    its fix. Three meta-tests defend the manifest itself.
+  - **Task 16: Admin API for connector credential rotation**
+    (`internal/admin/credential_rotation.go`,
+    `POST /v1/admin/sources/:id/rotate-credentials`,
+    `audit.ActionSourceCredentialsRotated`). Validates
+    new credentials via the connector's Validate before
+    swapping; previous credential held for
+    CredentialGracePeriod (1h) so in-flight requests drain.
+  - **Task 17: Tenant usage metering endpoints**
+    (`internal/admin/metering.go`,
+    `migrations/014_tenant_usage.sql`,
+    `GET /v1/admin/tenants/:id/usage?from=&to=`). Daily
+    rollup of API calls / ingestion / chunk count per
+    tenant. In-process Counter buffers increments and
+    flushes via `FlushOnInterval`. Cross-tenant reads 403.
+  - **Task 18: Source sync progress SSE endpoint**
+    (`internal/admin/sync_progress_stream.go`,
+    `GET /v1/admin/sources/:id/sync/stream`). Polls the
+    SyncProgressStore and streams discovered / processed
+    / failed / completed / heartbeat events. Settles +
+    grace before sending `completed`.
+  - **Task 19: Index health check endpoint**
+    (`internal/admin/index_health.go`,
+    `GET /v1/admin/health/indexes`). Parallel
+    BackendChecker per backend (postgres / qdrant /
+    redis); 200 when all green, 503 when any
+    unhealthy. Per-backend latency + checked_at
+    surfaced in the response.
+  - **Task 20: Migration rollback scripts**
+    (`migrations/rollback/`). One `NNN_*.down.sql` per
+    forward migration 001-014; `make migrate-rollback`
+    walks them in reverse against
+    `CONTEXT_ENGINE_DATABASE_URL`. Tests confirm presence
+    + non-empty per rollback.
+
 - 2026-05-10: Phase 8 production-hardening (20-task next-batch
   landed in PR #12). Each task ships unit tests; full suite
   passes under `-race`.

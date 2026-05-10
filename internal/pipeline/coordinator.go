@@ -102,6 +102,15 @@ type CoordinatorConfig struct {
 	// just before offset commit. Used by the consumer to advance the
 	// committed offset.
 	OnSuccess func(ctx context.Context, evt IngestEvent)
+
+	// GraphRAG is the optional Stage 3b enrichment hook (entity +
+	// relation extraction → per-tenant FalkorDB graph). When nil
+	// the coordinator runs the original 4-stage pipeline. When
+	// non-nil the coordinator calls Enrich after Stage 3 and before
+	// Stage 4 — failures inside Enrich are logged and ignored so
+	// graph-side outages cannot block ingestion. See
+	// docs/ARCHITECTURE.md §3.3 "Pipeline coordinator".
+	GraphRAG GraphRAGStage
 }
 
 func (c *CoordinatorConfig) defaults() {
@@ -118,6 +127,7 @@ func (c *CoordinatorConfig) defaults() {
 		c.MaxBackoff = 5 * time.Second
 	}
 	c.Workers.defaults()
+	c.GraphRAG = graphRAGOrNoop(c.GraphRAG)
 }
 
 // CoordinatorMetrics counts the events that flow through the
@@ -329,6 +339,23 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				if !ok {
 					return
 				}
+				// Stage 3b deletion: prune the per-document
+				// subgraph from FalkorDB so delete/purge events
+				// don't leave orphan nodes/edges behind after
+				// Stage 4 cleans up Postgres + Qdrant. Best-
+				// effort like Enrich — the hook swallows
+				// transport errors so a graph outage cannot
+				// block deletion.
+				if it.evt.Kind == EventDocumentDeleted || it.evt.Kind == EventPurge {
+					if err := c.cfg.GraphRAG.Delete(gctx, it.evt.TenantID, it.evt.DocumentID); err != nil {
+						observability.NewLogger("pipeline-graphrag").Warn(
+							"graphrag stage 3b delete returned error",
+							"tenant", it.evt.TenantID,
+							"document", it.evt.DocumentID,
+							"error", err.Error(),
+						)
+					}
+				}
 				if len(it.blocks) == 0 {
 					select {
 					case <-gctx.Done():
@@ -358,6 +385,23 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				res := out.(embedResult)
 				it.embeddings = res.em
 				it.modelID = res.modelID
+
+				// Stage 3b: optional GraphRAG enrichment. Best-effort —
+				// the hook swallows transport errors so a graph
+				// outage cannot block ingestion. We re-use the
+				// pipeline's own ctx so cancellation still
+				// propagates.
+				if it.evt.Kind != EventDocumentDeleted && it.evt.Kind != EventPurge {
+					if err := c.cfg.GraphRAG.Enrich(gctx, it.doc, it.blocks); err != nil {
+						observability.NewLogger("pipeline-graphrag").Warn(
+							"graphrag stage 3b returned error",
+							"tenant", it.evt.TenantID,
+							"document", it.evt.DocumentID,
+							"error", err.Error(),
+						)
+					}
+				}
+
 				select {
 				case <-gctx.Done():
 					return

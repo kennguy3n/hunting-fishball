@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package graphrag.v1;
+
+option go_package = "github.com/kennguy3n/hunting-fishball/proto/graphrag/v1;graphragv1";
+
+// GraphRAGService extracts named entities and the relations between
+// them from chunked documents. Stage 3b of the ingestion pipeline
+// (after Stage 3 Embed, before Stage 4 Store) calls
+// ExtractEntities to derive nodes and edges, which the coordinator
+// writes to the per-tenant FalkorDB graph for traversal-aided
+// retrieval. See docs/ARCHITECTURE.md §3.3 "Pipeline coordinator".
+service GraphRAGService {
+  rpc ExtractEntities(ExtractRequest) returns (ExtractResponse);
+}
+
+// ExtractRequest is one document's worth of chunks. tenant_id is
+// forwarded for logging and quota enforcement; the extractor itself
+// is stateless so cross-tenant pollution is structurally
+// impossible.
+message ExtractRequest {
+  // tenant_id of the calling pipeline. Required.
+  string tenant_id = 1;
+
+  // document_id groups every node/edge produced from this request
+  // — the coordinator deletes-then-writes by document_id so a
+  // re-extraction supersedes prior nodes for the same document.
+  string document_id = 2;
+
+  // chunks are the parsed text segments, in document order. The
+  // extractor is allowed to span chunks when forming a relation
+  // (e.g. "[Alice in chunk 1] WORKS_AT [Acme in chunk 2]") but
+  // every node MUST point back to a single canonical chunk id.
+  repeated Chunk chunks = 3;
+
+  // model_id selects a specific extractor model. Optional —
+  // empty means "use the service default".
+  string model_id = 4;
+}
+
+message Chunk {
+  // chunk_id is the canonical id minted by the parsing stage.
+  string chunk_id = 1;
+
+  // text is the chunk content the extractor sees. The service
+  // does not store this verbatim — only the derived nodes/edges
+  // leave the call.
+  string text = 2;
+}
+
+// Node is one extracted entity. mentions[] points to chunk_ids the
+// node was observed in.
+message Node {
+  // id is a stable identifier for this entity within the document.
+  // The extractor mints it; common implementations hash the
+  // canonical name. Required.
+  string id = 1;
+
+  // label is the entity type (e.g. "Person", "Organization",
+  // "Project"). Required.
+  string label = 2;
+
+  // name is the canonical surface form ("Alice Smith"). Required.
+  string name = 3;
+
+  // mentions lists the chunk_ids the node was observed in.
+  repeated string mentions = 4;
+
+  // properties carries extractor-specific metadata
+  // (confidence, source_offsets, etc.) as primitive JSON values.
+  // Servers MUST limit value size — a single property MUST NOT
+  // exceed 4 KiB.
+  map<string, string> properties = 5;
+}
+
+message Edge {
+  // source_id and destination_id reference Node.id values from the
+  // same response.
+  string source_id = 1;
+  string destination_id = 2;
+
+  // relation is the relationship type (e.g. "WORKS_AT", "MENTIONS").
+  // Required.
+  string relation = 3;
+
+  // confidence in [0, 1] is optional; 0 means unknown.
+  float confidence = 4;
+
+  // properties carries extra metadata (e.g. evidence_chunk_id).
+  map<string, string> properties = 5;
+}
+
+message ExtractResponse {
+  repeated Node nodes = 1;
+  repeated Edge edges = 2;
+
+  // model_id echoes the model used for traceability.
+  string model_id = 3;
+}
