@@ -19,6 +19,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
@@ -57,6 +58,15 @@ type RetentionDeleter interface {
 	DeleteChunk(ctx context.Context, tenantID, documentID, chunkID string) error
 }
 
+// RetentionAuditWriter is the narrow contract the retention worker
+// uses to emit a chunk.expired audit row per evicted chunk. The
+// production wiring passes *audit.Repository; tests inject a
+// recorder. Nil disables audit emission so existing deployments
+// don't suddenly start writing to the audit log.
+type RetentionAuditWriter interface {
+	Create(ctx context.Context, log *audit.AuditLog) error
+}
+
 // RetentionWorkerConfig configures a RetentionWorker.
 type RetentionWorkerConfig struct {
 	Chunks   RetentionChunkSource
@@ -71,6 +81,17 @@ type RetentionWorkerConfig struct {
 	// inject a deterministic clock; production leaves it nil and the
 	// worker uses time.Now.
 	Now func() time.Time
+
+	// Audit, when non-nil, receives one chunk.expired event per
+	// successfully-deleted chunk so operators can correlate
+	// retention activity with the audit timeline. Nil keeps the
+	// worker silent (default).
+	Audit RetentionAuditWriter
+
+	// Actor is the actor id stamped on the chunk.expired event.
+	// Defaults to a system-actor sentinel so the audit reader can
+	// distinguish automated retention from user-initiated deletes.
+	Actor string
 }
 
 // RetentionWorker periodically sweeps chunks and deletes expired
@@ -203,8 +224,49 @@ func (w *RetentionWorker) sweepTenant(ctx context.Context, tenantID string, res 
 			continue
 		}
 		res.ChunksDeleted++
+		w.emitChunkExpired(ctx, c, eff.MaxAgeDays)
 	}
 	return nil
+}
+
+// emitChunkExpired records a chunk.expired audit event for one
+// successfully-deleted chunk. Errors writing the event are logged
+// but never block the sweep — the chunk is already gone from the
+// storage tier; we'd just rather have a paper trail when we can
+// get one.
+func (w *RetentionWorker) emitChunkExpired(ctx context.Context, c ChunkRecord, maxAgeDays int) {
+	if w.cfg.Audit == nil {
+		return
+	}
+	actor := w.cfg.Actor
+	if actor == "" {
+		actor = "00000000000000000000000000" // 26-char system actor sentinel
+	}
+	metadata := map[string]any{
+		"document_id":  c.DocumentID,
+		"source_id":    c.SourceID,
+		"namespace_id": c.NamespaceID,
+		"max_age_days": maxAgeDays,
+		"ingested_at":  c.IngestedAt.Format(time.RFC3339),
+		"chunk_id":     c.ID,
+		"deleted_by":   "retention-worker",
+	}
+	log := audit.NewAuditLog(
+		c.TenantID,
+		actor,
+		audit.ActionChunkExpired,
+		"chunk",
+		c.ID,
+		metadata,
+		"",
+	)
+	if err := w.cfg.Audit.Create(ctx, log); err != nil {
+		w.cfg.Logger.Warn("retention: audit write failed",
+			slog.String("tenant_id", c.TenantID),
+			slog.String("chunk_id", c.ID),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // SweepOnce is a thin wrapper that exposes Sweep for tests so they

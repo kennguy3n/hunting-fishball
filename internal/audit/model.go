@@ -33,6 +33,7 @@ const (
 	ActionSourceReScoped          Action = "source.re_scoped"
 	ActionSourceSyncStarted       Action = "source.sync_started"
 	ActionChunkIndexed            Action = "chunk.indexed"
+	ActionChunkExpired            Action = "chunk.expired"
 	ActionSourceSynced            Action = "source.synced"
 	ActionSourcePurged            Action = "source.purged"
 	ActionRetrievalQueried        Action = "retrieval.queried"

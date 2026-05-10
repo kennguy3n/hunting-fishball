@@ -35,6 +35,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 	// Blank-imports register each connector in the global registry via
 	// init(). Order is alphabetical to keep diffs minimal.
+	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/config"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
@@ -298,7 +299,10 @@ func run() error {
 		deleter := pipeline.NewComboRetentionDeleter(pgStore, qdrant)
 		retWorker, werr := pipeline.NewRetentionWorker(pipeline.RetentionWorkerConfig{
 			Chunks: chunkSrc, Policies: policySrc, Deleter: deleter,
-			Logger: slog.Default(), Interval: interval,
+			Logger:   slog.Default(),
+			Interval: interval,
+			Audit:    audit.NewRepository(db),
+			Actor:    envOr("CONTEXT_ENGINE_RETENTION_ACTOR", ""),
 		})
 		if werr != nil {
 			return fmt.Errorf("retention worker: %w", werr)
