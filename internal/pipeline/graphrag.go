@@ -39,6 +39,15 @@ type GraphRAGStage interface {
 	// programmer errors (nil arguments, missing tenant scope) so
 	// the coordinator can log them but continue.
 	Enrich(ctx context.Context, doc *Document, blocks []Block) error
+
+	// Delete prunes the per-document subgraph for tenantID. The
+	// coordinator calls this on EventDocumentDeleted / EventPurge
+	// so FalkorDB cleanup tracks Stage 4's Postgres + Qdrant
+	// removal. Implementations follow the same best-effort
+	// contract as Enrich: transport errors must be logged and
+	// nil-returned; non-nil reserved for programmer errors
+	// (missing tenant scope, missing writer).
+	Delete(ctx context.Context, tenantID, documentID string) error
 }
 
 // GraphRAGClient is the narrow contract this package needs from a
@@ -144,6 +153,32 @@ func (g *GraphRAGStageGRPC) Enrich(ctx context.Context, doc *Document, blocks []
 	return nil
 }
 
+// Delete prunes the document's subgraph from FalkorDB. Used by the
+// coordinator on EventDocumentDeleted / EventPurge so the graph
+// store doesn't accumulate orphan nodes/edges after a document is
+// removed from Postgres + Qdrant by Stage 4. Mirrors Enrich's
+// best-effort contract: transport errors are logged and nil is
+// returned so a graph outage cannot block ingestion.
+func (g *GraphRAGStageGRPC) Delete(ctx context.Context, tenantID, documentID string) error {
+	if tenantID == "" {
+		return errors.New("graphrag: missing tenant id")
+	}
+	if documentID == "" {
+		return errors.New("graphrag: missing document id")
+	}
+	if g.Writer == nil {
+		return errors.New("graphrag: missing writer")
+	}
+	if err := g.Writer.DeleteByDocument(ctx, tenantID, documentID); err != nil {
+		g.log().Warn("graphrag delete subgraph failed",
+			"tenant", tenantID,
+			"document", documentID,
+			"error", err.Error(),
+		)
+	}
+	return nil
+}
+
 func (g *GraphRAGStageGRPC) log() *slog.Logger {
 	if g.Logger != nil {
 		return g.Logger
@@ -242,6 +277,7 @@ func joinNonEmpty(xs []string, sep string) string {
 type noopGraphRAG struct{}
 
 func (noopGraphRAG) Enrich(_ context.Context, _ *Document, _ []Block) error { return nil }
+func (noopGraphRAG) Delete(_ context.Context, _, _ string) error            { return nil }
 
 // graphRAGOrNoop hands back a non-nil stage so the coordinator never
 // has to nil-check inside the hot path.

@@ -173,3 +173,64 @@ func TestNoopGraphRAG_EnrichIsNoop(t *testing.T) {
 		t.Fatalf("noop returned error: %v", err)
 	}
 }
+
+// TestGraphRAGStage_DeletePrunesSubgraph locks in that delete /
+// purge events propagate through to FalkorDB. Pre-fix the
+// coordinator skipped Stage 3b entirely on those events, so the
+// only call site for DeleteByDocument was the re-extract path
+// inside Enrich — orphan nodes/edges accumulated forever after a
+// document was removed from Postgres + Qdrant.
+func TestGraphRAGStage_DeletePrunesSubgraph(t *testing.T) {
+	t.Parallel()
+
+	writer := &fakeGraphWriter{}
+	stage := &GraphRAGStageGRPC{Client: &fakeGraphRAGClient{}, Writer: writer}
+
+	if err := stage.Delete(context.Background(), "tenant-a", "doc-1"); err != nil {
+		t.Fatalf("Delete error = %v", err)
+	}
+	if writer.deleteCalls != 1 {
+		t.Fatalf("writer.deleteCalls = %d, want 1", writer.deleteCalls)
+	}
+	if writer.tenantSeen != "tenant-a" || writer.docSeen != "doc-1" {
+		t.Fatalf("writer saw tenant=%q doc=%q", writer.tenantSeen, writer.docSeen)
+	}
+}
+
+func TestGraphRAGStage_DeleteSwallowsWriterError(t *testing.T) {
+	t.Parallel()
+
+	writer := &fakeGraphWriter{deleteErr: errors.New("falkordb unreachable")}
+	stage := &GraphRAGStageGRPC{Client: &fakeGraphRAGClient{}, Writer: writer}
+
+	if err := stage.Delete(context.Background(), "t", "d"); err != nil {
+		t.Fatalf("Delete must swallow writer error, got %v", err)
+	}
+	if writer.deleteCalls != 1 {
+		t.Fatalf("writer.deleteCalls = %d", writer.deleteCalls)
+	}
+}
+
+func TestGraphRAGStage_DeleteRejectsMissingArgs(t *testing.T) {
+	t.Parallel()
+
+	stage := &GraphRAGStageGRPC{Client: &fakeGraphRAGClient{}, Writer: &fakeGraphWriter{}}
+	if err := stage.Delete(context.Background(), "", "d"); err == nil {
+		t.Fatalf("expected error for missing tenant id")
+	}
+	if err := stage.Delete(context.Background(), "t", ""); err == nil {
+		t.Fatalf("expected error for missing document id")
+	}
+	noWriter := &GraphRAGStageGRPC{Client: &fakeGraphRAGClient{}}
+	if err := noWriter.Delete(context.Background(), "t", "d"); err == nil {
+		t.Fatalf("expected error for missing writer")
+	}
+}
+
+func TestNoopGraphRAG_DeleteIsNoop(t *testing.T) {
+	t.Parallel()
+
+	if err := graphRAGOrNoop(nil).Delete(context.Background(), "t", "d"); err != nil {
+		t.Fatalf("noop returned error: %v", err)
+	}
+}

@@ -291,6 +291,101 @@ func TestCoordinator_DeleteEvent(t *testing.T) {
 	}
 }
 
+// recordingGraphRAG is a GraphRAGStage fake that just records which
+// methods were invoked. It does not implement the gRPC contract;
+// it's used by TestCoordinator_DeleteEventPrunesGraph below to lock
+// in the wiring between the coordinator's Stage 3 worker and the
+// graph cleanup hook (Devin Review #3214970062).
+type recordingGraphRAG struct {
+	mu      sync.Mutex
+	deletes []recordedDelete
+	enrichs int
+}
+
+type recordedDelete struct {
+	tenantID, documentID string
+}
+
+func (r *recordingGraphRAG) Enrich(_ context.Context, _ *Document, _ []Block) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.enrichs++
+	return nil
+}
+
+func (r *recordingGraphRAG) Delete(_ context.Context, tenantID, documentID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deletes = append(r.deletes, recordedDelete{tenantID: tenantID, documentID: documentID})
+	return nil
+}
+
+// TestCoordinator_DeleteEventPrunesGraph verifies that
+// EventDocumentDeleted / EventPurge events drive a GraphRAG.Delete
+// call in addition to Store.Delete. Pre-fix the Stage 3 worker
+// short-circuited delete events past the GraphRAG hook entirely, so
+// FalkorDB nodes/edges from the deleted document were orphaned
+// permanently after Stage 4 cleaned up Postgres + Qdrant.
+func TestCoordinator_DeleteEventPrunesGraph(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	graphRAG := &recordingGraphRAG{}
+	cfg := newFastConfig(
+		fakeFetch{fn: func(_ context.Context, evt IngestEvent) (*Document, error) {
+			if evt.FetchURL == "" && len(evt.InlineContent) == 0 {
+				return nil, ErrPoisonMessage
+			}
+			return &Document{TenantID: evt.TenantID, DocumentID: evt.DocumentID}, nil
+		}},
+		fakeParse{fn: func(_ context.Context, _ *Document) ([]Block, error) { return nil, errors.New("must not parse") }},
+		fakeEmbed{fn: func(_ context.Context, _ string, _ []Block) ([][]float32, string, error) {
+			return nil, "", errors.New("must not embed")
+		}},
+		store,
+	)
+	cfg.GraphRAG = graphRAG
+	c, _ := NewCoordinator(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	if err := c.Submit(ctx, IngestEvent{Kind: EventDocumentDeleted, TenantID: "tenant-a", DocumentID: "doc-1"}); err != nil {
+		t.Fatalf("Submit delete: %v", err)
+	}
+	if err := c.Submit(ctx, IngestEvent{Kind: EventPurge, TenantID: "tenant-a", DocumentID: "doc-2"}); err != nil {
+		t.Fatalf("Submit purge: %v", err)
+	}
+	c.CloseInputs()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	graphRAG.mu.Lock()
+	defer graphRAG.mu.Unlock()
+	if len(graphRAG.deletes) != 2 {
+		t.Fatalf("graphRAG.deletes = %d, want 2 (one per delete/purge event)", len(graphRAG.deletes))
+	}
+	if graphRAG.enrichs != 0 {
+		t.Fatalf("graphRAG.enrichs = %d, want 0 — delete/purge must not enrich", graphRAG.enrichs)
+	}
+	want := map[string]bool{"doc-1": false, "doc-2": false}
+	for _, d := range graphRAG.deletes {
+		if d.tenantID != "tenant-a" {
+			t.Fatalf("delete tenant = %q", d.tenantID)
+		}
+		if _, ok := want[d.documentID]; !ok {
+			t.Fatalf("unexpected document = %q", d.documentID)
+		}
+		want[d.documentID] = true
+	}
+	for doc, seen := range want {
+		if !seen {
+			t.Fatalf("graphRAG.Delete not called for %q", doc)
+		}
+	}
+}
+
 func TestCoordinator_GracefulShutdown(t *testing.T) {
 	t.Parallel()
 

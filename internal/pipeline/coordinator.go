@@ -339,6 +339,23 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				if !ok {
 					return
 				}
+				// Stage 3b deletion: prune the per-document
+				// subgraph from FalkorDB so delete/purge events
+				// don't leave orphan nodes/edges behind after
+				// Stage 4 cleans up Postgres + Qdrant. Best-
+				// effort like Enrich — the hook swallows
+				// transport errors so a graph outage cannot
+				// block deletion.
+				if it.evt.Kind == EventDocumentDeleted || it.evt.Kind == EventPurge {
+					if err := c.cfg.GraphRAG.Delete(gctx, it.evt.TenantID, it.evt.DocumentID); err != nil {
+						observability.NewLogger("pipeline-graphrag").Warn(
+							"graphrag stage 3b delete returned error",
+							"tenant", it.evt.TenantID,
+							"document", it.evt.DocumentID,
+							"error", err.Error(),
+						)
+					}
+				}
 				if len(it.blocks) == 0 {
 					select {
 					case <-gctx.Done():
