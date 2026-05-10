@@ -49,6 +49,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/b2c"
 	"github.com/kennguy3n/hunting-fishball/internal/config"
+	errcat "github.com/kennguy3n/hunting-fishball/internal/errors"
 	"github.com/kennguy3n/hunting-fishball/internal/eval"
 	"github.com/kennguy3n/hunting-fishball/internal/lifecycle"
 	"github.com/kennguy3n/hunting-fishball/internal/migrate"
@@ -255,6 +256,12 @@ func run() error {
 	// header, and trace span carries the X-Request-ID.
 	r.Use(observability.RequestIDMiddleware())
 	r.Use(observability.PrometheusMiddleware())
+	// Round-4 Task 7: structured error envelope. The middleware
+	// converts any *errors.Error attached via c.Error() into a
+	// JSON envelope keyed by stable codes so log scanners and
+	// SDK clients can branch on machine-readable identifiers
+	// rather than HTTP status codes alone.
+	r.Use(errcat.Middleware())
 	r.GET("/metrics", gin.WrapH(observability.Handler()))
 	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	r.GET("/readyz", apiReadyzHandler(db, sharedRedis, qdrant))
