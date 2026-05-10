@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 38,
+  "uid": "context-engine-overview",
+  "title": "Context Engine — Overview",
+  "tags": ["context-engine", "hunting-fishball"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prom" },
+        "query": "label_values(context_engine_retrieval_requests_total, tenant_id)",
+        "includeAll": true,
+        "multi": false,
+        "label": "Tenant"
+      },
+      {
+        "name": "backend",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prom" },
+        "query": "label_values(context_engine_retrieval_backend_duration_seconds_bucket, backend)",
+        "includeAll": true,
+        "multi": true,
+        "label": "Backend"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Pipeline Stage Duration p95 (s)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (stage, le) (rate(context_engine_pipeline_stage_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "description": "p95 stage duration (fetch / parse / embed / store). Alert: PipelineStageSlow fires above 30s for 5m."
+    },
+    {
+      "id": 2,
+      "title": "Retrieval p95 latency by backend (s)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (backend, le) (rate(context_engine_retrieval_backend_duration_seconds_bucket{backend=~\"$backend\"}[5m])))",
+          "legendFormat": "{{backend}}"
+        }
+      ],
+      "description": "p95 latency per retrieval backend (vector / lexical / graph / memory). Alert: RetrievalP95High fires when total p95 > 500ms for 5m."
+    },
+    {
+      "id": 3,
+      "title": "Kafka Consumer Lag",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "max by (topic, group) (context_engine_kafka_consumer_lag)",
+          "legendFormat": "{{group}}/{{topic}}"
+        }
+      ],
+      "description": "Maximum lag per consumer group/topic. Alert: IngestionLagHigh > 10k 5m, IngestionLagSustained > 50k 30m."
+    },
+    {
+      "id": 4,
+      "title": "DLQ Depth Over Time",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (original_topic) (context_engine_dlq_depth)",
+          "legendFormat": "{{original_topic}}"
+        },
+        {
+          "expr": "sum(rate(context_engine_dlq_messages_total[5m]))",
+          "legendFormat": "DLQ rate (5m)"
+        }
+      ],
+      "description": "DLQ row count + ingest rate. Alert: DLQRateHigh fires when 5m rate > 1 msg/s."
+    },
+    {
+      "id": 5,
+      "title": "Connector Health Matrix",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        {
+          "expr": "max by (tenant_id, connector, source_id) (context_engine_source_error_count)",
+          "legendFormat": "{{tenant_id}}/{{connector}}/{{source_id}}"
+        }
+      ],
+      "description": "Per-source error count emitted by source_health. Alert: SourceUnhealthy fires when error count > 25 for 10m."
+    },
+    {
+      "id": 6,
+      "title": "API Request Rate + Error Rate (per second)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(rate(context_engine_api_requests_total{tenant_id=~\"$tenant\"}[1m]))",
+          "legendFormat": "Total RPS"
+        },
+        {
+          "expr": "sum(rate(context_engine_api_requests_total{tenant_id=~\"$tenant\", status_code=~\"5..\"}[1m]))",
+          "legendFormat": "5xx RPS"
+        },
+        {
+          "expr": "sum(rate(context_engine_api_requests_total{tenant_id=~\"$tenant\", status_code=~\"4..\"}[1m]))",
+          "legendFormat": "4xx RPS"
+        }
+      ],
+      "description": "Aggregate request and error rates. Cross-reference with the connector health matrix to localise failures."
+    },
+    {
+      "id": 7,
+      "title": "Token Refreshes (Round-5 Task 2)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prom" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum by (connector, status) (rate(context_engine_token_refreshes_total[5m]))",
+          "legendFormat": "{{connector}}/{{status}}"
+        }
+      ],
+      "description": "OAuth token refresh attempts the admin worker drives. status one of success / skipped / validation_error / transport_error."
+    },
+    {
+      "id": 8,
+      "title": "Auto-reindex Triggers (Round-5 Task 18)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prom" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum by (backend, result) (rate(context_engine_index_auto_reindexes_total[15m]))",
+          "legendFormat": "{{backend}}/{{result}}"
+        }
+      ],
+      "description": "Watchdog-scheduled reindex jobs. A sudden jump means a backend went unhealthy on multiple tenants."
+    }
+  ]
+}
