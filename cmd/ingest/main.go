@@ -32,6 +32,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 	// Blank-imports register each connector in the global registry via
 	// init(). Order is alphabetical to keep diffs minimal.
@@ -230,9 +231,50 @@ func run() error {
 		return fmt.Errorf("consumer: %w", err)
 	}
 
+	// Round-4 Task 5: source-sync cron scheduler. The scheduler
+	// loop reads sync_schedules every minute and emits a
+	// pipeline.IngestEvent for any (tenant, source) whose
+	// next_run_at is overdue. Wired here because cmd/ingest already
+	// owns the Kafka producer and DB; cmd/api exposes the HTTP
+	// surface but does not produce.
+	ingestProducer, err := sarama.NewSyncProducer(brokerList, saramaCfg)
+	if err != nil {
+		return fmt.Errorf("kafka ingest producer: %w", err)
+	}
+	defer func() { _ = ingestProducer.Close() }()
+	ingestTopic := strings.SplitN(topics, ",", 2)[0]
+	syncProducer, err := pipeline.NewProducer(pipeline.ProducerConfig{
+		Producer: ingestProducer, Topic: ingestTopic,
+	})
+	if err != nil {
+		return fmt.Errorf("scheduler producer: %w", err)
+	}
+
 	// ---- Run + signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	scheduler, err := admin.NewScheduler(admin.SchedulerConfig{
+		DB: db,
+		Emitter: admin.SyncEmitterFunc(func(ctx context.Context, tenantID, sourceID string) error {
+			// Re-use the source.connected kick-off envelope so the
+			// existing backfill orchestrator picks the schedule
+			// fire up without a new code path.
+			return syncProducer.EmitSourceConnected(ctx, tenantID, sourceID, "")
+		}),
+		Logger: slog.Default(),
+	})
+	if err != nil {
+		return fmt.Errorf("scheduler: %w", err)
+	}
+	if err := scheduler.AutoMigrate(ctx); err != nil {
+		return fmt.Errorf("scheduler migrate: %w", err)
+	}
+	go func() {
+		if err := scheduler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("ingest: scheduler", slog.String("error", err.Error()))
+		}
+	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

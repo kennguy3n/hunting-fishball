@@ -307,6 +307,15 @@ func run() error {
 	}
 	adminHandler.Register(api)
 
+	// Round-4 Task 5: per-source cron scheduler endpoints.
+	// Mounts POST/GET/DELETE /v1/admin/sources/:id/schedule. The
+	// scheduler goroutine itself runs in cmd/ingest; the API
+	// surface only manages the schedule rows.
+	if err := db.AutoMigrate(&admin.SyncSchedule{}); err != nil {
+		return fmt.Errorf("sync_schedules migrate: %w", err)
+	}
+	admin.NewSchedulerHandler(db).Register(api)
+
 	// Phase 8 / Task 19: connector / pipeline / retrieval health
 	// dashboard endpoint. Metrics provider is optional — when nil the
 	// handler returns just connector health.
