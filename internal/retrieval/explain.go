@@ -94,10 +94,20 @@ func IsExplainAuthorized(c *gin.Context, envEnabled bool) bool {
 }
 
 // BuildExplain projects an internal *Match into the public
-// RetrievalExplain shape. Every match carries enough signal to
-// populate the projection — Match.OriginalScore is the BM25 score
-// before the merger zeros Score, Match.Score is the post-merger
-// RRF score, and Match.Rank is the merger's fused rank.
+// RetrievalExplain shape. Match.Score is the post-merger RRF score
+// and Match.Rank is the merger's fused rank.
+//
+// Match.OriginalScore is intentionally backend-specific: per
+// merger.go:63 it is "currently populated for SourceBM25 only" —
+// the merger preserves it when the BM25 stream contributes a hit
+// so the reranker can blend the lexical signal in. So we only
+// project OriginalScore onto the BM25 explain field; for other
+// contributing backends we leave their score zero (omitted from
+// the JSON via omitempty) until they grow per-source score
+// preservation. Assigning OriginalScore to VectorSimilarity /
+// MemoryScore on a multi-source match would falsely report the
+// BM25 score as the vector cosine or memory match, which the
+// merger never computed.
 //
 // Pre-rerank and post-rerank scores are tracked separately on the
 // match so the reranker adjustment can be surfaced as a delta.
@@ -115,12 +125,10 @@ func BuildExplain(m *Match, preRerankScore float32) *RetrievalExplain {
 	}
 	for _, s := range m.Sources {
 		switch s {
-		case SourceVector:
-			exp.VectorSimilarity = m.OriginalScore
 		case SourceBM25:
+			// OriginalScore is BM25-specific (merger.go:63) so we
+			// only attribute it here.
 			exp.BM25Score = m.OriginalScore
-		case SourceMemory:
-			exp.MemoryScore = m.OriginalScore
 		case SourceGraph:
 			// Graph traversal depth lives in metadata under the
 			// "graph_traversal_depth" key when the graph adapter
@@ -131,6 +139,12 @@ func BuildExplain(m *Match, preRerankScore float32) *RetrievalExplain {
 			} else if exp.GraphTraversalDepth == 0 {
 				exp.GraphTraversalDepth = 1
 			}
+		case SourceVector, SourceMemory:
+			// OriginalScore is not preserved for these backends
+			// today (only BM25 sets it). Leaving the field zero
+			// is more honest than falsely projecting a BM25
+			// number. When per-source score tracking lands, set
+			// the appropriate field here.
 		}
 	}
 	return exp

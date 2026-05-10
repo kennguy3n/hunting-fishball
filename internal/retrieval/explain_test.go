@@ -189,6 +189,64 @@ func TestExplain_FeatureFlagOverride(t *testing.T) {
 	}
 }
 
+// TestBuildExplain_MultiSourceDoesNotMisattributeBM25Score regression-tests
+// the fix for BUG_pr-review-job-..._0002. When a match was contributed
+// by multiple backends (e.g. vector + BM25), the prior implementation
+// looped over m.Sources and assigned m.OriginalScore to every
+// backend's score field. Since OriginalScore is BM25-specific
+// (merger.go:63), the BM25 number leaked into VectorSimilarity and
+// MemoryScore. The fix only projects OriginalScore onto BM25Score.
+func TestBuildExplain_MultiSourceDoesNotMisattributeBM25Score(t *testing.T) {
+	t.Parallel()
+	// Match contributed by both vector and BM25 streams. The
+	// merger preserved the BM25 stream's score in OriginalScore
+	// (its only consumer) and zeroed Score with the RRF fused
+	// score.
+	m := &retrieval.Match{
+		ID:            "doc:b1",
+		Source:        retrieval.SourceVector,
+		Sources:       []string{retrieval.SourceVector, retrieval.SourceBM25},
+		Score:         0.0167, // post-merger RRF
+		OriginalScore: 7.5,    // BM25 lexical relevance
+		Rank:          1,
+	}
+	exp := retrieval.BuildExplain(m, 0.0167)
+	if exp == nil {
+		t.Fatal("expected non-nil explain")
+	}
+	if exp.BM25Score != 7.5 {
+		t.Fatalf("BM25Score: got %v want 7.5", exp.BM25Score)
+	}
+	if exp.VectorSimilarity != 0 {
+		t.Fatalf("VectorSimilarity must NOT be set from OriginalScore; got %v", exp.VectorSimilarity)
+	}
+	if exp.MemoryScore != 0 {
+		t.Fatalf("MemoryScore must NOT be set from OriginalScore; got %v", exp.MemoryScore)
+	}
+}
+
+// TestBuildExplain_VectorOnlyMatchHasNoMisattribution covers the
+// edge case where a match is contributed by a non-BM25 backend
+// only. Since the merger doesn't preserve OriginalScore for those
+// backends, the corresponding score field must stay zero.
+func TestBuildExplain_VectorOnlyMatchHasNoMisattribution(t *testing.T) {
+	t.Parallel()
+	m := &retrieval.Match{
+		ID:            "doc:b1",
+		Source:        retrieval.SourceVector,
+		Sources:       []string{retrieval.SourceVector},
+		Score:         0.91,
+		OriginalScore: 0, // not preserved for vector
+	}
+	exp := retrieval.BuildExplain(m, 0.91)
+	if exp.VectorSimilarity != 0 {
+		t.Fatalf("VectorSimilarity should remain 0 (OriginalScore not vector-aware), got %v", exp.VectorSimilarity)
+	}
+	if exp.BM25Score != 0 {
+		t.Fatalf("BM25Score should remain 0 for vector-only match, got %v", exp.BM25Score)
+	}
+}
+
 func TestExplain_NotRequestedReturnsNil(t *testing.T) {
 	t.Parallel()
 	vs := &fakeVectorStore{
