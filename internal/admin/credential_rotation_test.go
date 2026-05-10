@@ -317,4 +317,101 @@ func TestCredentialRotator_HTTP_HappyPath(t *testing.T) {
 	if len(acts) != 1 || acts[0] != audit.ActionSourceCredentialsRotated {
 		t.Fatalf("audit actions = %v; want exactly source.credentials_rotated", acts)
 	}
+	// Regression: actor_id from the auth middleware must propagate
+	// onto the audit row. Gin's c.Set values do NOT flow through
+	// c.Request.Context(), so handle() has to bridge the actor onto
+	// the Go context before calling Rotate. Without that bridge the
+	// audit log lands with ActorID="" and SOC has no idea who did
+	// what.
+	logs := ad.auditLogs()
+	if len(logs) != 1 {
+		t.Fatalf("audit logs = %d; want 1", len(logs))
+	}
+	if logs[0].ActorID != "actor-1" {
+		t.Fatalf("audit log ActorID = %q; want \"actor-1\" (Gin auth middleware sets actor-1; handle() must bridge it into ctx)", logs[0].ActorID)
+	}
+}
+
+// TestCredentialRotator_ValidationErrorWrapsSentinel is the
+// Go-level regression for the round-4 Devin Review finding that
+// Rotate() did not distinguish caller-side credential rejections
+// from server-side faults. It used to return a bare "validate: %w"
+// wrapper which the HTTP handler then mapped to 400 alongside DB
+// errors. The fix wraps validate errors with ErrCredentialValidation
+// so the HTTP layer can branch on errors.Is.
+func TestCredentialRotator_ValidationErrorWrapsSentinel(t *testing.T) {
+	t.Parallel()
+	repo, _ := newSQLiteSourceRepo(t)
+	ctx := context.Background()
+	src := admin.NewSource("tenant-a", "google-drive", admin.JSONMap{"credentials": []byte("OLD")}, nil)
+	if err := repo.Create(ctx, src); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rotator := &admin.CredentialRotator{
+		Repo: repo, Audit: &fakeAudit{},
+		Validator: &fakeValidator{err: errors.New("bad creds")},
+	}
+	_, err := rotator.Rotate(ctx, "tenant-a", src.ID, admin.CredentialRotateRequest{Credentials: []byte("NEW")})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, admin.ErrCredentialValidation) {
+		t.Fatalf("err %v does not wrap ErrCredentialValidation; HTTP layer cannot distinguish 400 vs 500", err)
+	}
+}
+
+// TestCredentialRotator_HTTP_ValidatorErrorIs400 is the HTTP
+// regression for the same finding. A validator failure must surface
+// as 400 (caller-side fault), distinct from server-side errors
+// which are 500.
+func TestCredentialRotator_HTTP_ValidatorErrorIs400(t *testing.T) {
+	t.Parallel()
+	repo, _ := newSQLiteSourceRepo(t)
+	src := admin.NewSource("tenant-a", "google-drive", admin.JSONMap{"credentials": []byte("OLD")}, nil)
+	_ = repo.Create(context.Background(), src)
+	rotator := &admin.CredentialRotator{
+		Repo: repo, Audit: &fakeAudit{},
+		Validator: &fakeValidator{err: errors.New("bad creds")},
+	}
+	r := rotatorRouter(t, rotator, "tenant-a")
+	body := mustJSON(t, admin.CredentialRotateRequest{Credentials: []byte("NEW")})
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sources/"+src.ID+"/rotate-credentials", body)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400 (validator rejection is a caller-side fault)", w.Code)
+	}
+}
+
+// TestCredentialRotator_HTTP_DBErrorIs500 is the second HTTP
+// regression. A wrapped DB / infrastructure error must surface as
+// 500 so the 4xx/5xx split mirrors actual fault location, and so
+// the 5xx alerting path is not silently bypassed.
+func TestCredentialRotator_HTTP_DBErrorIs500(t *testing.T) {
+	t.Parallel()
+	repo, db := newSQLiteSourceRepo(t)
+	src := admin.NewSource("tenant-a", "google-drive", admin.JSONMap{"credentials": []byte("OLD")}, nil)
+	if err := repo.Create(context.Background(), src); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Close the underlying SQLite handle so the rotation's
+	// UPDATE fails. Validator still succeeds, so any error must
+	// come from the DB write.
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("db.DB: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	rotator := &admin.CredentialRotator{Repo: repo, Audit: &fakeAudit{}, Validator: &fakeValidator{}}
+	r := rotatorRouter(t, rotator, "tenant-a")
+	body := mustJSON(t, admin.CredentialRotateRequest{Credentials: []byte("NEW")})
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sources/"+src.ID+"/rotate-credentials", body)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d; want 500 (closed-DB UPDATE is a server-side fault, must NOT be 400)", w.Code)
+	}
 }

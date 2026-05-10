@@ -39,6 +39,13 @@ import (
 // off-boarded employee's token does not linger.
 const CredentialGracePeriod = time.Hour
 
+// ErrCredentialValidation is the sentinel returned from Rotate()
+// when the connector's Validate() rejects the candidate credentials.
+// Callers use errors.Is to map it to HTTP 400 (caller-side fault),
+// distinguishing it from wrapped DB / encoding / connector-registry
+// errors which are server-side and map to 500.
+var ErrCredentialValidation = errors.New("admin: invalid credentials")
+
 // CredentialRotateRequest is the POST body. The new credentials
 // blob is the same shape the original Connect endpoint accepts.
 type CredentialRotateRequest struct {
@@ -98,20 +105,34 @@ func (r *CredentialRotator) handle(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "credentials required"})
 		return
 	}
-	res, err := r.Rotate(c.Request.Context(), tenantID, id, req)
-	if errors.Is(err, ErrSourceNotFound) {
+	// Bridge the actor from Gin's Keys map (where the auth
+	// middleware writes it via c.Set) into the Go context.Context
+	// chain so Rotate's audit event records a non-empty actor_id.
+	// c.Request.Context() alone never sees Gin-injected values, so
+	// without this hop every HTTP-initiated rotation lands an audit
+	// row with ActorID="" — untraceable for SOC.
+	ctx := c.Request.Context()
+	if actor := actorIDFromContext(c); actor != "" {
+		ctx = ContextWithActor(ctx, actor)
+	}
+	res, err := r.Rotate(ctx, tenantID, id, req)
+	switch {
+	case err == nil:
+		c.JSON(http.StatusOK, res)
+	case errors.Is(err, ErrSourceNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
-		return
-	}
-	if errors.Is(err, ErrSourceTerminal) {
+	case errors.Is(err, ErrSourceTerminal):
 		c.JSON(http.StatusConflict, gin.H{"error": "source is in a terminal status; cannot rotate credentials"})
-		return
-	}
-	if err != nil {
+	case errors.Is(err, ErrCredentialValidation):
+		// Caller-side fault: connector rejected the candidate
+		// credentials. 400 keeps it out of the 5xx alert bucket.
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	default:
+		// Wrapped DB / connector-registry / encoding failure. These
+		// are server-side; reporting 400 hides them from the 5xx
+		// alerting path and skews error budgets.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 	}
-	c.JSON(http.StatusOK, res)
 }
 
 // Rotate is the testable core. It validates the new credentials
@@ -144,7 +165,11 @@ func (r *CredentialRotator) Rotate(ctx context.Context, tenantID, sourceID strin
 		return CredentialRotateResponse{}, ErrSourceTerminal
 	}
 
-	// Validate the new credentials before any mutation.
+	// Validate the new credentials before any mutation. Wrap with
+	// the ErrCredentialValidation sentinel so the HTTP layer can
+	// distinguish caller-side credential rejections (400) from
+	// server-side faults like wrapped DB errors (500). The Go 1.20+
+	// multi-%w form keeps both targets reachable via errors.Is.
 	if err := r.Validator.Validate(ctx, src.ConnectorType, connector.ConnectorConfig{
 		Name:        src.ConnectorType,
 		TenantID:    tenantID,
@@ -152,7 +177,7 @@ func (r *CredentialRotator) Rotate(ctx context.Context, tenantID, sourceID strin
 		Settings:    map[string]any(src.Config),
 		Credentials: req.Credentials,
 	}); err != nil {
-		return CredentialRotateResponse{}, fmt.Errorf("validate: %w", err)
+		return CredentialRotateResponse{}, fmt.Errorf("validate: %w: %w", ErrCredentialValidation, err)
 	}
 
 	// Capture the rotation instant ONCE and reuse for every
