@@ -31,7 +31,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
@@ -401,8 +400,6 @@ func (e *RefreshValidationError) Unwrap() error { return e.Err }
 type OAuth2RefreshClient struct {
 	HTTPClient *http.Client
 	Now        func() time.Time
-
-	mu sync.Mutex
 }
 
 // NewOAuth2RefreshClient returns a client with sensible defaults.
@@ -443,7 +440,7 @@ func (c *OAuth2RefreshClient) Refresh(ctx context.Context, p RefreshParams) (Ref
 	if err != nil {
 		return RefreshResult{}, fmt.Errorf("oauth: do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var body struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
