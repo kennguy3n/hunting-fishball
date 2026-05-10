@@ -44,7 +44,7 @@ func TestComputeMetrics_RankPositionMatters(t *testing.T) {
 func TestComputeMetrics_PrecisionAtK_PartialRelevant(t *testing.T) {
 	t.Parallel()
 	got := ComputeMetrics([]string{"a", "x", "b", "y"}, []string{"a", "b", "c"}, 4)
-	wantP := 0.5  // 2 hits / 4
+	wantP := 0.5 // 2 hits / 4
 	wantR := 2.0 / 3.0
 	if math.Abs(got.PrecisionAtK-wantP) > 1e-9 {
 		t.Fatalf("precision: %v want %v", got.PrecisionAtK, wantP)

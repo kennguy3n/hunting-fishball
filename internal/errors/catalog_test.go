@@ -1,8 +1,8 @@
 package errors_test
 
 import (
-	stderrors "errors"
 	"encoding/json"
+	stderrors "errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"

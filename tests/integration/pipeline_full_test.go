@@ -204,8 +204,8 @@ func TestFullPipeline_DLQRoutesOnStageError(t *testing.T) {
 
 	for _, doc := range []string{"doc-ok-0", "doc-bad", "doc-ok-1"} {
 		_ = coord.Submit(ctx, pipeline.IngestEvent{
-			Kind:       pipeline.EventDocumentChanged,
-			TenantID:   "t1", SourceID: "s1", DocumentID: doc,
+			Kind:     pipeline.EventDocumentChanged,
+			TenantID: "t1", SourceID: "s1", DocumentID: doc,
 			RequestID: "rid-" + doc,
 		})
 	}

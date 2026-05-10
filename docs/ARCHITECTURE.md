@@ -258,6 +258,15 @@ g.Go(func() error { return runStore(ctx, embedCh, storeCh, qdrant, falkor, pg) }
   (graph), Tantivy (lexical), and PostgreSQL (metadata). Writes are
   batched; commits go through a transactional outbox so partial failures
   do not leave dangling state.
+- **Stage 3b: Entity extraction (gRPC → GraphRAG, optional, Round-4
+  Task 2).** When `CONTEXT_ENGINE_GRAPHRAG_ENABLED=true`, the
+  coordinator hooks `internal/pipeline/graphrag.go` between Embed
+  and Store. The GraphRAG service in `services/graphrag/` returns
+  nodes + edges extracted from the parsed blocks; the coordinator
+  writes them to FalkorDB through `internal/storage/falkordb.go`
+  alongside the Stage 4 vector writes. This stage is opt-in and
+  off by default — pipelines without graph requirements pay zero
+  overhead.
 
 ### 3.4 Idempotency
 
@@ -439,6 +448,41 @@ time and the `policy` field records the degradation.
 The cache is invalidated lazily — when a Stage 4 storage write touches a
 chunk that participates in a cached entry, the entry is dropped.
 
+### 4.5 Evaluation harness
+
+PROPOSAL.md §1 lists "an evaluation harness that knows whether
+retrieval is actually any good" as one of the 5 core capabilities.
+The harness lives in `internal/eval/` and is exposed through the
+admin API.
+
+- **Suite (`internal/eval/eval.go`).** An `EvalSuite` is a
+  named collection of `(query, expected_chunk_ids,
+  expected_min_score)` tuples. Suites are scoped per-tenant
+  and persisted in the `eval_suites` table
+  (`migrations/012_eval_suites.sql`). The corpus is stored as
+  JSONB so a suite can be edited without a schema migration.
+- **Metrics (`internal/eval/metrics.go`).** Pure functions that
+  take a `[]RetrieveHit` plus the expected chunk IDs and return:
+  - **Precision@K** — fraction of the top-K hits that are in the
+    expected set.
+  - **Recall@K** — fraction of the expected set that appears in
+    the top-K hits.
+  - **MRR** — mean reciprocal rank over the eval queries.
+  - **NDCG@K** — discounted gain weighting earlier-positioned
+    relevant hits.
+- **Runner (`internal/eval/runner.go`).** Walks the suite,
+  drives the retrieval handler for each query, and aggregates the
+  per-query metrics into an `EvalReport`. The handler is passed
+  in as a function pointer so the runner is unit-testable with a
+  fake retrieval implementation.
+- **Admin handler (`internal/eval/handler.go`).**
+  `GET /v1/admin/eval/run` mounts the runner; an admin can hit
+  the endpoint for a one-shot regression suite at deploy time.
+
+The harness is what gates "is retrieval still any good after
+that change to ACL evaluation / reranker / embedding model?"
+in pre-deploy CI.
+
 ---
 
 ## 5. Multi-tenancy
@@ -534,6 +578,51 @@ Dashboards are owned by SRE and stored in the platform backend's
   Keystore on Android, DPAPI on Windows, `libsecret` on Linux).
 - **Forgetting.** Cryptographic destruction of per-tenant keys renders
   any residual snapshots unreadable.
+
+### 7.1 Webhook security (Round-4 Task 3)
+
+Connectors that implement `WebhookReceiver` (GitHub, GitLab,
+Jira, Teams, Slack) validate the originating webhook before
+trusting any payload. The shared validator lives in
+`internal/connector/webhook_verify.go`:
+
+```go
+func VerifyHMAC(secret, payload []byte, signature, algo string) error
+```
+
+Each connector funnels its provider-specific scheme into this
+function:
+
+| Provider | Header | Algorithm |
+|----------|--------|-----------|
+| GitHub | `X-Hub-Signature-256` | HMAC-SHA256 hex |
+| GitLab | `X-Gitlab-Token` | shared-secret compare |
+| Jira | `X-Atlassian-Webhook-Signature` | HMAC-SHA256 |
+| Teams | `Authorization: Bearer …` | shared-secret compare |
+| Slack | `X-Slack-Signature` + `X-Slack-Request-Timestamp` | HMAC-SHA256 with replay window |
+
+Verification fails-closed: an unsigned or mis-signed payload
+returns 401 before any storage or audit side-effects. Per-
+connector unit tests cover both valid and invalid signatures
+plus replay-window edges where applicable.
+
+### 7.2 Connector credential rotation (Round-4 Task 16)
+
+`POST /v1/admin/sources/:id/rotate-credentials`
+(`internal/admin/credential_rotation.go`) accepts a new
+credential blob, runs the connector's `Validate` against it
+*before* mutating any state, then atomically swaps:
+
+- new credentials replace the source's `Credentials` field;
+- previous credentials are stashed under `previous_credentials`
+  with an `expiry_at` set `CredentialGracePeriod` (default 1h)
+  in the future, so in-flight requests holding the old
+  credential drain naturally;
+- a `source.credentials_rotated` audit row is emitted with
+  actor, reason, and the grace-period expiry.
+
+A rotation that fails Validate leaves every field untouched —
+no half-rotated state.
 
 ---
 
@@ -713,6 +802,13 @@ hunting-fishball/
 │   │                          # tracks applied migrations in the
 │   │                          # schema_migrations table, supports
 │   │                          # DryRun. Wired behind AUTO_MIGRATE.
+│   ├── eval/                  # Round-4 Task 1: retrieval evaluation
+│   │                          # harness (suite + metrics + runner +
+│   │                          # admin handler) — see §4.5
+│   ├── errors/                # Round-4 Task 7: structured error
+│   │                          # catalog (typed codes + Gin
+│   │                          # middleware that maps Go errors to
+│   │                          # the wire JSON shape)
 │   ├── policy/                # see Phase 4 entry above; Phase 6 /
 │   │                          # Task 15 added device_first.go
 │   │                          # (Decide → prefer_local hint) consumed
@@ -746,11 +842,16 @@ hunting-fishball/
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
+│   ├── graphrag/v1/           # Round-4 Task 2: GraphRAG entity
+│   │                          # extraction (ExtractEntities RPC,
+│   │                          # nodes + edges, Stage 3b)
 │   └── memory/v1/             # Mem0 persistent memory service
 ├── services/                  # Python ML microservices (Phase 3)
 │   ├── _proto/                # generated Python gRPC stubs
 │   ├── docling/               # Docling gRPC server + Dockerfile
 │   ├── embedding/             # sentence-transformers gRPC server
+│   ├── graphrag/              # Round-4 Task 2: GraphRAG gRPC server
+│   │                          # (entity + relation extraction)
 │   ├── memory/                # Mem0 gRPC server + Dockerfile
 │   └── gen_protos.sh          # regenerates _proto/ from proto/
 ├── pkg/                       # public shared types (reserved)
@@ -774,15 +875,29 @@ hunting-fishball/
 │   │                          # 5-step TenantDeleter workflow
 │   ├── 009_dlq_messages.sql   # Phase 8 / Task 5: dlq_messages
 │   │                          # table for the DLQ admin surface
-│   └── 010_retention_policy.sql # Phase 8 / Task 6: retention_rules
-│                              # table backing the RetentionPolicy
-│                              # layered tenant/source/namespace scope
+│   ├── 010_retention_policy.sql # Phase 8 / Task 6: retention_rules
+│   │                          # table backing the RetentionPolicy
+│   │                          # layered tenant/source/namespace scope
+│   ├── 011_varchar_ids.sql    # Round-4 Task 0: revert CHAR(N) to
+│   │                          # VARCHAR(N) so wildcard sentinels
+│   │                          # don't blank-pad on read
+│   ├── 012_eval_suites.sql    # Round-4 Task 1: eval_suites table
+│   │                          # for the retrieval evaluation harness
+│   ├── 013_sync_schedules.sql # Round-4 Task 5: sync_schedules
+│   │                          # table powering the cron scheduler
+│   ├── 014_tenant_usage.sql   # Round-4 Task 17: tenant_usage
+│   │                          # daily rollup table
+│   └── rollback/              # Round-4 Task 20: per-migration
+│                              # *.down.sql, applied via
+│                              # `make migrate-rollback`
 ├── tests/
 │   ├── e2e/                   # docker-compose smoke test
 │   │                          # (build tag: //go:build e2e)
 │   ├── integration/           # Go ↔ Python gRPC integration tests
 │   │                          # (build tag: //go:build integration)
 │   ├── benchmark/             # pipeline + retrieval benchmarks
+│   ├── regression/            # Round-4 Task 15: PR #12 regression
+│   │                          # manifest + meta-tests
 │   └── capacity/              # Phase 8 capacity test
 │                              # (`make capacity-test`,
 │                              # CAPACITY_DOCS_PER_MIN +
@@ -1395,3 +1510,67 @@ runs its own runtime. Scaling concerns instead surface as:
    per-tier performance floor each on-device measurement must
    clear; failing tiers stop publishing the affected platform
    release.
+
+### 10.7 Alerting (Round-4 Task 10)
+
+`deploy/alerts.yaml` is a Prometheus `PrometheusRule` manifest
+that ships alongside the HPA manifests in `deploy/`. The rule
+groups cover:
+
+| Alert | Expression (paraphrased) | Severity |
+|---|---|---|
+| `IngestionLagHigh` | `context_engine_kafka_consumer_lag > 10000` for 5m | page |
+| `DLQRateHigh` | `rate(context_engine_dlq_messages_total[5m]) > 1` | page |
+| `RetrievalP95High` | retrieval handler P95 > 500ms for 5m | warn |
+| `SourceUnhealthy` | per-source `error_count` over threshold | warn |
+| `PipelineStageSlow` | per-stage P95 anomaly | warn |
+
+`make alerts-check` runs
+`internal/observability/alertcheck` against the YAML to validate
+the rule shape (every group has a name, every rule has an
+expression, severity is set). The alert names match the runbook
+filenames under `docs/runbooks/` so an on-call engineer can hop
+from PagerDuty to a runbook in a single click.
+
+### 10.8 Health and operational endpoints (Round-4)
+
+Three operational endpoints supplement Kubernetes liveness
+probes:
+
+- `GET /v1/admin/health/indexes` (Round-4 Task 19,
+  `internal/admin/index_health.go`) runs every registered
+  `BackendChecker` (postgres, qdrant, redis when configured)
+  in parallel with a 5s timeout. Returns 200 with a
+  per-backend status payload when every backend is green;
+  returns 503 with the same payload when any backend fails so
+  load balancers can drain unhealthy replicas without
+  guessing.
+- `GET /v1/admin/sources/:id/sync/stream` (Round-4 Task 18,
+  `internal/admin/sync_progress_stream.go`) is a Server-Sent
+  Events stream that polls `sync_progress` every
+  `StreamPollInterval` (5s), diffs counters against the prior
+  snapshot, and emits `discovered` / `processed` / `failed` /
+  `completed` events plus a 30s heartbeat for proxy
+  keepalive.
+- `GET /v1/admin/tenants/:id/usage` (Round-4 Task 17,
+  `internal/admin/metering.go`) returns a daily rollup of the
+  tenant's API calls and ingestion counters from the
+  `tenant_usage` table. The in-process `Counter`
+  (`FlushOnInterval`) buffers per-request increments and
+  flushes them via UPSERT, so the hot retrieval path never
+  pays a per-request DB write.
+
+### 10.9 Migration rollbacks (Round-4 Task 20)
+
+Every forward migration in `migrations/` ships a matching
+`migrations/rollback/<n>_<name>.down.sql`. `make migrate-rollback`
+walks them in reverse against `CONTEXT_ENGINE_DATABASE_URL`. Each
+rollback drops the indexes the forward migration created, then
+the tables, using `IF EXISTS` for idempotency. Migrations that
+ALTER COLUMN (`007_channel_deny_local`,
+`011_varchar_ids`) revert their column shape changes. The
+`migrations/rollback/rollback_test.go` test pins one rule:
+**every numeric prefix under `migrations/` has a matching
+prefix under `migrations/rollback/`** — a reviewer who forgets
+the down-script gets caught at unit-test time, not at incident
+time.

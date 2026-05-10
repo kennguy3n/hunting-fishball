@@ -34,6 +34,7 @@ import (
 
 	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
+
 	// Blank-imports register each connector in the global registry via
 	// init(). Order is alphabetical to keep diffs minimal.
 	"github.com/kennguy3n/hunting-fishball/internal/audit"

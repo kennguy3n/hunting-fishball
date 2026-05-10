@@ -63,11 +63,11 @@ func TestParseCron_Errors(t *testing.T) {
 	cases := []string{
 		"",
 		"not a cron",
-		"60 * * * *",      // minute out of range
-		"* * 32 * *",      // dom out of range
-		"* * * * 7",       // dow out of range (only 0-6)
-		"@every banana",   // bad duration
-		"@every -5s",      // wrong sign
+		"60 * * * *",    // minute out of range
+		"* * 32 * *",    // dom out of range
+		"* * * * 7",     // dow out of range (only 0-6)
+		"@every banana", // bad duration
+		"@every -5s",    // wrong sign
 	}
 	for _, expr := range cases {
 		expr := expr

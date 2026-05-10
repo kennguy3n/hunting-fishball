@@ -64,7 +64,7 @@ func TestProgressStream_EmitsDeltasAndCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	deadline := time.Now().Add(4 * time.Second)
 	buf := make([]byte, 0, 1024)

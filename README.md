@@ -338,6 +338,9 @@ Other targets:
 | `make lint`             | `golangci-lint run` (skipped if not installed)              |
 | `make proto-gen`        | Regenerate `*.pb.go` from `proto/**/*.proto`                |
 | `make proto-check`      | Verify generated proto files are up to date                 |
+| `make alerts-check`     | Validate `deploy/alerts.yaml` Prometheus rule manifest      |
+| `make fuzz`             | Run Go native fuzz targets in `internal/retrieval/` (30s)   |
+| `make migrate-rollback` | Apply `migrations/rollback/*.down.sql` in reverse via `psql` (gated on `CONTEXT_ENGINE_DATABASE_URL`) |
 | `make clean`            | Remove `./bin/` and coverage artefacts                      |
 
 ### Python ML microservices (Phase 3)
@@ -437,21 +440,32 @@ hunting-fishball/
 │   │                          # circuit breaker for the Python sidecars
 │   ├── lifecycle/             # Phase 8: ordered shutdown runner used
 │   │                          # by cmd/api + cmd/ingest
-│   ├── config/                # Phase 8: startup config validation
-│   │                          # (validate.go)
+│   ├── config/                # Phase 8 / Round-4: startup config
+│   │                          # validation (validate.go)
+│   ├── eval/                  # Round-4 Task 1: retrieval evaluation
+│   │                          # harness (Precision@K, Recall@K, MRR,
+│   │                          # NDCG) + GET /v1/admin/eval/run
+│   ├── errors/                # Round-4 Task 7: structured error
+│   │                          # catalog + Gin middleware
 │   └── migrate/               # Phase 8: SQL migration runner backed
 │                              # by schema_migrations (AUTO_MIGRATE)
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
+│   ├── graphrag/v1/           # Round-4 Task 2: GraphRAG entity
+│   │                          # extraction (Stage 3b)
 │   └── memory/v1/             # Mem0 persistent memory service
 ├── services/                  # Python ML microservices (Phase 3)
 │   ├── _proto/                # generated Python gRPC stubs
 │   ├── docling/               # Docling gRPC server + Dockerfile
 │   ├── embedding/             # sentence-transformers gRPC server
+│   ├── graphrag/              # Round-4 Task 2: GraphRAG gRPC server
 │   ├── memory/                # Mem0 gRPC server + Dockerfile
 │   └── gen_protos.sh          # regenerates _proto/ from proto/
 ├── migrations/                # SQL migrations (audit_logs, ...)
+│   └── rollback/              # Round-4 Task 20: per-migration
+│                              # *.down.sql, applied via
+│                              # `make migrate-rollback`
 ├── tests/
 │   ├── e2e/                   # docker-compose smoke test (//go:build e2e):
 │   │                          # smoke_test.go covers Phase 1 (pipeline
@@ -461,6 +475,8 @@ hunting-fishball/
 │   │                          # promote/reject, simulator endpoints)
 │   ├── integration/           # Go ↔ Python gRPC tests (//go:build integration)
 │   ├── benchmark/             # pipeline + retrieval benchmarks
+│   ├── regression/            # Round-4 Task 15: PR #12 regression
+│   │                          # manifest + meta-tests
 │   └── capacity/              # Phase 8 capacity test (`make capacity-test`)
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
 │   │                          # / CUTOVER
@@ -478,6 +494,8 @@ hunting-fishball/
 ├── deploy/                    # Phase 8: HorizontalPodAutoscaler manifests
 │                              # (hpa-api.yaml, hpa-ingest.yaml,
 │                              # hpa-docling.yaml, hpa-embedding.yaml)
+│                              # plus Round-4 Task 10 PrometheusRule
+│                              # (alerts.yaml — `make alerts-check`)
 ├── docker-compose.yml         # Postgres / Redis / Kafka / Qdrant /
 │                              # FalkorDB / Docling / embedding / memory
 ├── Makefile                   # build / test / lint / proto-gen /

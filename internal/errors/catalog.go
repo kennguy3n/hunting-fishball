@@ -11,7 +11,7 @@
 //   - Handlers create errors via Wrap(code, cause) or NewError(code,
 //     msg). Both produce *Error which the middleware unwraps.
 //   - The middleware writes
-//         { "error": { "code": "...", "message": "...", "retry": "..." } }
+//     { "error": { "code": "...", "message": "...", "retry": "..." } }
 //     and the appropriate status. Callers can attach extra
 //     `details` via Error.With(key, value).
 //
