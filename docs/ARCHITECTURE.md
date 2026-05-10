@@ -601,10 +601,11 @@ hunting-fishball/
 │   │                          # (contract.go) shared by iOS / Android /
 │   │                          # desktop on-device runtimes, coverage
 │   │                          # endpoint (handler.go::coverage),
-│   │                          # version-lookup adapter for the
-│   │                          # device-first hint (version_lookup.go),
-│   │                          # and per-tier eviction policy
-│   │                          # (eviction.go)
+│   │                          # GORM-backed CoverageRepo
+│   │                          # (coverage_repo.go), version-lookup
+│   │                          # adapter for the device-first hint
+│   │                          # (version_lookup.go), and per-tier
+│   │                          # eviction policy (eviction.go)
 │   ├── models/                # Phase 5 / Task 13: model catalog.
 │   │                          # ModelEntry / ModelCatalog / Provider /
 │   │                          # StaticProvider (catalog.go) and
@@ -620,15 +621,36 @@ hunting-fishball/
 │   │                          # fan-out. Plus Prometheus collectors
 │   │                          # (metrics.go) and a Gin middleware
 │   │                          # (middleware.go) scraped at /metrics
-│   │                          # on cmd/api and cmd/ingest
+│   │                          # on cmd/api and cmd/ingest. Phase 6 /
+│   │                          # Phase 8 structured JSON logging:
+│   │                          # logger.go wraps log/slog with a
+│   │                          # tenant_id + trace_id JSON handler;
+│   │                          # GinLoggerMiddleware injects the
+│   │                          # request-scoped logger from the
+│   │                          # W3C traceparent + tenant context
 │   ├── grpcpool/              # Phase 8: round-robin gRPC connection
 │   │                          # pool with per-call deadline +
 │   │                          # circuit breaker (closed → open →
 │   │                          # half-open) for the Python sidecars
-│   └── policy/                # see Phase 4 entry above; Phase 6 /
-│                              # Task 15 added device_first.go
-│                              # (Decide → prefer_local hint) consumed
-│                              # by internal/retrieval/handler.go
+│   ├── policy/                # see Phase 4 entry above; Phase 6 /
+│   │                          # Task 15 added device_first.go
+│   │                          # (Decide → prefer_local hint) consumed
+│   │                          # by internal/retrieval/handler.go;
+│   │                          # live_resolver.go now reads
+│   │                          # channel_policies.deny_local_retrieval
+│   │                          # so the channel_disallowed reason
+│   │                          # round-trips end-to-end
+│   ├── pipeline/              # see Phase 1 entry above; Phase 8 /
+│   │                          # Task E15 added dlq_observer.go
+│   │                          # (DLQ consumer → Prometheus counter
+│   │                          # context_engine_dlq_messages_total +
+│   │                          # structured per-envelope logging)
+│   └── admin/                 # see Phase 2 / 4 entries; Phase 5 /
+│                              # Task E16 added tenant_delete.go:
+│                              # 5-step TenantDeleter workflow + the
+│                              # DELETE /v1/admin/tenants/:tenant_id
+│                              # endpoint backed by
+│                              # migrations/008_tenant_status.sql
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
@@ -649,8 +671,15 @@ hunting-fishball/
 │   │                          # + recipient_policies tables
 │   ├── 005_policy_drafts.sql  # Phase 4 policy_drafts table
 │   │                          # (JSONB payload + status FSM)
-│   └── 006_shards.sql         # Phase 5 shards table (manifest +
-│                              # version + chunk_count + status)
+│   ├── 006_shards.sql         # Phase 5 shards table (manifest +
+│   │                          # version + chunk_count + status)
+│   ├── 007_channel_deny_local.sql  # Phase 5 / 6: adds
+│   │                          # channel_policies.deny_local_retrieval
+│   │                          # — wires the channel_disallowed reason
+│   │                          # in policy.device_first.go
+│   └── 008_tenant_status.sql  # Phase 5 / Task E16: tenants table
+│                              # with tenant_status column for the
+│                              # 5-step TenantDeleter workflow
 ├── tests/
 │   ├── e2e/                   # docker-compose smoke test
 │   │                          # (build tag: //go:build e2e)

@@ -17,7 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -47,6 +47,7 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 	doclingv1 "github.com/kennguy3n/hunting-fishball/proto/docling/v1"
@@ -54,8 +55,17 @@ import (
 )
 
 func main() {
+	// Phase 8 Task 17: structured JSON logging. Same shape as the API
+	// binary so log shippers don't need a per-component schema. The
+	// component label is embedded once on the logger; downstream
+	// callers add tenant_id / trace_id / event-specific fields via
+	// LoggerFromContext + With.
+	logger := observability.NewLogger("ingest")
+	observability.SetDefault(logger)
+	slog.SetDefault(logger)
 	if err := run(); err != nil {
-		log.Fatalf("ingest: %v", err)
+		logger.Error("ingest: fatal", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 }
 
@@ -77,7 +87,7 @@ func run() error {
 		return fmt.Errorf("CONTEXT_ENGINE_VECTOR_SIZE: %w", err)
 	}
 
-	log.Printf("ingest: registered connectors: %v", connector.ListSourceConnectors())
+	slog.Info("ingest: registered connectors", slog.Any("connectors", connector.ListSourceConnectors()))
 
 	// ---- DB
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
@@ -139,11 +149,23 @@ func run() error {
 	}
 
 	// ---- Coordinator
+	// Phase 8 per-stage worker pool sizing. Each stage is a CPU/IO
+	// trade-off in its own right (Fetch dominates on connector
+	// network throughput; Embed wants GPU concurrency; Store wants
+	// pgx pool headroom). The defaults stay 1 per stage so existing
+	// deployments preserve their current single-threaded behaviour.
+	stageWorkers := pipeline.StageConfig{
+		FetchWorkers: stageWorkerEnv("CONTEXT_ENGINE_FETCH_WORKERS"),
+		ParseWorkers: stageWorkerEnv("CONTEXT_ENGINE_PARSE_WORKERS"),
+		EmbedWorkers: stageWorkerEnv("CONTEXT_ENGINE_EMBED_WORKERS"),
+		StoreWorkers: stageWorkerEnv("CONTEXT_ENGINE_STORE_WORKERS"),
+	}
 	coord, err := pipeline.NewCoordinator(pipeline.CoordinatorConfig{
-		Fetch: fetcher,
-		Parse: parser,
-		Embed: embedder,
-		Store: storer,
+		Fetch:   fetcher,
+		Parse:   parser,
+		Embed:   embedder,
+		Store:   storer,
+		Workers: stageWorkers,
 	})
 	if err != nil {
 		return fmt.Errorf("coordinator: %w", err)
@@ -189,6 +211,33 @@ func run() error {
 	consDone := make(chan error, 1)
 	go func() { consDone <- cons.Run(ctx) }()
 
+	// Phase 8 / Task 15: optional DLQ observer. Enables a sidecar
+	// consumer that watches the dead-letter topic and emits both a
+	// structured slog line and the `context_engine_dlq_messages_total`
+	// counter for every dead-letter message. Off by default so single-
+	// binary deployments don't sprout a second consumer group.
+	if os.Getenv("CONTEXT_ENGINE_DLQ_OBSERVE") == "1" {
+		dlqGroupID := envOr("CONTEXT_ENGINE_DLQ_OBSERVER_GROUP", groupID+"-dlq-observer")
+		dlqGroup, gerr := sarama.NewConsumerGroup(brokerList, dlqGroupID, saramaCfg)
+		if gerr != nil {
+			return fmt.Errorf("kafka dlq observer group: %w", gerr)
+		}
+		defer func() { _ = dlqGroup.Close() }()
+		dlqObs, oerr := pipeline.NewDLQObserver(pipeline.DLQObserverConfig{
+			Group:  dlqGroup,
+			Topic:  dlqTopic,
+			Logger: slog.Default(),
+		})
+		if oerr != nil {
+			return fmt.Errorf("dlq observer: %w", oerr)
+		}
+		go func() {
+			if err := dlqObs.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("ingest: dlq observer", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
 	// ---- Phase 8 Task 20: HTTP probes + /metrics on a sidecar port.
 	var redisClient *redis.Client
 	if u := os.Getenv("CONTEXT_ENGINE_REDIS_URL"); u != "" {
@@ -203,9 +252,9 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		log.Printf("ingest: probes/metrics listening on %s", httpAddr)
+		slog.Info("ingest: probes/metrics listening", slog.String("addr", httpAddr))
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("ingest: http server: %v", err)
+			slog.Warn("ingest: http server", slog.String("error", err.Error()))
 		}
 	}()
 	defer func() {
@@ -214,10 +263,10 @@ func run() error {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("ingest: started; topics=%s group=%s", topics, groupID)
+	slog.Info("ingest: started", slog.String("topics", topics), slog.String("group", groupID))
 	select {
 	case sig := <-stop:
-		log.Printf("ingest: shutting down on signal %s", sig)
+		slog.Info("ingest: shutting down", slog.String("signal", sig.String()))
 	case err := <-consDone:
 		if err != nil {
 			return fmt.Errorf("consumer exited: %w", err)
@@ -247,6 +296,23 @@ func envOr(key, def string) string {
 	}
 
 	return def
+}
+
+// stageWorkerEnv reads an integer worker count from the named env
+// var. Empty / non-numeric / non-positive values fall back to 0 so
+// pipeline.StageConfig.defaults() applies the per-stage default of
+// 1, preserving the pre-Phase-8 single-goroutine behaviour for any
+// stage the operator hasn't explicitly opted in to fan out.
+func stageWorkerEnv(name string) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	n, err := parseInt(v)
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
 }
 
 func parseInt(s string) (int, error) {

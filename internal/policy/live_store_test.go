@@ -22,12 +22,13 @@ CREATE TABLE tenant_policies (
 );
 
 CREATE TABLE channel_policies (
-    tenant_id            TEXT NOT NULL,
-    channel_id           TEXT NOT NULL,
-    privacy_mode         TEXT NOT NULL,
-    recipient_default    TEXT NOT NULL DEFAULT 'allow',
-    created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    tenant_id              TEXT NOT NULL,
+    channel_id             TEXT NOT NULL,
+    privacy_mode           TEXT NOT NULL,
+    recipient_default      TEXT NOT NULL DEFAULT 'allow',
+    deny_local_retrieval   BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (tenant_id, channel_id)
 );
 

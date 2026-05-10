@@ -33,6 +33,15 @@ type HandlerConfig struct {
 	Repo   HandlerRepo
 	Forget ForgetTrigger
 
+	// CoverageRepo, when non-nil, supplies the corpus-side count
+	// for the coverage endpoint. Optional: if it is nil, the
+	// handler falls back to asserting Repo onto CoverageRepo (so
+	// existing wirings that hand a Repository implementing both
+	// interfaces still work). When neither path yields a CoverageRepo,
+	// the handler reports IsAuthoritative=false with reason
+	// "corpus_size_unknown".
+	CoverageRepo CoverageRepo
+
 	// MaxPageSize bounds the list response. Defaults to 200.
 	MaxPageSize int
 }
@@ -282,8 +291,16 @@ func (h *Handler) coverage(c *gin.Context) {
 	resp.ShardVersion = manifest.ShardVersion
 	resp.ShardChunks = manifest.ChunksCount
 
-	corpusRepo, ok := h.cfg.Repo.(CoverageRepo)
-	if !ok {
+	corpusRepo := h.cfg.CoverageRepo
+	if corpusRepo == nil {
+		// Backwards-compat: legacy callers pass a Repo that itself
+		// implements CoverageRepo. Honour that path so we don't break
+		// any wirings that haven't migrated to the explicit field.
+		if rc, isCoverage := h.cfg.Repo.(CoverageRepo); isCoverage {
+			corpusRepo = rc
+		}
+	}
+	if corpusRepo == nil {
 		resp.Reason = "corpus_size_unknown"
 		c.JSON(http.StatusOK, resp)
 		return

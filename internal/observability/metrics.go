@@ -65,6 +65,16 @@ var (
 		},
 		[]string{"stage"},
 	)
+	// DLQMessagesTotal counts dead-letter messages observed by the
+	// pipeline DLQ observer, broken down by tenant. Operators alert
+	// on a non-zero rate of this counter.
+	DLQMessagesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_dlq_messages_total",
+			Help: "Total dead-letter messages observed on the ingest DLQ topic.",
+		},
+		[]string{"tenant_id", "original_topic"},
+	)
 )
 
 // Retrieval metrics.
@@ -97,6 +107,7 @@ func init() {
 		APIRequestDurationSeconds,
 		KafkaConsumerLag,
 		PipelineStageDurationSeconds,
+		DLQMessagesTotal,
 		RetrievalBackendDurationSeconds,
 		RetrievalBackendHits,
 	)
@@ -115,12 +126,14 @@ func ResetForTest() {
 	Registry.Unregister(APIRequestDurationSeconds)
 	Registry.Unregister(KafkaConsumerLag)
 	Registry.Unregister(PipelineStageDurationSeconds)
+	Registry.Unregister(DLQMessagesTotal)
 	Registry.Unregister(RetrievalBackendDurationSeconds)
 	Registry.Unregister(RetrievalBackendHits)
 	APIRequestsTotal.Reset()
 	APIRequestDurationSeconds.Reset()
 	KafkaConsumerLag.Reset()
 	PipelineStageDurationSeconds.Reset()
+	DLQMessagesTotal.Reset()
 	RetrievalBackendDurationSeconds.Reset()
 	RetrievalBackendHits.Reset()
 	Registry.MustRegister(
@@ -128,6 +141,7 @@ func ResetForTest() {
 		APIRequestDurationSeconds,
 		KafkaConsumerLag,
 		PipelineStageDurationSeconds,
+		DLQMessagesTotal,
 		RetrievalBackendDurationSeconds,
 		RetrievalBackendHits,
 	)
