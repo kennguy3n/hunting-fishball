@@ -470,8 +470,19 @@ func (c *Coordinator) Submit(ctx context.Context, evt IngestEvent) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case c.stage1 <- stagedEvent{evt: evt}:
+		c.recordChannelDepths()
 		return nil
 	}
+}
+
+// recordChannelDepths emits the current pipeline channel depths
+// for the back-pressure gauge (Round-6 Task 9). Cheap; called on
+// every Submit. Length reads on Go channels are O(1).
+func (c *Coordinator) recordChannelDepths() {
+	observability.PipelineChannelDepth.WithLabelValues("fetch").Set(float64(len(c.stage1)))
+	observability.PipelineChannelDepth.WithLabelValues("parse").Set(float64(len(c.stage2)))
+	observability.PipelineChannelDepth.WithLabelValues("embed").Set(float64(len(c.stage3)))
+	observability.PipelineChannelDepth.WithLabelValues("store").Set(float64(len(c.stage4)))
 }
 
 // CloseInputs signals that no more events will be submitted; the

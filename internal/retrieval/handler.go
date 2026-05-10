@@ -88,6 +88,30 @@ type HandlerConfig struct {
 	Reranker     Reranker
 	PolicyFilter *PolicyFilter
 
+	// Diversifier optionally re-orders post-rerank results to
+	// favour topical diversity (Round-6 Task 1, MMR). When nil
+	// the handler installs `*MMRDiversifier` with the default
+	// token-Jaccard similarity. Callers opt in per-request via
+	// `RetrieveRequest.Diversity`; the default lambda of 0.0
+	// keeps the legacy passthrough behaviour intact.
+	Diversifier Diversifier
+
+	// QueryExpander optionally expands the user's query with
+	// per-tenant synonyms before the BM25 / memory fan-out
+	// (Round-6 Task 4). When nil the handler skips expansion.
+	QueryExpander QueryExpander
+
+	// ChunkACL optionally enforces per-chunk ACL tags after the
+	// snapshot ACL has been applied (Round-6 Task 6). When nil
+	// the handler runs no chunk-level filter.
+	ChunkACL ChunkACLEvaluator
+
+	// ABTests is the optional retrieval A/B-testing surface
+	// (Round-6 Task 10). When nil the handler runs the control
+	// configuration on every request. The concrete type lives in
+	// ab_test.go.
+	ABTests ABTestRouter
+
 	// DefaultTopK is the default top_k when the request doesn't set
 	// one. Defaults to 10.
 	DefaultTopK int
@@ -223,6 +247,20 @@ type RetrieveRequest struct {
 	// feature flag), populates a per-hit `explain` block exposing
 	// the raw signal scores and policy decision. Off by default.
 	Explain bool `json:"explain,omitempty"`
+
+	// Diversity is the MMR `lambda` parameter in [0, 1]. 0
+	// (default) keeps the legacy ordering, 1 maximises
+	// inter-result dissimilarity, intermediate values blend
+	// relevance with diversity. Round-6 Task 1.
+	Diversity float32 `json:"diversity,omitempty"`
+
+	// ExperimentName, when set, opts the request into a named
+	// retrieval A/B test (Round-6 Task 10). The handler resolves
+	// the experiment from the configured `ABTestStore`, computes
+	// the bucket from `ExperimentBucketKey || tenant_id`, and
+	// applies either the control or the variant retrieval config.
+	ExperimentName      string `json:"experiment_name,omitempty"`
+	ExperimentBucketKey string `json:"experiment_bucket_key,omitempty"`
 }
 
 // RetrieveHit is one entry in the response.
@@ -272,6 +310,13 @@ type RetrievePolicy struct {
 	// PrivacyMode is the channel privacy mode the request resolved
 	// to (echoed for the client UI).
 	PrivacyMode string `json:"privacy_mode,omitempty"`
+
+	// ExperimentName is set when the request was routed through
+	// an A/B test (Round-6 Task 10). Empty otherwise.
+	ExperimentName string `json:"experiment_name,omitempty"`
+	// ExperimentArm is the arm the request was routed to
+	// ("control" or "variant"). Empty when no experiment applied.
+	ExperimentArm string `json:"experiment_arm,omitempty"`
 }
 
 // RetrieveTimings reports the wall-clock duration of every stage
@@ -426,7 +471,18 @@ func (h *Handler) retrieve(c *gin.Context) {
 		}
 	}
 
-	streams, degraded, backendTimings := h.fanOut(c.Request.Context(), tenantID, req, vec, topK)
+	// Round-6 Task 4: optional synonym expansion before fan-out.
+	// The expanded query is what BM25 / memory see; the embedding
+	// path stays on the original (already vectorised above).
+	expandedQuery := req.Query
+	if h.cfg.QueryExpander != nil {
+		if exp, err := h.cfg.QueryExpander.Expand(c.Request.Context(), tenantID, req.Query); err == nil && exp != "" {
+			expandedQuery = exp
+		}
+	}
+	fanOutReq := req
+	fanOutReq.Query = expandedQuery
+	streams, degraded, backendTimings := h.fanOut(c.Request.Context(), tenantID, fanOutReq, vec, topK)
 
 	mergeStart := time.Now()
 	merged := h.cfg.Merger.Merge(streams...)
@@ -448,6 +504,13 @@ func (h *Handler) retrieve(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "rerank failed"})
 
 		return
+	}
+
+	// Round-6 Task 1: optional MMR diversification after rerank,
+	// before the policy filter so chunks rejected by ACL never
+	// influence diversity.
+	if req.Diversity > 0 && h.cfg.Diversifier != nil {
+		reranked = h.cfg.Diversifier.Diversify(c.Request.Context(), reranked, req.Diversity, 0)
 	}
 
 	pres := h.cfg.PolicyFilter.Apply(reranked, privacyMode)
@@ -671,6 +734,10 @@ func (h *Handler) runPipelineFromVec(ctx context.Context, tenantID string, req R
 	rerankMs := time.Since(rerankStart).Milliseconds()
 	if rerr != nil {
 		return RetrieveResponse{}, rerr
+	}
+
+	if req.Diversity > 0 && h.cfg.Diversifier != nil {
+		reranked = h.cfg.Diversifier.Diversify(ctx, reranked, req.Diversity, 0)
 	}
 
 	pres := h.cfg.PolicyFilter.Apply(reranked, privacyMode)

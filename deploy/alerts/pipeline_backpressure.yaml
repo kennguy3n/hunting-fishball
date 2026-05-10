@@ -1,0 +1,59 @@
+# Prometheus alerting rule for hunting-fishball / context-engine.
+#
+# Round-6 Task 9: pipeline back-pressure alert.
+#
+# The coordinator records `context_engine_pipeline_channel_depth`
+# for every inter-stage channel (fetch / parse / embed / store) on
+# every Submit. When a stage is slower than its upstream the
+# channel fills up; once it pegs at capacity the producer blocks
+# and ingest latency rises.
+#
+# Apply via prometheus-operator alongside `deploy/alerts.yaml`.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: context-engine-pipeline-backpressure
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: context-engine
+    app.kubernetes.io/component: alerts
+spec:
+  groups:
+    - name: context-engine-pipeline-backpressure
+      interval: 30s
+      rules:
+        - alert: PipelineChannelDepthHigh
+          expr: |
+            max by (stage) (context_engine_pipeline_channel_depth) > 256
+          for: 5m
+          labels:
+            severity: warning
+            component: pipeline
+          annotations:
+            summary: |
+              Pipeline channel {{ $labels.stage }} sustained depth >256 for 5m.
+            description: |
+              The {{ $labels.stage }} channel has had more than 256 in-flight
+              items for at least 5 minutes. This usually indicates that the
+              downstream stage is slower than upstream, building back-pressure.
+              Inspect `context_engine_pipeline_stage_duration_seconds` for the
+              same stage to confirm latency rise.
+            runbook_url: docs/RUNBOOKS.md#pipeline-backpressure
+
+        - alert: PipelineChannelDepthCritical
+          expr: |
+            max by (stage) (context_engine_pipeline_channel_depth) > 512
+          for: 2m
+          labels:
+            severity: critical
+            component: pipeline
+          annotations:
+            summary: |
+              Pipeline channel {{ $labels.stage }} near capacity (>512).
+            description: |
+              The {{ $labels.stage }} channel is sustained over 512 items.
+              Producer Submit() will block within seconds, causing ingest
+              latency spikes and Kafka consumer lag. Scale the slower stage
+              or shed non-critical traffic.
+            runbook_url: docs/RUNBOOKS.md#pipeline-backpressure

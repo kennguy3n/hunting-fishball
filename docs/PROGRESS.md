@@ -435,6 +435,61 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-10: **Round 6: Next 20 tasks — retrieval diversity, semantic dedup,
+  query expansion, chunk ACL, streaming, and more**.
+  - **Task 1**: Retrieval result diversity (MMR) — `internal/retrieval/diversifier.go`,
+    wired after the reranker; configurable lambda (default 0.0 = passthrough).
+  - **Task 2**: Semantic deduplication in Stage 4 — `internal/pipeline/dedup.go`,
+    cosine similarity > threshold; toggled by `CONTEXT_ENGINE_DEDUP_ENABLED`.
+  - **Task 3**: Per-source embedding model config — `internal/admin/embedding_config.go`,
+    `migrations/019_source_embedding_config.sql`, `GET/PUT /v1/admin/sources/:id/embedding`.
+  - **Task 4**: Query expansion via synonyms — `internal/retrieval/query_expander.go`,
+    `internal/admin/synonyms_handler.go`, `POST /v1/admin/synonyms`.
+  - **Task 5**: Priority queues in pipeline coordinator —
+    `internal/pipeline/priority.go`; admin-overridable classifier.
+  - **Task 6**: Chunk-level ACL — `internal/policy/chunk_acl.go`,
+    `migrations/020_chunk_acl.sql`, post-merge filter in
+    `internal/retrieval/policy_snapshot.go`.
+  - **Task 7**: Connector adaptive rate limiting — `internal/connector/adaptive_rate.go`;
+    halves on 429, gradually restores up to BaseRate.
+  - **Task 8**: Source schema discovery endpoint —
+    `internal/admin/schema_handler.go`, `GET /v1/admin/sources/:id/schema`.
+  - **Task 9**: Pipeline backpressure metrics —
+    `context_engine_pipeline_channel_depth{stage}` gauge in
+    `internal/observability/metrics.go`; alert rule in
+    `deploy/alerts/pipeline_backpressure.yaml`.
+  - **Task 10**: Retrieval A/B testing framework — `internal/admin/abtest.go`,
+    `migrations/021_ab_tests.sql`,
+    `POST/GET/DELETE /v1/admin/retrieval/experiments`.
+  - **Task 11**: Admin notification preferences — `internal/admin/notification.go`,
+    `migrations/022_notification_preferences.sql`,
+    `GET/POST/DELETE /v1/admin/notifications`.
+  - **Task 12**: Shard pre-generation scheduler — `internal/shard/scheduler.go`;
+    runs on a configurable tick when `CONTEXT_ENGINE_SHARD_PREGENERATE=true`.
+  - **Task 13**: API versioning middleware — `internal/observability/api_version.go`;
+    resolves `Accept-Version` / `/vN/` prefix, emits `X-API-Version`.
+  - **Task 14**: Tenant data portability (full export) — `internal/admin/tenant_export.go`,
+    `POST /v1/admin/tenants/:tenant_id/export`,
+    `GET /v1/admin/tenants/:tenant_id/export/:job_id`.
+  - **Task 15**: Pipeline dry-run mode — `dry_run` flag on
+    `POST /v1/admin/reindex`; orchestrator enumerates without emitting.
+  - **Task 16**: Connector template system — `internal/admin/connector_template.go`,
+    `migrations/023_connector_templates.sql`,
+    `GET/POST /v1/admin/connector-templates`.
+  - **Task 17**: Cross-tenant data isolation audit —
+    `internal/admin/isolation_audit.go`,
+    `POST /v1/admin/isolation-check`.
+  - **Task 18**: Retrieval response streaming (SSE) —
+    `internal/retrieval/stream_handler.go`,
+    `POST /v1/retrieve/stream`.
+  - **Task 19**: Pipeline stage retry analytics —
+    `internal/pipeline/retry_analytics.go`,
+    `internal/admin/retry_stats_handler.go`,
+    `GET /v1/admin/pipeline/retry-stats`,
+    `context_engine_pipeline_retries_total{stage,outcome}` counter.
+  - **Task 20**: Round-6 comprehensive e2e test —
+    `tests/e2e/round6_test.go` (build tag `e2e`).
+
 - 2026-05-10: **PR #14 — Round 5: CI fix + next-20 tasks**. CI Task 0
   fixed sidecar Dockerfiles (missing `_metrics.py` COPY). Tasks 1–20:
   - **Task 1**: Eval golden dataset + CI retrieval quality gate

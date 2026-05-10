@@ -1409,6 +1409,115 @@ hunting-fishball/
   failure label so on-device CI can fail fast with a clear
   diagnostic.
 
+### Tech choices added in Round 6
+
+Round 6 adds breadth across retrieval quality, multi-tenant
+operability, and pipeline observability. Each entry below is
+self-contained and references the package + admin surface that
+implements it.
+
+- **MMR diversifier** (`internal/retrieval/diversifier.go`).
+  Reranker-adjacent stage that re-orders the merged result set
+  with `lambda * relevance - (1-lambda) * max_similarity`. Lambda
+  defaults to 0.0 (passthrough) so existing deployments are
+  unaffected; clients opt in via `RetrieveRequest.Diversity`.
+- **Semantic deduplication** (`internal/pipeline/dedup.go`).
+  Stage-4-adjacent pre-write hook computing cosine similarity
+  between chunk embeddings. Drops near-duplicates above a
+  configurable threshold; toggled via `CONTEXT_ENGINE_DEDUP_ENABLED`
+  (threshold via `CONTEXT_ENGINE_DEDUP_THRESHOLD`, default 0.95).
+- **Per-source embedding model config**
+  (`internal/admin/embedding_config.go`,
+  `migrations/019_source_embedding_config.sql`). Tenants set a
+  non-default model on a (tenant, source) basis; the embed stage
+  reads the config and forwards the model name to the embedding
+  gRPC service.
+- **Query expansion via synonyms**
+  (`internal/retrieval/query_expander.go`,
+  `internal/admin/synonyms_handler.go`). A `SynonymExpander`
+  augments the inbound query before fan-out, expanding the text
+  sent to BM25 and memory backends without changing the vector
+  query (vectors already capture synonymy).
+- **Priority queues in pipeline coordinator**
+  (`internal/pipeline/priority.go`,
+  `internal/pipeline/coordinator.go`). High-priority items
+  (steady-state syncs, admin overrides) cut to the front of the
+  Stage-1 queue; low-priority items (backfills) age in and are
+  not starved beyond a configurable timeout.
+- **Chunk-level ACL** (`internal/policy/chunk_acl.go`,
+  `migrations/020_chunk_acl.sql`). Per-chunk allow/deny rules
+  evaluated after the source-level AllowDenyList; useful for
+  cases where one chunk inside an allowed namespace must be
+  hidden (PII, legal hold, etc.).
+- **Adaptive connector rate limiting**
+  (`internal/connector/adaptive_rate.go`). Wraps the existing
+  Redis token bucket; on a 429 the bucket rate halves (down to a
+  floor); on success the rate creeps back up. Prevents thundering
+  herds against rate-limited SaaS APIs.
+- **Source schema discovery endpoint**
+  (`internal/admin/schema_handler.go`). Calls the connector's
+  `ListNamespaces` so operators can preview what a source exposes
+  before wiring policy.
+- **Pipeline backpressure metrics**
+  (`internal/observability/metrics.go`,
+  `deploy/alerts/pipeline_backpressure.yaml`). Gauge
+  `context_engine_pipeline_channel_depth{stage}` is updated after
+  every coordinator submit; the alert rule fires when any
+  channel sits above the warning threshold for 5 minutes.
+- **Retrieval A/B testing framework**
+  (`internal/admin/abtest.go`, `migrations/021_ab_tests.sql`).
+  Active experiments route a deterministic percentage of
+  requests (FNV bucket of the request key) to a `variant_config`
+  and log both arms for offline comparison.
+- **Admin notification preferences**
+  (`internal/admin/notification.go`,
+  `migrations/022_notification_preferences.sql`). Per-tenant
+  webhook/email subscriptions fan audit events (sync started,
+  source purged, policy promoted) to operator-owned endpoints.
+- **Shard pre-generation scheduler**
+  (`internal/shard/scheduler.go`). Background loop that
+  enumerates active tenants and emits `shard.requested` events
+  for stale or missing shards so the hot read path never waits
+  on a lazy build.
+- **API versioning middleware**
+  (`internal/observability/api_version.go`). Resolves the
+  client's chosen API version from `/vN/` path prefix or the
+  `Accept-Version` header, rejects unknown versions with 406,
+  echoes the resolved version in `X-API-Version`.
+- **Tenant data portability**
+  (`internal/admin/tenant_export.go`). Asynchronous full-tenant
+  export job; collector + publisher are pluggable so production
+  can stream to S3 / Postgres LO without code changes.
+- **Pipeline dry-run mode**
+  (`internal/pipeline/reindex.go`,
+  `internal/admin/reindex_handler.go`). Operators can preview
+  the cardinality of a reindex submission before unleashing it
+  by passing `dry_run: true`; the orchestrator skips emission
+  and returns the enumerated document count.
+- **Connector template system**
+  (`internal/admin/connector_template.go`,
+  `migrations/023_connector_templates.sql`). Operators codify
+  per-tenant connector defaults; `POST /v1/admin/sources`
+  accepts an optional `template_id` and merges the template's
+  `default_config` into the new source.
+- **Cross-tenant isolation audit**
+  (`internal/admin/isolation_audit.go`). Pluggable per-backend
+  checkers (Qdrant collections, Redis prefixes, FalkorDB graphs)
+  produce a structured pass/fail report; useful as a scheduled
+  smoke test.
+- **SSE streaming retrieval**
+  (`internal/retrieval/stream_handler.go`). `POST
+  /v1/retrieve/stream` emits `event: backend` frames as each
+  backend completes plus a terminal `event: done` carrying the
+  policy-filtered merged result; clients render partial UI as
+  vector / BM25 / graph / memory finish.
+- **Pipeline stage retry analytics**
+  (`internal/pipeline/retry_analytics.go`,
+  `internal/admin/retry_stats_handler.go`). Each stage records
+  retry/success/failure outcomes and per-reason counts;
+  `GET /v1/admin/pipeline/retry-stats` exposes a JSON snapshot
+  used by dashboards and runbook automation.
+
 ---
 
 ## 10. Deployment & Scaling

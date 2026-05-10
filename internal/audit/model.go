@@ -63,6 +63,19 @@ const (
 	ActionIndexAutoReindex         Action = "index.auto_reindex_triggered"
 	ActionConnectorPreviewed       Action = "connector.previewed"
 	ActionDLQReplayedBatch         Action = "dlq.replayed_batch"
+	// Round-6 admin lifecycle additions.
+	ActionChunkDeduplicated      Action = "chunk.deduplicated"
+	ActionConnectorRateLimited   Action = "connector.rate_limited"
+	ActionRetrievalExperiment    Action = "retrieval.experiment_assigned"
+	ActionPolicyChunkACL         Action = "policy.chunk_acl_evaluated"
+	ActionPolicyChunkACLDenied   Action = "policy.chunk_acl_denied"
+	ActionAdminNotificationSent  Action = "admin.notification_dispatched"
+	ActionTenantFullExport       Action = "tenant.full_export_started"
+	ActionPipelineDryRun         Action = "pipeline.dry_run"
+	ActionConnectorTemplateUsed  Action = "connector.template_applied"
+	ActionTenantIsolationChecked Action = "tenant.isolation_checked"
+	ActionPipelineShardPregen    Action = "shard.pre_generated"
+	ActionPipelineQueryExpanded  Action = "retrieval.query_expanded"
 )
 
 // AuditLog is a single audit event. The table is append-only — there is

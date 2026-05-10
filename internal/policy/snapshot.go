@@ -23,6 +23,11 @@ type PolicySnapshot struct {
 	// ACL installed (default-allow).
 	ACL *AllowDenyList
 
+	// ChunkACL is the per-chunk tag ACL evaluated after the
+	// source-level ACL has approved a chunk. nil → no chunk
+	// ACL installed (Round-6 Task 6).
+	ChunkACL *ChunkACL
+
 	// Recipient is the per-(tenant, channel) recipient policy. nil
 	// → default-allow for every skill.
 	Recipient *RecipientPolicy

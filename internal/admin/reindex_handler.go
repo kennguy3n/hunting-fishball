@@ -57,13 +57,18 @@ func (h *ReindexHandler) Register(rg *gin.RouterGroup) {
 type ReindexAdminRequest struct {
 	SourceID    string `json:"source_id" binding:"required"`
 	NamespaceID string `json:"namespace_id,omitempty"`
+	// DryRun, when true, asks the orchestrator to enumerate the
+	// affected documents but skip emitting reindex events.
+	// Round-6 Task 15.
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // ReindexAdminResponse mirrors pipeline.ReindexResult.
 type ReindexAdminResponse struct {
-	DocumentsEnumerated int `json:"documents_enumerated"`
-	EventsEmitted       int `json:"events_emitted"`
-	EmitErrors          int `json:"emit_errors"`
+	DocumentsEnumerated int  `json:"documents_enumerated"`
+	EventsEmitted       int  `json:"events_emitted"`
+	EmitErrors          int  `json:"emit_errors"`
+	DryRun              bool `json:"dry_run,omitempty"`
 }
 
 func (h *ReindexHandler) reindex(c *gin.Context) {
@@ -81,6 +86,7 @@ func (h *ReindexHandler) reindex(c *gin.Context) {
 		TenantID:    tenantID,
 		SourceID:    req.SourceID,
 		NamespaceID: req.NamespaceID,
+		DryRun:      req.DryRun,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -96,5 +102,6 @@ func (h *ReindexHandler) reindex(c *gin.Context) {
 		DocumentsEnumerated: res.DocumentsEnumerated,
 		EventsEmitted:       res.EventsEmitted,
 		EmitErrors:          res.EmitErrors,
+		DryRun:              res.DryRun,
 	})
 }

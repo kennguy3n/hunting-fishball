@@ -127,6 +127,18 @@ phase.
 > Every other phase below is currently `⏳ planned`. As phases
 > land, flip the marker and move the supporting status row in
 > [`PROGRESS.md`](PROGRESS.md).
+>
+> **Round 6** (2026-05-10) layers 20 new features across the
+> existing phases rather than opening a new one: MMR diversifier
+> + chunk-level ACL extend Phase 3/4 retrieval; semantic dedup
+> + priority queues + dry-run + retry analytics extend Phase 1
+> pipeline; per-source embedding config + connector templates
+> + adaptive rate limiting extend Phase 2 admin surfaces; SSE
+> streaming retrieval is a new variant of the Phase 3 retrieve
+> API; API versioning + isolation audit + tenant export + admin
+> notifications + backpressure metrics extend Phase 8
+> observability/operability; shard pre-generation extends
+> Phase 5. See PROGRESS.md for the per-task list.
 
 ---
 
