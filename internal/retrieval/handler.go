@@ -387,6 +387,15 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 		return
 	}
+	// Round-6 Task 10: route the request through the configured
+	// A/B test (if any) BEFORE topK is resolved so the variant's
+	// `top_k` override (when present) flows into the topK cap, the
+	// cache scope hash, and the fan-out limit. A nil result means
+	// "no experiment applied"; the original request flows through
+	// unchanged. The route result is later stamped onto
+	// `resp.Policy` so analytics can attribute the response to the
+	// arm it was served from.
+	route, req := h.resolveExperiment(tenantID, req)
 	topK := req.TopK
 	if topK == 0 {
 		topK = h.cfg.DefaultTopK
@@ -460,6 +469,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
 			resp.Policy.BlockedCount = blockedByPrivacy + blockedByACL + blockedByRecipient
+			stampExperiment(&resp, route)
 			// Cached hits carry the same PrivacyStrip enrichment as
 			// fresh hits — caching only the strip would
 			// double-count if the live policy changes between
@@ -478,14 +488,8 @@ func (h *Handler) retrieve(c *gin.Context) {
 	// Round-6 Task 4: optional synonym expansion before fan-out.
 	// The expanded query is what BM25 / memory see; the embedding
 	// path stays on the original (already vectorised above).
-	expandedQuery := req.Query
-	if h.cfg.QueryExpander != nil {
-		if exp, err := h.cfg.QueryExpander.Expand(c.Request.Context(), tenantID, req.Query); err == nil && exp != "" {
-			expandedQuery = exp
-		}
-	}
 	fanOutReq := req
-	fanOutReq.Query = expandedQuery
+	fanOutReq.Query = h.expandQuery(c.Request.Context(), tenantID, req.Query)
 	streams, degraded, backendTimings := h.fanOut(c.Request.Context(), tenantID, fanOutReq, vec, topK)
 
 	mergeStart := time.Now()
@@ -538,6 +542,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 		},
 		Timings: timingsFromMap(backendTimings, mergeMs, rerankMs),
 	}
+	stampExperiment(&resp, route)
 	emitExplain := req.Explain && IsExplainAuthorized(c, h.cfg.ExplainEnvEnabled)
 	for _, m := range pres.Allowed {
 		hit := hitFromMatch(m)
@@ -615,15 +620,22 @@ func (h *Handler) applyDeviceFirst(ctx context.Context, tenantID, channelID, pri
 // batch retrieve fan-out) should use RetrieveWithSnapshotCached so
 // they share the semantic cache with single-request /v1/retrieve.
 func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot) (RetrieveResponse, error) {
-	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
-	if err != nil {
-		return RetrieveResponse{}, err
-	}
 	if tenantID == "" {
 		return RetrieveResponse{}, errors.New("retrieval: tenantID is required")
 	}
 	if req.Query == "" {
 		return RetrieveResponse{}, errors.New("retrieval: query is required")
+	}
+	// Round-6 Task 10: route through the configured A/B test (if
+	// any) BEFORE topK is resolved so the variant's `top_k`
+	// override propagates into the resolver below and into the
+	// fan-out limit. The route result is stamped onto the response
+	// before return so the simulator's diff view sees which arm
+	// produced the candidate result set.
+	route, req := h.resolveExperiment(tenantID, req)
+	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
+	if err != nil {
+		return RetrieveResponse{}, err
 	}
 
 	vec, err := h.cfg.Embedder.EmbedQuery(ctx, tenantID, req.Query)
@@ -631,7 +643,12 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 		return RetrieveResponse{}, err
 	}
 
-	return h.runPipelineFromVec(ctx, tenantID, req, snapshot, vec, topK, privacyMode)
+	resp, perr := h.runPipelineFromVec(ctx, tenantID, req, snapshot, vec, topK, privacyMode)
+	if perr != nil {
+		return RetrieveResponse{}, perr
+	}
+	stampExperiment(&resp, route)
+	return resp, nil
 }
 
 // RetrieveWithSnapshotCached is the cache-aware twin of
@@ -653,15 +670,22 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 // directly and bypassed the cache entirely — a documented performance
 // regression on dashboards that fan a hot query out across N panels.
 func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot) (RetrieveResponse, error) {
-	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
-	if err != nil {
-		return RetrieveResponse{}, err
-	}
 	if tenantID == "" {
 		return RetrieveResponse{}, errors.New("retrieval: tenantID is required")
 	}
 	if req.Query == "" {
 		return RetrieveResponse{}, errors.New("retrieval: query is required")
+	}
+	// Round-6 Task 10: route through the configured A/B test (if
+	// any) BEFORE topK resolution so the variant's `top_k`
+	// override flows into both the cache scope hash and the
+	// fan-out limit. The route result is stamped onto the response
+	// (cache hit OR miss path) so the batch caller's downstream
+	// analytics can attribute hits to the correct arm.
+	route, req := h.resolveExperiment(tenantID, req)
+	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
+	if err != nil {
+		return RetrieveResponse{}, err
 	}
 
 	vec, err := h.cfg.Embedder.EmbedQuery(ctx, tenantID, req.Query)
@@ -679,6 +703,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
 			resp.Policy.BlockedCount = blockedByPrivacy + blockedByACL + blockedByRecipient
+			stampExperiment(&resp, route)
 			for i := range resp.Hits {
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
@@ -691,6 +716,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	if perr != nil {
 		return RetrieveResponse{}, perr
 	}
+	stampExperiment(&resp, route)
 	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
 		_ = h.cfg.Cache.Set(ctx, tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), h.cfg.CacheTTL)
 	}
@@ -726,9 +752,15 @@ func (h *Handler) resolveTopKAndPrivacy(req RetrieveRequest, snapshot policy.Pol
 // runPipelineFromVec is the cache-free inner pipeline shared by
 // RetrieveWithSnapshot and RetrieveWithSnapshotCached's miss path.
 // It expects the query to already be embedded and the topK /
-// privacyMode resolution to be done by the caller.
+// privacyMode resolution to be done by the caller. Synonym
+// expansion (Round-6 Task 4) is applied here so the simulator and
+// batch retrieve paths share the same expansion as the gin
+// handler — callers that already pre-expand should leave
+// `HandlerConfig.QueryExpander` nil at construction time.
 func (h *Handler) runPipelineFromVec(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot, vec []float32, topK int, privacyMode string) (RetrieveResponse, error) {
-	streams, degraded, backendTimings := h.fanOut(ctx, tenantID, req, vec, topK)
+	fanOutReq := req
+	fanOutReq.Query = h.expandQuery(ctx, tenantID, req.Query)
+	streams, degraded, backendTimings := h.fanOut(ctx, tenantID, fanOutReq, vec, topK)
 
 	mergeStart := time.Now()
 	merged := h.cfg.Merger.Merge(streams...)
