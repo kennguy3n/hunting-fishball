@@ -9,7 +9,11 @@
 //  1. emits a structured log line (ready for the slog handler in
 //     internal/observability/logger.go), and
 //  2. increments the `context_engine_dlq_messages_total` Prometheus
-//     counter, labeled by `tenant_id` and `original_topic`.
+//     counter, labeled only by `original_topic`. Per-tenant
+//     breakdowns live in the structured log line (`tenant_id`
+//     field) where Loki / Splunk index them without the cardinality
+//     blow-up a Prometheus label would carry on a multi-tenant
+//     fleet — see internal/observability/metrics.go.
 //
 // Wiring is opt-in via the CONTEXT_ENGINE_DLQ_OBSERVE=1 env var so
 // existing single-binary deployments don't sprout a second consumer

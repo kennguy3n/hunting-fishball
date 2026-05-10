@@ -482,7 +482,9 @@ ships, the matrix is empty. Each row records:
       tag so CI can fail on regression.
   - **Phase 8 pipeline completeness**:
     - `internal/pipeline/dlq_observer.go` + Prometheus counter
-      `context_engine_dlq_messages_total{tenant_id,original_topic}`.
+      `context_engine_dlq_messages_total{original_topic}`
+      (per-tenant breakdowns live in the `tenant_id` log
+      field — see "Logger middleware key fix" below).
       Logs structured fields per dead-letter envelope
       (`tenant_id`, `document_id`, `source_id`, `error`,
       `attempt_count`, `original_topic`, `timestamp`).
