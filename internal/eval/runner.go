@@ -104,11 +104,12 @@ func Run(ctx context.Context, r Retriever, suite EvalSuite) (*EvalReport, error)
 
 		// ExpectedMinScore gates the case as "scored" — when the
 		// caller wants to assert on the absolute relevance of the
-		// top hit, a miss zeroes the metrics. We still record the
-		// returned IDs so operators can see the regression.
+		// top hit and the top score falls below the bar, the case
+		// fails and is excluded from the aggregate, matching the
+		// retriever-error path above. We still record the returned
+		// IDs on the case so operators can see the regression.
 		if c.ExpectedMinScore > 0 && topScore < c.ExpectedMinScore {
 			caseResult.Error = "top score below expected_min_score"
-			scoredMetrics = append(scoredMetrics, Metrics{})
 			report.FailedCases++
 			report.Cases = append(report.Cases, caseResult)
 			continue

@@ -109,6 +109,46 @@ func TestCredentialRotator_ValidatorError_NoMutation(t *testing.T) {
 	}
 }
 
+// TestCredentialRotator_DefaultClock is the regression for
+// runner.go using `time.Now().UTC` (Go method-value syntax)
+// which freezes Now() to its first evaluation; the production
+// path (r.Now == nil) must return the current wall time each
+// call. We exercise the unset path and confirm RotatedAt is
+// within a small skew of the test execution time and that
+// PreviousExpiryAt is correctly RotatedAt + grace period.
+func TestCredentialRotator_DefaultClock(t *testing.T) {
+	t.Parallel()
+	repo, _ := newSQLiteSourceRepo(t)
+	ctx := context.Background()
+
+	src := admin.NewSource("tenant-a", "google-drive", admin.JSONMap{"credentials": []byte("OLD")}, nil)
+	if err := repo.Create(ctx, src); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	rotator := &admin.CredentialRotator{
+		Repo:      repo,
+		Audit:     &fakeAudit{},
+		Validator: &fakeValidator{},
+		// Now is intentionally left nil to exercise the
+		// `time.Now().UTC()` default path.
+	}
+	before := time.Now().UTC()
+	res, err := rotator.Rotate(ctx, "tenant-a", src.ID, admin.CredentialRotateRequest{Credentials: []byte("NEW")})
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	after := time.Now().UTC()
+
+	if res.RotatedAt.Before(before) || res.RotatedAt.After(after) {
+		t.Fatalf("RotatedAt %v not within [%v, %v]", res.RotatedAt, before, after)
+	}
+	wantExpiry := res.RotatedAt.Add(admin.CredentialGracePeriod)
+	if !res.PreviousExpiryAt.Equal(wantExpiry) {
+		t.Fatalf("PreviousExpiryAt = %v; want %v", res.PreviousExpiryAt, wantExpiry)
+	}
+}
+
 func TestCredentialRotator_404OnUnknown(t *testing.T) {
 	t.Parallel()
 	repo, _ := newSQLiteSourceRepo(t)

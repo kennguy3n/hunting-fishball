@@ -130,7 +130,7 @@ func (r *CredentialRotator) Rotate(ctx context.Context, tenantID, sourceID strin
 	if r.Validator == nil {
 		return CredentialRotateResponse{}, errors.New("admin: nil Validator")
 	}
-	now := time.Now().UTC
+	now := func() time.Time { return time.Now().UTC() }
 	if r.Now != nil {
 		now = func() time.Time { return r.Now().UTC() }
 	}

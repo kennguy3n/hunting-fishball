@@ -104,3 +104,41 @@ func TestRun_RejectsInvalidSuite(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 }
+
+// TestRun_AggregateExcludesGatedCases is the regression for
+// runner.go appending a zero-valued Metrics{} when the
+// ExpectedMinScore gate fails, dragging the aggregate down. The
+// aggregate must only average over cases that produced real
+// metrics (the perfect case here), matching the retriever-error
+// path which already excludes its case from aggregation.
+func TestRun_AggregateExcludesGatedCases(t *testing.T) {
+	t.Parallel()
+	r := fakeRetriever{
+		resp: map[string][]RetrieveHit{
+			"perfect": {{ID: "a", Score: 0.9}},
+			"low":     {{ID: "b", Score: 0.1}},
+		},
+	}
+	suite := EvalSuite{
+		Name:     "agg",
+		TenantID: "tenant-a",
+		DefaultK: 1,
+		Cases: []EvalCase{
+			{Query: "perfect", ExpectedChunkIDs: []string{"a"}},
+			{Query: "low", ExpectedChunkIDs: []string{"b"}, ExpectedMinScore: 0.5},
+		},
+	}
+	rep, err := Run(context.Background(), r, suite)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.FailedCases != 1 {
+		t.Fatalf("expected one failed case, got %d", rep.FailedCases)
+	}
+	if rep.Aggregate.PrecisionAtK != 1 {
+		t.Fatalf("aggregate precision must equal the perfect case (1.0), got %v", rep.Aggregate.PrecisionAtK)
+	}
+	if rep.Aggregate.MRR != 1 {
+		t.Fatalf("aggregate MRR must equal the perfect case (1.0), got %v", rep.Aggregate.MRR)
+	}
+}
