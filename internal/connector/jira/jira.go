@@ -72,14 +72,22 @@ func New(opts ...Option) *Connector {
 	return c
 }
 
-// VerifyWebhookRequest validates the Jira `X-Hub-Signature-256`
-// header against the configured webhook secret. Implements
-// connector.WebhookVerifier.
+// VerifyWebhookRequest validates the Jira webhook signature
+// against the configured secret. Atlassian Cloud sends the
+// SHA-256 HMAC in `X-Atlassian-Webhook-Signature`; legacy
+// installs and some on-prem deployments still emit
+// `X-Hub-Signature-256` so both headers are accepted (the
+// canonical Atlassian header is preferred when both are
+// present). Implements connector.WebhookVerifier.
 func (g *Connector) VerifyWebhookRequest(headers map[string][]string, payload []byte) error {
 	if len(g.webhookSecret) == 0 {
 		return nil
 	}
-	return connector.VerifyHMACSHA256(g.webhookSecret, payload, connector.FirstHeader(headers, "X-Hub-Signature-256"))
+	sig := connector.FirstHeader(headers, "X-Atlassian-Webhook-Signature")
+	if sig == "" {
+		sig = connector.FirstHeader(headers, "X-Hub-Signature-256")
+	}
+	return connector.VerifyHMACSHA256(g.webhookSecret, payload, sig)
 }
 
 type connection struct {

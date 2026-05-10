@@ -15,6 +15,9 @@ package slack
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,8 +46,18 @@ type Credentials struct {
 
 // Connector is the SourceConnector implementation.
 type Connector struct {
-	httpClient *http.Client
-	baseURL    string
+	httpClient    *http.Client
+	baseURL       string
+	signingSecret string
+
+	// timestampSkew bounds how far off the request timestamp can
+	// be from now() before VerifyWebhookRequest rejects it.
+	// Defaults to 5 minutes (Slack's recommended value).
+	timestampSkew time.Duration
+
+	// nowFn is used by tests to inject a fixed wall clock so the
+	// timestamp-skew check is deterministic.
+	nowFn func() time.Time
 }
 
 // Option configures a Connector.
@@ -60,14 +73,83 @@ func WithBaseURL(u string) Option {
 	return func(s *Connector) { s.baseURL = u }
 }
 
+// WithSigningSecret enables Slack v0 signature verification on
+// HandleWebhook callers that route through VerifyWebhookRequest.
+// Empty disables verification (development default).
+func WithSigningSecret(s string) Option {
+	return func(c *Connector) { c.signingSecret = s }
+}
+
+// WithTimestampSkew overrides the maximum allowed clock skew
+// between Slack and the local system. Defaults to 5 minutes.
+func WithTimestampSkew(d time.Duration) Option {
+	return func(c *Connector) { c.timestampSkew = d }
+}
+
+// WithNow injects a wall-clock function for tests.
+func WithNow(fn func() time.Time) Option {
+	return func(c *Connector) { c.nowFn = fn }
+}
+
 // New constructs a Connector.
 func New(opts ...Option) *Connector {
-	s := &Connector{httpClient: &http.Client{Timeout: 30 * time.Second}, baseURL: defaultBaseURL}
+	s := &Connector{
+		httpClient:    &http.Client{Timeout: 30 * time.Second},
+		baseURL:       defaultBaseURL,
+		timestampSkew: 5 * time.Minute,
+		nowFn:         time.Now,
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.timestampSkew <= 0 {
+		s.timestampSkew = 5 * time.Minute
+	}
+	if s.nowFn == nil {
+		s.nowFn = time.Now
+	}
 
 	return s
+}
+
+// VerifyWebhookRequest validates the Slack v0 signature scheme
+// against the configured signing secret. Slack signs every request
+// as
+//
+//	v0=hex(HMAC_SHA256(secret, "v0:"+ts +":"+ body))
+//
+// using the headers `X-Slack-Signature` and
+// `X-Slack-Request-Timestamp`. The timestamp is also bounded by
+// timestampSkew (default 5 min) to make replay attacks harder.
+//
+// When signingSecret is empty the function returns nil so
+// development environments can skip verification.
+func (s *Connector) VerifyWebhookRequest(headers map[string][]string, payload []byte) error {
+	if s.signingSecret == "" {
+		return nil
+	}
+	sig := connector.FirstHeader(headers, "X-Slack-Signature")
+	ts := connector.FirstHeader(headers, "X-Slack-Request-Timestamp")
+	if sig == "" || ts == "" {
+		return connector.ErrWebhookSignatureMissing
+	}
+	parsedTS, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64)
+	if err != nil {
+		return connector.ErrWebhookSignatureInvalid
+	}
+	if delta := s.nowFn().Unix() - parsedTS; delta > int64(s.timestampSkew.Seconds()) || delta < -int64(s.timestampSkew.Seconds()) {
+		return connector.ErrWebhookSignatureInvalid
+	}
+	mac := hmac.New(sha256.New, []byte(s.signingSecret))
+	mac.Write([]byte("v0:"))
+	mac.Write([]byte(ts))
+	mac.Write([]byte{':'})
+	mac.Write(payload)
+	want := "v0=" + hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(want), []byte(strings.TrimSpace(sig))) {
+		return connector.ErrWebhookSignatureInvalid
+	}
+	return nil
 }
 
 // connection holds the per-call state derived from ConnectorConfig.
