@@ -42,6 +42,10 @@ const (
 	ActionPolicyPromoted      Action = "policy.promoted"
 	ActionPolicyRejected      Action = "policy.rejected"
 	ActionAuditRead           Action = "audit.read"
+	ActionDLQReplayed         Action = "dlq.replayed"
+	ActionTenantDeletionRequested Action = "tenant.deletion_requested"
+	ActionTenantDeleted           Action = "tenant.deleted"
+	ActionReindexRequested        Action = "reindex.requested"
 )
 
 // AuditLog is a single audit event. The table is append-only — there is

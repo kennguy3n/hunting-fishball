@@ -238,6 +238,68 @@ func run() error {
 		}()
 	}
 
+	// Task 6: optional retention worker. Sweeps the chunks table per
+	// tenant and evicts rows whose ingested_at exceeds the effective
+	// MaxAgeDays of the resolved retention policy. Off by default; set
+	// CONTEXT_ENGINE_RETENTION_INTERVAL=1h (any duration string) to
+	// enable.
+	if v := os.Getenv("CONTEXT_ENGINE_RETENTION_INTERVAL"); v != "" {
+		interval, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("retention interval: %w", perr)
+		}
+		policySrc := pipeline.NewRetentionPolicySourceGORM(db)
+		if err := policySrc.AutoMigrate(ctx); err != nil {
+			return fmt.Errorf("retention policy migrate: %w", err)
+		}
+		chunkSrc := pipeline.NewRetentionChunkSourceGORM(db)
+		deleter := pipeline.NewComboRetentionDeleter(pgStore, qdrant)
+		retWorker, werr := pipeline.NewRetentionWorker(pipeline.RetentionWorkerConfig{
+			Chunks: chunkSrc, Policies: policySrc, Deleter: deleter,
+			Logger: slog.Default(), Interval: interval,
+		})
+		if werr != nil {
+			return fmt.Errorf("retention worker: %w", werr)
+		}
+		go func() {
+			if err := retWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("ingest: retention worker", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
+	// Task 5: optional persistent DLQ consumer. Lands every dead-letter
+	// envelope in Postgres so operators can list / replay failed events
+	// from /v1/admin/dlq. Off by default so legacy deployments don't
+	// gain a new consumer group accidentally.
+	if os.Getenv("CONTEXT_ENGINE_DLQ_CONSUME") == "1" {
+		dlqStore := pipeline.NewDLQStoreGORM(db)
+		if err := dlqStore.AutoMigrate(ctx); err != nil {
+			return fmt.Errorf("dlq store automigrate: %w", err)
+		}
+		dlqGroupID := envOr("CONTEXT_ENGINE_DLQ_CONSUMER_GROUP", groupID+"-dlq-consumer")
+		dlqGroup, gerr := sarama.NewConsumerGroup(brokerList, dlqGroupID, saramaCfg)
+		if gerr != nil {
+			return fmt.Errorf("kafka dlq consumer group: %w", gerr)
+		}
+		defer func() { _ = dlqGroup.Close() }()
+		dlqCons, cerr := pipeline.NewDLQConsumer(pipeline.DLQConsumerConfig{
+			Group:       dlqGroup,
+			Topic:       dlqTopic,
+			Store:       dlqStore,
+			Logger:      slog.Default(),
+			MaxAttempts: stageWorkerEnv("CONTEXT_ENGINE_DLQ_MAX_ATTEMPTS"),
+		})
+		if cerr != nil {
+			return fmt.Errorf("dlq consumer: %w", cerr)
+		}
+		go func() {
+			if err := dlqCons.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("ingest: dlq consumer", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
 	// ---- Phase 8 Task 20: HTTP probes + /metrics on a sidecar port.
 	var redisClient *redis.Client
 	if u := os.Getenv("CONTEXT_ENGINE_REDIS_URL"); u != "" {
