@@ -49,6 +49,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/b2c"
 	"github.com/kennguy3n/hunting-fishball/internal/config"
+	"github.com/kennguy3n/hunting-fishball/internal/eval"
 	"github.com/kennguy3n/hunting-fishball/internal/lifecycle"
 	"github.com/kennguy3n/hunting-fishball/internal/migrate"
 	"github.com/kennguy3n/hunting-fishball/internal/models"
@@ -416,6 +417,23 @@ func run() error {
 	}
 	simHandler.Register(api)
 
+	// Phase 6 / Tasks 1: retrieval evaluation harness. Mounts
+	// /v1/admin/eval/{suites,run} so operators can replay a labelled
+	// corpus against the live retrieval handler and score
+	// Precision@K, Recall@K, MRR, NDCG. The retriever closure
+	// adapts retrievalHandler.Retrieve into the eval package's
+	// neutral request/hit shape so eval stays a leaf package.
+	evalSuiteRepo := eval.NewSuiteRepository(db)
+	evalHandler, err := eval.NewHandler(eval.HandlerConfig{
+		Suites:   evalSuiteRepo,
+		Audit:    auditRepo,
+		Retrieve: evalRetriever(retrievalHandler, liveResolver),
+	})
+	if err != nil {
+		return fmt.Errorf("eval handler: %w", err)
+	}
+	evalHandler.Register(api)
+
 	// Phase 5 server-side: shard sync API. The handler exposes
 	// `GET /v1/shards/:tenant_id`, `GET /v1/shards/:tenant_id/delta`,
 	// `GET /v1/shards/:tenant_id/coverage`, and (when a Forget
@@ -608,6 +626,36 @@ func simulatorRetriever(h *retrieval.Handler) policy.RetrieverFunc {
 				Sources:      hit.Sources,
 				Metadata:     hit.Metadata,
 			})
+		}
+		return out, nil
+	}
+}
+
+// evalRetriever bridges the eval runner's neutral RetrieveFunc to
+// retrieval.Handler.RetrieveWithSnapshotCached. We deliberately
+// re-use the live path (resolver + cache + fan-out + merge + ACL
+// gate) so the eval harness scores the system the same way
+// production traffic experiences it. When the resolver fails the
+// closure returns the error so the runner records a per-case
+// failure rather than silently masking the regression.
+func evalRetriever(h *retrieval.Handler, resolver policy.PolicyResolver) eval.RetrieveFunc {
+	return func(ctx context.Context, req eval.RetrieveRequest) ([]eval.RetrieveHit, error) {
+		snap, err := resolver.Resolve(ctx, req.TenantID, "")
+		if err != nil {
+			return nil, err
+		}
+		resp, err := h.RetrieveWithSnapshotCached(ctx, req.TenantID, retrieval.RetrieveRequest{
+			Query:       req.Query,
+			TopK:        req.TopK,
+			SkillID:     req.SkillID,
+			PrivacyMode: req.PrivacyMode,
+		}, snap)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]eval.RetrieveHit, 0, len(resp.Hits))
+		for _, hit := range resp.Hits {
+			out = append(out, eval.RetrieveHit{ID: hit.ID, Score: hit.Score})
 		}
 		return out, nil
 	}
