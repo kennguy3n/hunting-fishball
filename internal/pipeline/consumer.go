@@ -424,6 +424,12 @@ func decodeEvent(msg *sarama.ConsumerMessage) (IngestEvent, bool, error) {
 	if err := json.Unmarshal(msg.Value, &evt); err != nil {
 		return IngestEvent{}, false, fmt.Errorf("unmarshal event: %w", err)
 	}
+	// Round-4 Task 9: prefer the Kafka header for the request id
+	// because some producers (legacy Python publishers, the audit
+	// outbox replay tool) set the header but not the JSON field.
+	if hid := RequestIDFromKafkaMessage(msg); hid != "" && evt.RequestID == "" {
+		evt.RequestID = hid
+	}
 
 	var legacyKey bool
 	if len(msg.Key) > 0 {

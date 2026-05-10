@@ -145,6 +145,7 @@ func (o *DLQObserver) observeMessage(msg *sarama.ConsumerMessage) {
 		slog.String("tenant_id", env.Event.TenantID),
 		slog.String("source_id", env.Event.SourceID),
 		slog.String("document_id", env.Event.DocumentID),
+		slog.String("request_id", env.Event.RequestID),
 		slog.String("error", env.Error),
 		slog.Int("attempt_count", env.AttemptCount),
 		slog.String("original_topic", originalTopic),
