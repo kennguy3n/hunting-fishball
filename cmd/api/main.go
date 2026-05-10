@@ -33,9 +33,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/IBM/sarama"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
@@ -46,6 +48,9 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
 	"github.com/kennguy3n/hunting-fishball/internal/b2c"
+	"github.com/kennguy3n/hunting-fishball/internal/config"
+	"github.com/kennguy3n/hunting-fishball/internal/lifecycle"
+	"github.com/kennguy3n/hunting-fishball/internal/migrate"
 	"github.com/kennguy3n/hunting-fishball/internal/models"
 	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
@@ -89,6 +94,9 @@ func main() {
 }
 
 func run() error {
+	if err := config.ValidateAPI(config.OSLooker); err != nil {
+		return err
+	}
 	listenAddr := envOr("CONTEXT_ENGINE_LISTEN_ADDR", ":8080")
 	dsn := envOr("CONTEXT_ENGINE_DATABASE_URL", "")
 	qdrantURL := envOr("CONTEXT_ENGINE_QDRANT_URL", "http://localhost:6333")
@@ -99,13 +107,24 @@ func run() error {
 		return fmt.Errorf("CONTEXT_ENGINE_VECTOR_SIZE: %w", err)
 	}
 
-	if dsn == "" {
-		return errors.New("CONTEXT_ENGINE_DATABASE_URL is required")
-	}
-
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
+	}
+	// Phase 8 / Task 18: optional automatic SQL migration runner.
+	// Off by default. Callers set AUTO_MIGRATE=true (or CONTEXT_ENGINE_AUTO_MIGRATE=true)
+	// to apply every pending file in MIGRATIONS_DIR (default "migrations") at startup.
+	if isAutoMigrateEnabled() {
+		dir := envOr("CONTEXT_ENGINE_MIGRATIONS_DIR", "migrations")
+		runner, mrr := migrate.New(migrate.Config{DB: db, Dir: dir})
+		if mrr != nil {
+			return fmt.Errorf("migrate: %w", mrr)
+		}
+		applied, mrr := runner.Apply(context.Background())
+		if mrr != nil {
+			return fmt.Errorf("auto-migrate: %w", mrr)
+		}
+		slog.Info("api: applied migrations", slog.Int("count", len(applied)))
 	}
 	// Phase 8 Task 18: configurable Postgres pool sizes. Defaults are
 	// chosen for the per-tenant write rate observed in the Phase 1
@@ -230,12 +249,44 @@ func run() error {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// Phase 8 / Task 20: request ID middleware mounts ahead of
+	// everything else so every downstream log line, response
+	// header, and trace span carries the X-Request-ID.
+	r.Use(observability.RequestIDMiddleware())
 	r.Use(observability.PrometheusMiddleware())
 	r.GET("/metrics", gin.WrapH(observability.Handler()))
 	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	r.GET("/readyz", apiReadyzHandler(db, sharedRedis, qdrant))
 
-	api := r.Group("/", authPlaceholder, observability.GinLoggerMiddleware("api"))
+	apiMiddlewares := []gin.HandlerFunc{authPlaceholder, observability.GinLoggerMiddleware("api")}
+
+	// Phase 8 / Task 8: optional public-API rate limit. Active when
+	// CONTEXT_ENGINE_API_RATE_LIMIT (requests-per-second per tenant)
+	// is set and Redis is wired. The limiter falls open on Redis
+	// failures so a transient cache outage doesn't blackhole the API.
+	if sharedRedis != nil {
+		if rps, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_API_RATE_LIMIT")); rps > 0 {
+			burst := rps * 4
+			if v, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_API_RATE_BURST")); v > 0 {
+				burst = v
+			}
+			apiLimiter, lerr := admin.NewRateLimiter(context.Background(), admin.RateLimiterConfig{
+				Client:    sharedRedis,
+				KeyPrefix: "hf:rl:api",
+				Limit:     admin.RateLimit{Capacity: burst, RefillPerSecond: float64(rps)},
+			})
+			if lerr != nil {
+				return fmt.Errorf("api rate limiter: %w", lerr)
+			}
+			mw, merr := admin.NewAPIRateLimitMiddleware(admin.APIRateLimitMiddlewareConfig{Limiter: apiLimiter})
+			if merr != nil {
+				return fmt.Errorf("api rate limit middleware: %w", merr)
+			}
+			apiMiddlewares = append(apiMiddlewares, mw)
+		}
+	}
+
+	api := r.Group("/", apiMiddlewares...)
 	audit.NewHandler(auditRepo).Register(api)
 	retrievalHandler.Register(api)
 
@@ -254,6 +305,56 @@ func run() error {
 		return fmt.Errorf("admin handler: %w", err)
 	}
 	adminHandler.Register(api)
+
+	// Phase 8 / Task 19: connector / pipeline / retrieval health
+	// dashboard endpoint. Metrics provider is optional — when nil the
+	// handler returns just connector health.
+	dashboardHandler, err := admin.NewDashboardHandler(healthRepo, nil)
+	if err != nil {
+		return fmt.Errorf("dashboard handler: %w", err)
+	}
+	dashboardHandler.Register(api)
+
+	// Phase 8 / Task 14: per-namespace sync progress endpoint.
+	syncProgressStore := admin.NewSyncProgressStoreGORM(db)
+	if err := syncProgressStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("sync_progress migrate: %w", err)
+	}
+	admin.NewSyncProgressHandler(syncProgressStore).Register(api)
+
+	// Phase 8 / Task 7: optional reindex admin surface. Wires a Kafka
+	// SyncProducer into a pipeline.ReindexOrchestrator so an admin
+	// can re-emit EventReindex envelopes for an entire (tenant_id,
+	// source_id [, namespace_id]) without re-fetching from the upstream
+	// source. Off by default; set CONTEXT_ENGINE_KAFKA_BROKERS to opt
+	// the API binary into emitting reindex events.
+	if brokers := os.Getenv("CONTEXT_ENGINE_KAFKA_BROKERS"); brokers != "" {
+		topic := envOr("CONTEXT_ENGINE_REINDEX_TOPIC", "ingest")
+		brokerList := strings.Split(brokers, ",")
+		saramaCfg := pipeline.SaramaConfig()
+		reindexProd, perr := sarama.NewSyncProducer(brokerList, saramaCfg)
+		if perr != nil {
+			return fmt.Errorf("kafka reindex producer: %w", perr)
+		}
+		defer func() { _ = reindexProd.Close() }()
+		producer, err := pipeline.NewProducer(pipeline.ProducerConfig{Producer: reindexProd, Topic: topic})
+		if err != nil {
+			return fmt.Errorf("reindex producer: %w", err)
+		}
+		enum, err := pipeline.NewPostgresReindexEnumerator(db)
+		if err != nil {
+			return fmt.Errorf("reindex enumerator: %w", err)
+		}
+		orch, err := pipeline.NewReindexOrchestrator(enum, producer)
+		if err != nil {
+			return fmt.Errorf("reindex orchestrator: %w", err)
+		}
+		reindexHandler, err := admin.NewReindexHandler(admin.ReindexHandlerConfig{Runner: orch, Audit: auditRepo})
+		if err != nil {
+			return fmt.Errorf("reindex handler: %w", err)
+		}
+		reindexHandler.Register(api)
+	}
 
 	// Phase 5/6: tenant-scope key destruction (cryptographic-forget)
 	// admin endpoint. Mounted on /v1/admin/tenants/:tenant_id; the
@@ -394,10 +495,19 @@ func run() error {
 		slog.Info("api: shutting down")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	return srv.Shutdown(shutdownCtx)
+	timeout := 15 * time.Second
+	if v, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_SHUTDOWN_TIMEOUT_SECONDS")); v > 0 {
+		timeout = time.Duration(v) * time.Second
+	}
+	sd := lifecycle.New(timeout, slog.Default())
+	sd.Add("http-server", func(ctx context.Context) error { return srv.Shutdown(ctx) })
+	if sharedRedis != nil {
+		sd.Add("redis", func(_ context.Context) error { return sharedRedis.Close() })
+	}
+	if sqlDB, derr := db.DB(); derr == nil {
+		sd.Add("postgres", func(_ context.Context) error { return sqlDB.Close() })
+	}
+	return sd.Run(context.Background())
 }
 
 // authPlaceholder is the Phase 1 placeholder for OIDC middleware. It
@@ -544,6 +654,19 @@ func envOr(key, def string) string {
 	}
 
 	return def
+}
+
+// isAutoMigrateEnabled returns true when either AUTO_MIGRATE or
+// CONTEXT_ENGINE_AUTO_MIGRATE is set to a truthy value.
+func isAutoMigrateEnabled() bool {
+	for _, k := range []string{"AUTO_MIGRATE", "CONTEXT_ENGINE_AUTO_MIGRATE"} {
+		v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+		switch v {
+		case "1", "true", "yes", "on":
+			return true
+		}
+	}
+	return false
 }
 
 func parseInt(s string) (int, error) {

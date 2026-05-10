@@ -66,12 +66,17 @@ func newHandlerWithReader(r repoReader) *Handler {
 
 // Register mounts the audit-log endpoints on rg. Routes:
 //
-//	GET /v1/audit-logs       — list, filtered + paginated
-//	GET /v1/audit-logs/:id   — fetch a single entry
+//	GET /v1/audit-logs       — list, filtered + paginated (legacy path)
+//	GET /v1/audit-logs/:id   — fetch a single entry (legacy path)
+//	GET /v1/admin/audit      — Phase 8 / Task 13 admin search alias
+//	GET /v1/admin/audit/:id  — admin alias for single entry
 func (h *Handler) Register(rg *gin.RouterGroup) {
 	g := rg.Group("/v1/audit-logs")
 	g.GET("", h.list)
 	g.GET("/:id", h.get)
+	a := rg.Group("/v1/admin/audit")
+	a.GET("", h.list)
+	a.GET("/:id", h.get)
 }
 
 // list serves GET /v1/audit-logs.
@@ -93,6 +98,14 @@ func (h *Handler) list(c *gin.Context) {
 	}
 	if rt := c.Query("resource_type"); rt != "" {
 		filter.ResourceType = rt
+	}
+	if rid := c.Query("resource_id"); rid != "" {
+		filter.ResourceID = rid
+	} else if sid := c.Query("source_id"); sid != "" {
+		filter.ResourceID = sid
+	}
+	if q := c.Query("q"); q != "" {
+		filter.PayloadSearch = q
 	}
 	if s := c.Query("since"); s != "" {
 		t, err := time.Parse(time.RFC3339, s)

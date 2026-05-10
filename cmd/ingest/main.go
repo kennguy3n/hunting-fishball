@@ -35,6 +35,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 	// Blank-imports register each connector in the global registry via
 	// init(). Order is alphabetical to keep diffs minimal.
+	"github.com/kennguy3n/hunting-fishball/internal/config"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
@@ -47,6 +48,8 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	"github.com/kennguy3n/hunting-fishball/internal/lifecycle"
+	"github.com/kennguy3n/hunting-fishball/internal/migrate"
 	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
@@ -70,10 +73,10 @@ func main() {
 }
 
 func run() error {
-	dsn := envOr("CONTEXT_ENGINE_DATABASE_URL", "")
-	if dsn == "" {
-		return errors.New("CONTEXT_ENGINE_DATABASE_URL is required")
+	if err := config.ValidateIngest(config.OSLooker); err != nil {
+		return err
 	}
+	dsn := envOr("CONTEXT_ENGINE_DATABASE_URL", "")
 	brokers := envOr("CONTEXT_ENGINE_KAFKA_BROKERS", "localhost:9092")
 	groupID := envOr("CONTEXT_ENGINE_KAFKA_GROUP", "context-engine-ingest")
 	topics := envOr("CONTEXT_ENGINE_KAFKA_TOPICS", "ingest,reindex,purge")
@@ -93,6 +96,19 @@ func run() error {
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
+	}
+	// Phase 8 / Task 18: optional automatic SQL migration runner.
+	if isAutoMigrateEnabled() {
+		dir := envOr("CONTEXT_ENGINE_MIGRATIONS_DIR", "migrations")
+		runner, mrr := migrate.New(migrate.Config{DB: db, Dir: dir})
+		if mrr != nil {
+			return fmt.Errorf("migrate: %w", mrr)
+		}
+		applied, mrr := runner.Apply(context.Background())
+		if mrr != nil {
+			return fmt.Errorf("auto-migrate: %w", mrr)
+		}
+		slog.Info("ingest: applied migrations", slog.Int("count", len(applied)))
 	}
 	pgStore, err := storage.NewPostgresStore(db)
 	if err != nil {
@@ -319,11 +335,6 @@ func run() error {
 			slog.Warn("ingest: http server", slog.String("error", err.Error()))
 		}
 	}()
-	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		_ = httpSrv.Shutdown(shutdownCtx)
-	}()
 
 	slog.Info("ingest: started", slog.String("topics", topics), slog.String("group", groupID))
 	select {
@@ -339,17 +350,29 @@ func run() error {
 		}
 	}
 	cancel()
-	_ = cons.Stop()
-	coord.CloseInputs()
-	// Drain coordDone non-blockingly: if the select above already fired
-	// the coordDone case, the value has been consumed and the goroutine
-	// has exited, so a blocking <-coordDone would deadlock here.
-	select {
-	case <-coordDone:
-	default:
+	timeout := 30 * time.Second
+	if v, _ := parseInt(os.Getenv("CONTEXT_ENGINE_SHUTDOWN_TIMEOUT_SECONDS")); v > 0 {
+		timeout = time.Duration(v) * time.Second
 	}
-
-	return nil
+	sd := lifecycle.New(timeout, slog.Default())
+	sd.Add("kafka-consumer", func(_ context.Context) error { return cons.Stop() })
+	sd.Add("pipeline-coordinator", func(ctx context.Context) error {
+		coord.CloseInputs()
+		select {
+		case <-coordDone:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	sd.Add("http-server", func(ctx context.Context) error { return httpSrv.Shutdown(ctx) })
+	if sqlDB, derr := db.DB(); derr == nil {
+		sd.Add("postgres", func(_ context.Context) error { return sqlDB.Close() })
+	}
+	if redisClient != nil {
+		sd.Add("redis", func(_ context.Context) error { return redisClient.Close() })
+	}
+	return sd.Run(context.Background())
 }
 
 func envOr(key, def string) string {
@@ -358,6 +381,19 @@ func envOr(key, def string) string {
 	}
 
 	return def
+}
+
+// isAutoMigrateEnabled mirrors cmd/api: AUTO_MIGRATE / CONTEXT_ENGINE_AUTO_MIGRATE
+// = 1/true/yes/on enables the SQL migration runner on startup.
+func isAutoMigrateEnabled() bool {
+	for _, k := range []string{"AUTO_MIGRATE", "CONTEXT_ENGINE_AUTO_MIGRATE"} {
+		v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+		switch v {
+		case "1", "true", "yes", "on":
+			return true
+		}
+	}
+	return false
 }
 
 // stageWorkerEnv reads an integer worker count from the named env

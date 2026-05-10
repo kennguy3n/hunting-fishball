@@ -60,11 +60,11 @@ type DLQStore interface {
 
 // DLQListFilter narrows the GET /v1/admin/dlq query.
 type DLQListFilter struct {
-	TenantID      string
-	OriginalTopic string
+	TenantID        string
+	OriginalTopic   string
 	IncludeReplayed bool
-	PageSize      int
-	PageToken     string
+	PageSize        int
+	PageToken       string
 }
 
 // DLQConsumerConfig configures a DLQConsumer.

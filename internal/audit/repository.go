@@ -25,9 +25,20 @@ type ListFilter struct {
 	// ResourceType filters by exact match.
 	ResourceType string
 
+	// ResourceID filters by exact match. Phase 8 / Task 13 addition —
+	// admin search/filter API binds `source_id=` to ResourceID for the
+	// common case of "show me everything that touched this source".
+	ResourceID string
+
 	// Since/Until bracket created_at. Zero values are open-ended.
 	Since time.Time
 	Until time.Time
+
+	// PayloadSearch is a substring matched against the JSONB-serialised
+	// payload. Phase 8 / Task 13 adds rudimentary text search on top of
+	// the existing exact-match filters; the comparison is dialect-agnostic
+	// (LIKE ?) so SQLite + Postgres tests stay in sync.
+	PayloadSearch string
 
 	// PageSize is the LIMIT clause. <=0 falls back to defaultPageSize.
 	PageSize int
@@ -133,6 +144,12 @@ func (r *Repository) List(ctx context.Context, f ListFilter) (*ListResult, error
 	}
 	if f.ResourceType != "" {
 		q = q.Where("resource_type = ?", f.ResourceType)
+	}
+	if f.ResourceID != "" {
+		q = q.Where("resource_id = ?", f.ResourceID)
+	}
+	if f.PayloadSearch != "" {
+		q = q.Where("payload LIKE ?", "%"+f.PayloadSearch+"%")
 	}
 	if !f.Since.IsZero() {
 		q = q.Where("created_at >= ?", f.Since)

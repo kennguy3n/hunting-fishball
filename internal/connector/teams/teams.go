@@ -39,8 +39,9 @@ type Credentials struct {
 
 // Connector is the SourceConnector implementation.
 type Connector struct {
-	httpClient *http.Client
-	baseURL    string
+	httpClient    *http.Client
+	baseURL       string
+	webhookSecret string
 }
 
 // Option configures a Connector.
@@ -52,6 +53,16 @@ func WithHTTPClient(c *http.Client) Option { return func(g *Connector) { g.httpC
 // WithBaseURL overrides the API base URL — used by tests.
 func WithBaseURL(u string) Option { return func(g *Connector) { g.baseURL = u } }
 
+// WithWebhookSecret enables signature verification on incoming
+// webhooks. Microsoft Graph change notifications include a
+// `clientState` field in the body that mirrors the secret the caller
+// registered with the subscription; for the platform's purposes we
+// expect callers to forward that value as a bearer token in the
+// `Authorization` header (Phase 8 / Task 9).
+func WithWebhookSecret(secret string) Option {
+	return func(g *Connector) { g.webhookSecret = secret }
+}
+
 // New constructs a Connector.
 func New(opts ...Option) *Connector {
 	c := &Connector{httpClient: &http.Client{Timeout: 30 * time.Second}, baseURL: defaultBaseURL}
@@ -59,6 +70,16 @@ func New(opts ...Option) *Connector {
 		o(c)
 	}
 	return c
+}
+
+// VerifyWebhookRequest validates the Teams subscription `clientState`
+// (carried in `Authorization`) against the configured webhook secret.
+// Implements connector.WebhookVerifier.
+func (g *Connector) VerifyWebhookRequest(headers map[string][]string, _ []byte) error {
+	if g.webhookSecret == "" {
+		return nil
+	}
+	return connector.VerifyTokenEqual(g.webhookSecret, connector.FirstHeader(headers, "Authorization"))
 }
 
 type connection struct {

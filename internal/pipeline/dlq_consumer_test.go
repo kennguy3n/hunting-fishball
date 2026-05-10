@@ -157,9 +157,9 @@ func TestDLQConsumer_Persist_DecodableEnvelope(t *testing.T) {
 	t.Parallel()
 	store := newMemDLQStore()
 	c, err := pipeline.NewDLQConsumer(pipeline.DLQConsumerConfig{
-		Group: noopConsumerGroup{},
-		Topic: "ingest.dlq",
-		Store: store,
+		Group:  noopConsumerGroup{},
+		Topic:  "ingest.dlq",
+		Store:  store,
 		Logger: discardLogger(),
 	})
 	if err != nil {
@@ -336,9 +336,9 @@ type noopConsumerGroup struct{}
 func (noopConsumerGroup) Consume(_ context.Context, _ []string, _ sarama.ConsumerGroupHandler) error {
 	return nil
 }
-func (noopConsumerGroup) Errors() <-chan error                            { return nil }
-func (noopConsumerGroup) Close() error                                    { return nil }
-func (noopConsumerGroup) Pause(_ map[string][]int32)                      {}
-func (noopConsumerGroup) Resume(_ map[string][]int32)                     {}
-func (noopConsumerGroup) PauseAll()                                       {}
-func (noopConsumerGroup) ResumeAll()                                      {}
+func (noopConsumerGroup) Errors() <-chan error        { return nil }
+func (noopConsumerGroup) Close() error                { return nil }
+func (noopConsumerGroup) Pause(_ map[string][]int32)  {}
+func (noopConsumerGroup) Resume(_ map[string][]int32) {}
+func (noopConsumerGroup) PauseAll()                   {}
+func (noopConsumerGroup) ResumeAll()                  {}

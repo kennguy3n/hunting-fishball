@@ -177,8 +177,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 // Register mounts the retrieval endpoints on rg. Routes:
 //
 //	POST /v1/retrieve
+//	POST /v1/retrieve/batch
 func (h *Handler) Register(rg *gin.RouterGroup) {
 	rg.POST("/v1/retrieve", h.retrieve)
+	h.RegisterBatch(rg)
 }
 
 // RetrieveRequest is the JSON shape of POST /v1/retrieve.

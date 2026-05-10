@@ -435,6 +435,137 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-10: Phase 8 production-hardening (20-task next-batch
+  landed in PR #12). Each task ships unit tests; full suite
+  passes under `-race`.
+  - **Task 1–4: Test backfill audit**. Confirmed `internal/b2c/`,
+    `internal/models/`, `internal/observability/`, and
+    `internal/grpcpool/` already carry comprehensive coverage;
+    added the missing capabilities-empty-array regression in
+    `internal/b2c/handler_test.go::TestHandler_Capabilities_EmptyBackendsRendersJSONArray`
+    and pinned the `Capabilities.EnabledBackends` JSON shape to
+    `[]` even when no backends are configured.
+  - **Task 5: DLQ admin surface**.
+    `internal/admin/dlq_handler.go` mounts
+    `GET /v1/admin/dlq`, `GET /v1/admin/dlq/:id`, and
+    `POST /v1/admin/dlq/:id/replay`. `migrations/009_dlq_messages.sql`
+    persists every dead-letter envelope; the replay handler
+    enforces `max_retries` to prevent infinite loops.
+  - **Task 6: Retention policy enforcement**.
+    `internal/policy/retention.go` (RetentionPolicy +
+    layered tenant/source/namespace scope) and
+    `internal/pipeline/retention_worker.go` (periodic sweep
+    over Qdrant / FalkorDB / Tantivy / Postgres) ship the
+    Lifecycle Management point 5 of `docs/PROPOSAL.md` §5.
+    `migrations/010_retention_policy.sql` backs the rules.
+  - **Task 7: Reindex pipeline**.
+    `internal/pipeline/reindex.go` enumerates documents by
+    `(tenant_id, source_id, [namespace_id])` and re-emits
+    Stage 2–4 events without re-fetching.
+    `internal/admin/reindex_handler.go` mounts
+    `POST /v1/admin/reindex`. The orchestrator is wired into
+    `cmd/api/main.go` behind `CONTEXT_ENGINE_KAFKA_BROKERS`.
+  - **Task 8: Public-API rate limit**.
+    `internal/admin/api_ratelimit.go` adds a Gin middleware on
+    the `/v1/` group keyed on tenant_id using the existing
+    Redis token bucket from `internal/admin/ratelimit.go`.
+    Configurable via `CONTEXT_ENGINE_API_RATE_LIMIT`. Returns
+    HTTP 429 with `Retry-After`.
+  - **Task 9: Webhook signature verification**.
+    `internal/connector/webhook_verify.go` provides the shared
+    HMAC-SHA256 / SHA-1 / token verifiers. Wired into the four
+    `WebhookReceiver` connectors (jira, github, gitlab, teams).
+    Each connector ships its own
+    `webhook_verify_test.go` covering valid / invalid /
+    missing-header cases.
+  - **Task 10: Graceful shutdown**.
+    `internal/lifecycle/shutdown.go` provides an ordered
+    `Step` runner with a deadline budget. `cmd/api/main.go`
+    drains in-flight HTTP, then closes Postgres / Redis;
+    `cmd/ingest/main.go` stops the consumer, drains the
+    pipeline coordinator, then closes the HTTP probe and
+    Postgres / Redis. Configurable via
+    `CONTEXT_ENGINE_SHUTDOWN_TIMEOUT_SECONDS`.
+  - **Task 11: Configuration validation**.
+    `internal/config/validate.go` aggregates required-env-var
+    + URL-format checks into a single structured `ConfigError`
+    (`Looker` interface lets tests pass a `MapLooker` instead
+    of `os.Getenv`). `ValidateAPI` / `ValidateIngest` run
+    before any `gorm.Open` / `redis.NewClient` call.
+  - **Task 12: Bulk retrieval**.
+    `internal/retrieval/batch_handler.go` mounts
+    `POST /v1/retrieve/batch`, fans requests out concurrently
+    with a configurable `max_parallel` cap (default 8, hard
+    limit of 32 sub-requests), and isolates per-request policy
+    so one failed query does not fail the batch.
+  - **Task 13: Audit log search/filter**.
+    `internal/audit/repository.go::ListFilter` adds
+    `ResourceID` and `PayloadSearch`; `internal/audit/handler.go`
+    binds the new `source_id=` / `resource_id=` / `q=` query
+    params and additionally mounts the search surface on
+    `GET /v1/admin/audit` (the legacy `/v1/audit-logs` path is
+    preserved for back-compat).
+  - **Task 14: Sync progress tracking**.
+    `internal/admin/sync_progress.go` adds a GORM-backed
+    `SyncProgressStore` keyed on
+    `(tenant_id, source_id, namespace_id)` with UPSERT
+    increment helpers; `internal/admin/sync_progress_handler.go`
+    mounts `GET /v1/admin/sources/:id/progress` returning
+    discovered / processed / failed / percent_done per
+    namespace.
+  - **Task 15: Tenant-deletion e2e**.
+    `tests/e2e/tenant_deletion_test.go` extends the Phase 5
+    forget smoke into a full deletion flow: seed shards + audit
+    rows, call `DELETE /v1/tenants/:tenant_id/keys`, assert
+    trigger fired exactly once, assert subsequent shard list is
+    empty, assert audit log is *retained* (forensics + governance).
+  - **Task 16: Degradation / fault injection**.
+    `tests/e2e/degradation_test.go` covers vector-down,
+    cache-down, slow-backend, and all-backends-down paths.
+    Asserts `policy.degraded` carries the failed backend and
+    the response is never 5xx.
+  - **Task 17: OpenAPI spec**.
+    `docs/openapi.yaml` documents every public route — health
+    probes, B2C surfaces, retrieval (single + batch), shards
+    (list, delta, coverage, forget), models catalog, audit
+    (legacy + admin), admin sources / health / progress /
+    dashboard / DLQ (list + replay) / reindex / policy
+    (drafts + simulate + conflicts) / tenant deletion.
+  - **Task 18: Migration runner**.
+    `internal/migrate/runner.go` scans
+    `migrations/*.sql`, parses `NNN_name.sql` order, and
+    applies pending migrations inside per-file transactions
+    while recording rows in `schema_migrations`.
+    `DryRun` returns the pending list without applying.
+    Wired into `cmd/api/main.go` and `cmd/ingest/main.go`
+    behind `AUTO_MIGRATE=true` (or
+    `CONTEXT_ENGINE_AUTO_MIGRATE=true`); migrations dir is
+    `CONTEXT_ENGINE_MIGRATIONS_DIR` (default `migrations`).
+  - **Task 19: Connector dashboard**.
+    `internal/admin/dashboard_handler.go` mounts
+    `GET /v1/admin/dashboard` and aggregates
+    `source_health` rows by status (healthy / degraded /
+    failing / unknown). When a `MetricsSnapshot` is provided
+    the response also carries pipeline throughput, retrieval
+    P95, and per-backend availability flags. The widget shape
+    is intentionally `additionalProperties: true` in OpenAPI
+    so the admin portal can iterate without breaking server
+    changes.
+  - **Task 20: Request ID middleware**.
+    `internal/observability/request_id.go` reads the inbound
+    `X-Request-ID` (rejecting control chars / >128 chars and
+    minting a ULID otherwise), binds it to the gin context,
+    request context, response header, and the per-request
+    `slog` logger (`request_id` field). Mounted ahead of all
+    other middleware in `cmd/api/main.go` so every downstream
+    log line and tracing span correlates.
+  - **Documentation**: this changelog entry, plus the
+    `docs/openapi.yaml` spec generated by Task 17. Phase 8
+    line-items in this section remain at ~100% (all 20 tasks
+    landed); the qualitative "production-hardening" status
+    for Phase 8 moves from "feature complete + observed" to
+    "feature complete + observed + admin-surface complete".
+
 - 2026-05-10: Phase 5/6 wiring closeout + observability + benchmarks +
   e2e closeout (20-task batch landed in this PR):
   - **Phase 5 wiring closeout**:

@@ -321,6 +321,49 @@ block breaks the request's wall-clock down by backend so operators
 can identify the long pole without reaching for a trace; values are
 0 when the corresponding backend is not configured.
 
+**Bulk retrieval (Phase 8 / Task 12).** Clients populating dashboards
+or running multi-query experiments use `POST /v1/retrieve/batch` to
+fan out up to 32 sub-requests at once. The handler caps in-flight
+work at `max_parallel` (default 8); per-request policy and privacy
+isolation is preserved so one failed query does not fail the batch.
+Schema: see `docs/openapi.yaml` (BatchRequest / BatchResponse).
+
+**Admin surface (Phase 8 batch).** The admin handlers are grouped
+under `/v1/admin/`:
+
+- `POST /v1/admin/sources`, `GET`, `PATCH`, `DELETE`,
+  `GET /v1/admin/sources/:id/health` — connector CRUD + health.
+- `GET /v1/admin/sources/:id/progress` — per-namespace sync progress
+  (`internal/admin/sync_progress_handler.go`, Task 14).
+- `GET /v1/admin/dashboard` — tenant-wide health + throughput +
+  P95 + per-backend availability summary
+  (`internal/admin/dashboard_handler.go`, Task 19).
+- `GET /v1/admin/dlq`, `GET /v1/admin/dlq/:id`,
+  `POST /v1/admin/dlq/:id/replay` — dead-letter inspection + retry
+  (`internal/admin/dlq_handler.go`, Task 5).
+- `POST /v1/admin/reindex` — re-emit Stage 2–4 events for an
+  existing tenant / source / namespace
+  (`internal/admin/reindex_handler.go`, Task 7).
+- `POST /v1/admin/policy/drafts` (+ list / get / promote / reject /
+  simulate / simulate/diff / conflicts) — policy framework.
+- `DELETE /v1/admin/tenants/:tenant_id` — tenant deletion workflow.
+- `GET /v1/admin/audit` (also reachable as `/v1/audit-logs` for
+  back-compat) — audit log search/filter with `action=` /
+  `resource_id=` / `source_id=` / `q=` / `since=` / `until=`
+  (`internal/audit/handler.go`, Task 13).
+
+**Public-API rate limit (Phase 8 / Task 8).** A Gin middleware on
+the `/v1/` group enforces a per-tenant token bucket backed by Redis
+when `CONTEXT_ENGINE_API_RATE_LIMIT` is set; HTTP 429 + `Retry-After`
+on overage. Falls open on Redis failure so a transient cache outage
+does not blackhole the API.
+
+**Request ID middleware (Phase 8 / Task 20).** Every inbound request
+either echoes a sanitised `X-Request-ID` or has one minted as a ULID.
+The ID is bound to the gin context (`request_id`), the request
+context, the response header, and the per-request `slog` logger so
+every downstream log line and trace span correlates.
+
 **Operational endpoints.** Each binary (`cmd/api`, `cmd/ingest`)
 additionally exposes:
 
@@ -512,6 +555,26 @@ degradation. It returns the best result set it could compute, with a
 `policy.degraded` flag and a structured `policy.applied` list explaining
 which backends contributed.
 
+Phase 8 / Task 16 ships `tests/e2e/degradation_test.go`, exercising
+the four canonical failure modes in-process (vector down, all
+backends down, slow backend exceeding the budget, and Redis cache
+down). The retrieval handler is asserted to never return a 5xx and
+to always carry `policy.degraded` for any backend that errored.
+
+**Graceful shutdown (Phase 8 / Task 10).** Both binaries trap
+`SIGTERM` / `SIGINT` and run an ordered `lifecycle.Step` sequence:
+
+- `cmd/api`: `http-server` (drain in-flight requests) → `redis` →
+  `postgres`.
+- `cmd/ingest`: `kafka-consumer` (stop polling, commit offsets) →
+  `pipeline-coordinator` (drain in-flight stages) → `http-server`
+  (close health probe listener) → `postgres` → `redis`.
+
+The shutdown deadline is `CONTEXT_ENGINE_SHUTDOWN_TIMEOUT_SECONDS`
+(default 15s for `cmd/api`, 30s for `cmd/ingest`); steps that
+exceed the budget log the timeout and the runner moves on so a
+single hung resource doesn't block process exit.
+
 ---
 
 ## 9. Directory structure
@@ -632,6 +695,24 @@ hunting-fishball/
 │   │                          # pool with per-call deadline +
 │   │                          # circuit breaker (closed → open →
 │   │                          # half-open) for the Python sidecars
+│   ├── lifecycle/             # Phase 8 / Task 10: ordered shutdown
+│   │                          # runner. Step.Add() / Run() with a
+│   │                          # configurable deadline; used by
+│   │                          # cmd/api and cmd/ingest to drain
+│   │                          # in-flight work before closing
+│   │                          # Postgres / Redis / Kafka.
+│   ├── config/                # Phase 8 / Task 11: startup config
+│   │                          # validation (validate.go). Aggregates
+│   │                          # required-env + URL format errors
+│   │                          # into a single ConfigError. ValidateAPI
+│   │                          # / ValidateIngest run before any
+│   │                          # gorm.Open / redis.NewClient call.
+│   ├── migrate/               # Phase 8 / Task 18: SQL migration
+│   │                          # runner (runner.go). Reads
+│   │                          # migrations/NNN_name.sql in order,
+│   │                          # tracks applied migrations in the
+│   │                          # schema_migrations table, supports
+│   │                          # DryRun. Wired behind AUTO_MIGRATE.
 │   ├── policy/                # see Phase 4 entry above; Phase 6 /
 │   │                          # Task 15 added device_first.go
 │   │                          # (Decide → prefer_local hint) consumed
@@ -645,12 +726,23 @@ hunting-fishball/
 │   │                          # (DLQ consumer → Prometheus counter
 │   │                          # context_engine_dlq_messages_total +
 │   │                          # structured per-envelope logging)
-│   └── admin/                 # see Phase 2 / 4 entries; Phase 5 /
+│   └── admin/                 # see Phase 2 / 4 entries. Phase 5 /
 │                              # Task E16 added tenant_delete.go:
 │                              # 5-step TenantDeleter workflow + the
 │                              # DELETE /v1/admin/tenants/:tenant_id
 │                              # endpoint backed by
-│                              # migrations/008_tenant_status.sql
+│                              # migrations/008_tenant_status.sql.
+│                              # Phase 8 / Task 5 added dlq_handler.go
+│                              # (GET /v1/admin/dlq + replay), Task 7
+│                              # added reindex_handler.go
+│                              # (POST /v1/admin/reindex), Task 8 added
+│                              # api_ratelimit.go (per-tenant Redis
+│                              # token bucket on the /v1/ group),
+│                              # Task 14 added sync_progress.go +
+│                              # sync_progress_handler.go
+│                              # (GET /v1/admin/sources/:id/progress),
+│                              # Task 19 added dashboard_handler.go
+│                              # (GET /v1/admin/dashboard).
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
@@ -677,9 +769,14 @@ hunting-fishball/
 │   │                          # channel_policies.deny_local_retrieval
 │   │                          # — wires the channel_disallowed reason
 │   │                          # in policy.device_first.go
-│   └── 008_tenant_status.sql  # Phase 5 / Task E16: tenants table
-│                              # with tenant_status column for the
-│                              # 5-step TenantDeleter workflow
+│   ├── 008_tenant_status.sql  # Phase 5 / Task E16: tenants table
+│   │                          # with tenant_status column for the
+│   │                          # 5-step TenantDeleter workflow
+│   ├── 009_dlq_messages.sql   # Phase 8 / Task 5: dlq_messages
+│   │                          # table for the DLQ admin surface
+│   └── 010_retention_policy.sql # Phase 8 / Task 6: retention_rules
+│                              # table backing the RetentionPolicy
+│                              # layered tenant/source/namespace scope
 ├── tests/
 │   ├── e2e/                   # docker-compose smoke test
 │   │                          # (build tag: //go:build e2e)

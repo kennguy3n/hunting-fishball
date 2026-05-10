@@ -9,9 +9,9 @@ import (
 )
 
 type fakeVectorDeleter struct {
-	err  error
+	err     error
 	tenants []string
-	ids  [][]string
+	ids     [][]string
 }
 
 func (f *fakeVectorDeleter) Delete(_ context.Context, tenantID string, ids []string) error {

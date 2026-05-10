@@ -36,6 +36,20 @@ type WebhookReceiver interface {
 	WebhookPath() string
 }
 
+// WebhookVerifier is implemented by WebhookReceivers that want the
+// platform to validate the request signature before HandleWebhook is
+// invoked. The map[string][]string mirrors http.Header so the
+// interface stays decoupled from net/http while preserving the
+// case-insensitive lookup callers rely on.
+//
+// Returning nil signals "verification passed (or disabled)";
+// returning a non-nil error signals "reject the request with 401".
+// Connectors that don't implement WebhookVerifier are accepted
+// without signature checks (current behaviour).
+type WebhookVerifier interface {
+	VerifyWebhookRequest(headers map[string][]string, payload []byte) error
+}
+
 // Grant represents a permission grant that a Provisioner pushes back to
 // the upstream source. Used by sources that allow the platform to manage
 // their access lists (e.g. SharePoint, Notion).

@@ -38,13 +38,13 @@ func (s RetentionScope) Validate() error {
 // for tenant-scoped rules and contains the source_id or
 // "<source_id>/<namespace_id>" for narrower scopes.
 type RetentionPolicy struct {
-	ID          string         `gorm:"type:char(26);primaryKey;column:id" json:"id"`
-	TenantID    string         `gorm:"type:char(26);not null;column:tenant_id" json:"tenant_id"`
-	Scope       RetentionScope `gorm:"type:varchar(16);not null;column:scope" json:"scope"`
-	ScopeValue  string         `gorm:"type:varchar(256);not null;default:'';column:scope_value" json:"scope_value,omitempty"`
-	MaxAgeDays  int            `gorm:"not null;column:max_age_days" json:"max_age_days"`
-	CreatedAt   time.Time      `gorm:"not null;column:created_at" json:"created_at"`
-	UpdatedAt   time.Time      `gorm:"not null;column:updated_at" json:"updated_at"`
+	ID         string         `gorm:"type:char(26);primaryKey;column:id" json:"id"`
+	TenantID   string         `gorm:"type:char(26);not null;column:tenant_id" json:"tenant_id"`
+	Scope      RetentionScope `gorm:"type:varchar(16);not null;column:scope" json:"scope"`
+	ScopeValue string         `gorm:"type:varchar(256);not null;default:'';column:scope_value" json:"scope_value,omitempty"`
+	MaxAgeDays int            `gorm:"not null;column:max_age_days" json:"max_age_days"`
+	CreatedAt  time.Time      `gorm:"not null;column:created_at" json:"created_at"`
+	UpdatedAt  time.Time      `gorm:"not null;column:updated_at" json:"updated_at"`
 }
 
 // TableName overrides the GORM default pluralisation.
