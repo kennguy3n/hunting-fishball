@@ -1,0 +1,60 @@
+# HorizontalPodAutoscaler for the Docling parsing worker.
+#
+# Phase 8 Task 15. Docling is the Stage 2 gRPC parser; it does the
+# heaviest CPU work in the ingest pipeline. The Python service
+# exposes Prometheus metrics (docling_parse_requests_total,
+# docling_parse_duration_seconds, docling_queue_depth) on a
+# sidecar HTTP port (default 9090) — see services/docling/server.py.
+#
+# Service / container references:
+#   docker-compose.yml service: `docling`, gRPC :50051
+#   metrics scraping address:    http://docling:9090/metrics
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: docling
+  labels:
+    app.kubernetes.io/name: docling
+    app.kubernetes.io/part-of: hunting-fishball
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: docling
+  minReplicas: 2
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+    # Custom: queue depth from /metrics. Scales out before CPU
+    # saturates if the embed stage stalls.
+    - type: Pods
+      pods:
+        metric:
+          name: docling_queue_depth
+        target:
+          type: AverageValue
+          averageValue: "20"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 120

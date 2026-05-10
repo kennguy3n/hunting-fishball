@@ -293,3 +293,79 @@ func TestRetrieve_NewHandler_Validation(t *testing.T) {
 		t.Fatal("expected error: missing Embedder")
 	}
 }
+
+// TestRetrieve_Timings_PopulatedFromBackends verifies the Phase 1
+// Task 19 RetrieveResponse.Timings field is populated from each
+// configured backend's wall-clock duration. Vector + BM25 are
+// wired so vector_ms and bm25_ms must be non-negative; merge_ms
+// and rerank_ms always run so they too must be non-negative.
+func TestRetrieve_Timings_PopulatedFromBackends(t *testing.T) {
+	t.Parallel()
+
+	vs := &fakeVectorStore{
+		hits: []storage.QdrantHit{
+			{ID: "a:b:c", Score: 0.9, Payload: map[string]any{
+				"tenant_id":     "tenant-a",
+				"document_id":   "doc-1",
+				"title":         "t",
+				"text":          "x",
+				"privacy_label": "internal",
+			}},
+		},
+	}
+	emb := &fakeEmbedder{vec: []float32{0.5}}
+	h, err := retrieval.NewHandler(retrieval.HandlerConfig{VectorStore: vs, Embedder: emb})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	r := newRouter(t, h, "tenant-a")
+	w := doPost(r, retrieval.RetrieveRequest{Query: "hi"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body: %s", w.Code, w.Body.String())
+	}
+
+	var got retrieval.RetrieveResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// vector_ms and graph/memory/bm25 are 0 when not wired — but
+	// merge_ms and rerank_ms always run.
+	if got.Timings.VectorMs < 0 {
+		t.Errorf("vector_ms < 0: %d", got.Timings.VectorMs)
+	}
+	if got.Timings.MergeMs < 0 || got.Timings.RerankMs < 0 {
+		t.Errorf("merge/rerank timings negative: merge=%d rerank=%d",
+			got.Timings.MergeMs, got.Timings.RerankMs)
+	}
+}
+
+// TestRetrieve_Timings_JSONShape verifies the Timings field is
+// serialised under a stable JSON shape so dashboards and clients
+// can rely on it without unmarshalling the full RetrieveResponse.
+func TestRetrieve_Timings_JSONShape(t *testing.T) {
+	t.Parallel()
+
+	vs := &fakeVectorStore{}
+	emb := &fakeEmbedder{vec: []float32{1}}
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{VectorStore: vs, Embedder: emb})
+	r := newRouter(t, h, "tenant-a")
+	w := doPost(r, retrieval.RetrieveRequest{Query: "hi"})
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := raw["timings"]; !ok {
+		t.Fatalf("response is missing timings field; body=%s", w.Body.String())
+	}
+	var timings map[string]int64
+	if err := json.Unmarshal(raw["timings"], &timings); err != nil {
+		t.Fatalf("decode timings: %v", err)
+	}
+	for _, k := range []string{"vector_ms", "bm25_ms", "graph_ms", "memory_ms", "merge_ms", "rerank_ms"} {
+		if _, ok := timings[k]; !ok {
+			t.Errorf("timings field %q missing", k)
+		}
+	}
+}

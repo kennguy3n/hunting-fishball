@@ -28,8 +28,11 @@ if _SERVICES_DIR not in sys.path:
     sys.path.insert(0, _SERVICES_DIR)
 
 from _proto.docling.v1 import docling_pb2, docling_pb2_grpc  # noqa: E402
+from _metrics import ServiceMetrics, make_metrics, start_metrics_server  # noqa: E402
 
 LOG = logging.getLogger("docling-server")
+
+METRICS: ServiceMetrics = make_metrics("docling_parse")
 
 
 class DoclingBackend:
@@ -133,11 +136,12 @@ class DoclingServicer(docling_pb2_grpc.DoclingServiceServicer):
         if not request.content:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "content required")
 
-        try:
-            blocks, structure = self.backend.parse(request.content, request.content_type)
-        except Exception as exc:  # noqa: BLE001
-            LOG.exception("docling parse failed")
-            context.abort(grpc.StatusCode.INTERNAL, f"parse failed: {exc}")
+        with METRICS.time():
+            try:
+                blocks, structure = self.backend.parse(request.content, request.content_type)
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("docling parse failed")
+                context.abort(grpc.StatusCode.INTERNAL, f"parse failed: {exc}")
 
         return docling_pb2.ParseDocumentResponse(blocks=list(blocks), structure=structure)
 
@@ -161,8 +165,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser()
     parser.add_argument("--addr", default=os.environ.get("DOCLING_ADDR", "[::]:50051"))
+    parser.add_argument("--metrics-port", type=int, default=int(os.environ.get("METRICS_PORT", "9090")))
     args = parser.parse_args()
 
+    start_metrics_server(args.metrics_port)
     server, _ = serve(args.addr)
     server.wait_for_termination()
 

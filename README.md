@@ -35,13 +35,22 @@
 > `internal/shard/`.
 > **Phase 7** brings ten new connectors (SharePoint, OneDrive,
 > Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab, Microsoft
-> Teams), bringing the production catalog to 12.
+> Teams), bringing the production catalog to 12, plus per-connector
+> ops runbooks (`docs/runbooks/`) and an end-to-end smoke suite
+> (`tests/e2e/connector_smoke_test.go`,
+> `make test-connector-smoke`).
 > **Phase 8** brings OpenTelemetry tracing
 > (`internal/observability/`), per-stage worker pools
 > (`pipeline.StageConfig`), tunable Kafka rebalance, storage
 > connection-pool sizing, a round-robin gRPC pool with circuit
-> breaker (`internal/grpcpool/`), and a capacity test harness
-> (`tests/capacity/`, `make capacity-test`).
+> breaker (`internal/grpcpool/`), a capacity test harness
+> (`tests/capacity/`, `make capacity-test`), Prometheus metrics
+> + Gin middleware (`internal/observability/metrics.go`),
+> four HPA manifests (`deploy/`), Mem0 tenant-prefix
+> partitioning (`services/memory/memory_server.py::tenant_prefix`),
+> liveness / readiness probes (`/healthz`, `/readyz`), and an
+> end-to-end retrieval P95 budget enforcer
+> (`tests/benchmark/p95_e2e_test.go`, `make bench-e2e`).
 > The product thesis lives in
 > [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target system
 > design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -236,12 +245,32 @@ make bench
 # 8. (Phase 8) Run the capacity harness against the in-process pipeline
 make capacity-test  # tunable via CAPACITY_DOCS_PER_MIN / CAPACITY_DURATION
 
-# 9. Generate proto stubs (only needed when proto files change)
+# 9. (Phase 7) Run the per-connector e2e smoke suite
+make test-connector-smoke   # = E2E_ENABLED=1 go test -tags=e2e ./tests/e2e/connector_smoke_test.go
+
+# 10. (Phase 1/3) Run the end-to-end P95 retrieval-latency budget enforcement
+make bench-e2e      # fails if retrieval P95 > 500 ms or round-trip P95 > 1 s
+
+# 11. Generate proto stubs (only needed when proto files change)
 make proto-gen
 
-# 10. Build the binaries
+# 12. Build the binaries
 make build          # produces ./bin/context-engine-ingest and ./bin/context-engine-api
 ```
+
+The API and ingest binaries each expose three operational endpoints:
+
+- `GET /healthz` — liveness probe (always 200 if the process is alive).
+- `GET /readyz`  — readiness probe (Postgres / Redis / Qdrant for the
+  API; Postgres / Redis / Kafka brokers for ingest). Returns 503 if
+  any required dependency is down.
+- `GET /metrics` — Prometheus scrape endpoint.
+  See [`internal/observability/metrics.go`](internal/observability/metrics.go)
+  for the collector list.
+
+The Python ML sidecars (docling, embedding) expose `/metrics` on a
+separate sidecar HTTP listener (default port 9090, override with
+`METRICS_PORT`).
 
 Other targets:
 
@@ -254,6 +283,8 @@ Other targets:
 | `make services-protos`  | Regenerate Python gRPC stubs into `services/_proto/`        |
 | `make bench`            | Run pipeline + retrieval benchmarks in `tests/benchmark/`   |
 | `make capacity-test`    | Run Phase 8 capacity harness in `tests/capacity/` (configurable via `CAPACITY_DOCS_PER_MIN` / `CAPACITY_DURATION`) |
+| `make test-connector-smoke` | Run the Phase 7 per-connector e2e smoke suite (`tests/e2e/connector_smoke_test.go`, build tag `e2e`) |
+| `make bench-e2e`        | Enforce the Phase 1/3 retrieval P95 budget in `tests/benchmark/p95_e2e_test.go` (build tag `e2e`) |
 | `make build`            | Build both binaries into `./bin/`                           |
 | `make vet`              | `go vet ./...`                                              |
 | `make fmt`              | `gofmt -s -w` over hand-written sources                     |
@@ -342,7 +373,10 @@ hunting-fishball/
 │   │                          # generation worker, delta sync,
 │   │                          # cryptographic-forgetting orchestrator
 │   ├── observability/         # Phase 8: OpenTelemetry tracing helper
-│   │                          # used by the pipeline + retrieval
+│   │                          # used by the pipeline + retrieval, plus
+│   │                          # Prometheus metrics + Gin middleware
+│   │                          # (metrics.go, middleware.go) scraped at
+│   │                          # /metrics on cmd/api and cmd/ingest
 │   └── grpcpool/              # Phase 8: round-robin gRPC pool with
 │                              # circuit breaker for the Python sidecars
 ├── proto/
@@ -367,7 +401,13 @@ hunting-fishball/
 │   ├── benchmark/             # pipeline + retrieval benchmarks
 │   └── capacity/              # Phase 8 capacity test (`make capacity-test`)
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
-│                              # / CUTOVER
+│   │                          # / CUTOVER
+│   └── runbooks/              # Phase 7: per-connector ops runbooks
+│                              # (credential rotation, quotas, outages,
+│                              # error codes) — one Markdown per connector
+├── deploy/                    # Phase 8: HorizontalPodAutoscaler manifests
+│                              # (hpa-api.yaml, hpa-ingest.yaml,
+│                              # hpa-docling.yaml, hpa-embedding.yaml)
 ├── docker-compose.yml         # Postgres / Redis / Kafka / Qdrant /
 │                              # FalkorDB / Docling / embedding / memory
 ├── Makefile                   # build / test / lint / proto-gen /

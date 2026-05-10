@@ -1,0 +1,57 @@
+# HorizontalPodAutoscaler for context-engine-ingest.
+#
+# Phase 8 Task 14. The ingest binary consumes from Kafka and drives
+# the 4-stage pipeline. Scaling signals:
+#   1. context_engine_kafka_consumer_lag — primary. If lag rises,
+#      bring up more consumers (sticky partition assignment will
+#      rebalance).
+#   2. CPU as a floor.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: context-engine-ingest
+  labels:
+    app.kubernetes.io/name: context-engine-ingest
+    app.kubernetes.io/part-of: hunting-fishball
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: context-engine-ingest
+  minReplicas: 2
+  # Cap at the topic's partition count — adding consumers beyond
+  # that yields no additional throughput.
+  maxReplicas: 24
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Pods
+      pods:
+        metric:
+          name: context_engine_kafka_consumer_lag
+        target:
+          # Average lag (messages) per pod. Operators tune this to
+          # the per-pod throughput measured in the capacity test.
+          type: AverageValue
+          averageValue: "1000"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 120

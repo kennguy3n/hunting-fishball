@@ -45,6 +45,7 @@ import (
 
 	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
 	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/retrieval"
@@ -166,6 +167,7 @@ func run() error {
 		}
 		handlerCfg.BM25 = &retrieval.TantivyAdapter{Client: bm}
 	}
+	var sharedRedis *redis.Client
 	if redisURL := os.Getenv("CONTEXT_ENGINE_REDIS_URL"); redisURL != "" {
 		opts, perr := redis.ParseURL(redisURL)
 		if perr != nil {
@@ -177,6 +179,7 @@ func run() error {
 			opts.PoolSize = v
 		}
 		rc := redis.NewClient(opts)
+		sharedRedis = rc
 		handlerCfg.Cache, err = storage.NewSemanticCache(storage.SemanticCacheConfig{
 			Client:    rc,
 			KeyPrefix: "hf:",
@@ -210,7 +213,10 @@ func run() error {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(observability.PrometheusMiddleware())
+	r.GET("/metrics", gin.WrapH(observability.Handler()))
 	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+	r.GET("/readyz", apiReadyzHandler(db, sharedRedis, qdrant))
 
 	api := r.Group("/", authPlaceholder)
 	audit.NewHandler(auditRepo).Register(api)
@@ -286,6 +292,25 @@ func run() error {
 		return fmt.Errorf("shard handler: %w", err)
 	}
 	shardHandler.Register(api)
+
+	// Phase 1 Task 19 retrieval optimisations: pre-warm Qdrant
+	// connections so the first user-facing /v1/retrieve doesn't pay
+	// the connection-establishment tax, and start a FalkorDB
+	// keep-alive ticker so the redis pool stays warm.
+	warmCtx, warmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := qdrant.Warmup(warmCtx, qdrantPool/4+1); err != nil {
+		log.Printf("api: qdrant warmup: %v (non-fatal)", err)
+	}
+	warmCancel()
+	keepAliveCtx, keepAliveCancel := context.WithCancel(context.Background())
+	defer keepAliveCancel()
+	if handlerCfg.Graph != nil && sharedRedis != nil {
+		if falkor, ferr := storage.NewFalkorDBClient(storage.FalkorDBConfig{
+			Client: storage.FalkorDBFromRedis(sharedRedis),
+		}); ferr == nil {
+			go falkor.KeepAlive(keepAliveCtx, 30*time.Second)
+		}
+	}
 
 	srv := &http.Server{Addr: listenAddr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)

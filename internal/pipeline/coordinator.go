@@ -447,6 +447,10 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage string, fn func(co
 		observability.AttrStage.String(stage),
 	)
 	defer span.End()
+	start := time.Now()
+	defer func() {
+		observability.ObserveStageDuration(stage, time.Since(start).Seconds())
+	}()
 
 	var lastErr error
 	backoff := c.cfg.InitialBackoff

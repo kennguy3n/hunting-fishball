@@ -18,12 +18,15 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"gorm.io/driver/postgres"
@@ -185,6 +188,31 @@ func run() error {
 
 	consDone := make(chan error, 1)
 	go func() { consDone <- cons.Run(ctx) }()
+
+	// ---- Phase 8 Task 20: HTTP probes + /metrics on a sidecar port.
+	var redisClient *redis.Client
+	if u := os.Getenv("CONTEXT_ENGINE_REDIS_URL"); u != "" {
+		if opts, perr := redis.ParseURL(u); perr == nil {
+			redisClient = redis.NewClient(opts)
+		}
+	}
+	httpAddr := envOr("CONTEXT_ENGINE_INGEST_HTTP_ADDR", ":8090")
+	httpSrv := &http.Server{
+		Addr:              httpAddr,
+		Handler:           ingestHTTPHandler(db, redisClient, brokerList),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		log.Printf("ingest: probes/metrics listening on %s", httpAddr)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("ingest: http server: %v", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+	}()
 
 	log.Printf("ingest: started; topics=%s group=%s", topics, groupID)
 	select {

@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/IBM/sarama"
+
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // ConsumerConfig configures the Kafka consumer that drives the
@@ -281,6 +284,18 @@ func (c *Consumer) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.C
 			case <-doneCh:
 				cancel()
 				sess.MarkMessage(msg, "")
+				// Phase 8 Task 14: report Kafka consumer lag (HWM
+				// minus committed offset) for the HPA on ingest.
+				lag := claim.HighWaterMarkOffset() - msg.Offset - 1
+				if lag < 0 {
+					lag = 0
+				}
+				observability.SetKafkaConsumerLag(
+					claim.Topic(),
+					strconv.Itoa(int(claim.Partition())),
+					c.cfg.GroupID,
+					lag,
+				)
 			}
 		}
 	}
