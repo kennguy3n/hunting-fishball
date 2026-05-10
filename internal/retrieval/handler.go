@@ -120,6 +120,14 @@ type HandlerConfig struct {
 	// prefer_local=false from the device-first policy. Phase 6 /
 	// Task 15.
 	ShardVersionLookup ShardVersionLookup
+
+	// ExplainEnvEnabled, when true, opts the deployment in to the
+	// per-hit `explain` block for non-admin callers as well. The
+	// production wiring sets this from the
+	// CONTEXT_ENGINE_EXPLAIN_ENABLED env var so support engineers
+	// can debug reranker decisions without needing the admin RBAC
+	// role. Round-5 Task 12.
+	ExplainEnvEnabled bool
 }
 
 // ShardVersionLookup is the narrow port the retrieval handler uses
@@ -209,6 +217,12 @@ type RetrieveRequest struct {
 	// client can choose to serve from the on-device shard. Empty
 	// means "unknown", which collapses to remote-only behaviour.
 	DeviceTier string `json:"device_tier,omitempty"`
+
+	// Explain, when true and the caller is authorised (admin
+	// RBAC role OR the deployment-wide CONTEXT_ENGINE_EXPLAIN_ENABLED
+	// feature flag), populates a per-hit `explain` block exposing
+	// the raw signal scores and policy decision. Off by default.
+	Explain bool `json:"explain,omitempty"`
 }
 
 // RetrieveHit is one entry in the response.
@@ -232,6 +246,13 @@ type RetrieveHit struct {
 	// privacy_label and the resolved PolicySnapshot. Phase 4
 	// addition.
 	PrivacyStrip PrivacyStrip `json:"privacy_strip"`
+
+	// Explain is the per-hit debug projection populated when the
+	// request opted in via `"explain": true` AND the caller is
+	// authorised (admin RBAC role OR ExplainEnvVar set to "1" /
+	// "true"). Nil otherwise. See explain.go for the field
+	// semantics.
+	Explain *RetrievalExplain `json:"explain,omitempty"`
 }
 
 // RetrievePolicy summarises the policy decisions made during fan-out.
@@ -411,6 +432,14 @@ func (h *Handler) retrieve(c *gin.Context) {
 	merged := h.cfg.Merger.Merge(streams...)
 	mergeMs := time.Since(mergeStart).Milliseconds()
 	observability.ObserveBackendDuration("merge", time.Since(mergeStart).Seconds())
+
+	// Snapshot the post-merge / pre-rerank score for each match so
+	// the explain projection can surface the reranker's delta.
+	preRerankByID := make(map[string]float32, len(merged))
+	for _, m := range merged {
+		preRerankByID[m.ID] = m.Score
+	}
+
 	rerankStart := time.Now()
 	reranked, rerr := h.cfg.Reranker.Rerank(c.Request.Context(), req.Query, merged)
 	rerankMs := time.Since(rerankStart).Milliseconds()
@@ -442,9 +471,13 @@ func (h *Handler) retrieve(c *gin.Context) {
 		},
 		Timings: timingsFromMap(backendTimings, mergeMs, rerankMs),
 	}
+	emitExplain := req.Explain && IsExplainAuthorized(c, h.cfg.ExplainEnvEnabled)
 	for _, m := range pres.Allowed {
 		hit := hitFromMatch(m)
 		hit.PrivacyStrip = BuildPrivacyStrip(m, snapshot)
+		if emitExplain {
+			hit.Explain = BuildExplain(m, preRerankByID[m.ID])
+		}
 		resp.Hits = append(resp.Hits, hit)
 	}
 	resp.TraceID = observability.TraceID(c.Request.Context())
