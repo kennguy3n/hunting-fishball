@@ -34,6 +34,27 @@ from _proto.memory.v1 import memory_pb2, memory_pb2_grpc  # noqa: E402
 
 LOG = logging.getLogger("memory-server")
 
+# Phase 8 Task 17: Mem0 tenant prefix partitioning. Every Mem0 key
+# is prefixed with the resolved tenant prefix so two tenants with
+# the same user_id can never see each other's memories. The prefix
+# template defaults to "<tenant_id>" but can be overridden by the
+# operator (e.g. "prod-{tenant_id}" to share a backing store across
+# environments).
+_TENANT_PREFIX_TEMPLATE = os.environ.get("MEM0_TENANT_PREFIX_TEMPLATE", "{tenant_id}")
+
+
+def tenant_prefix(tenant_id: str) -> str:
+    """Resolve a tenant_id to its Mem0 partition prefix.
+
+    The prefix is appended to every user_id, recorded in metadata,
+    and used as the explicit search filter so a misconfigured Mem0
+    backend (or a buggy client that forgets to scope by user_id)
+    can't cross-contaminate tenants.
+    """
+    if not tenant_id:
+        raise ValueError("tenant_id required")
+    return _TENANT_PREFIX_TEMPLATE.format(tenant_id=tenant_id)
+
 
 class MemoryBackend:
     """Adapter over Mem0. Lazily instantiates a Memory() so tests can
@@ -59,10 +80,16 @@ class MemoryBackend:
         metadata: dict[str, str],
     ) -> Tuple[str, int]:
         client = self._client()
+        prefix = tenant_prefix(tenant_id)
         record = client.add(
             content,
-            user_id=_compose_id(tenant_id, user_id),
-            metadata={**metadata, "tenant_id": tenant_id, "session_id": session_id},
+            user_id=_compose_id(prefix, user_id),
+            metadata={
+                **metadata,
+                "tenant_id": tenant_id,
+                "tenant_prefix": prefix,
+                "session_id": session_id,
+            },
         )
         rid = (record or {}).get("id") or str(uuid.uuid4())
 
@@ -77,13 +104,24 @@ class MemoryBackend:
         top_k: int,
     ) -> list[dict]:
         client = self._client()
+        prefix = tenant_prefix(tenant_id)
         results = client.search(
             query,
-            user_id=_compose_id(tenant_id, user_id),
+            user_id=_compose_id(prefix, user_id),
             limit=top_k,
         )
-
-        return list(results or [])
+        # Belt-and-braces: even though the user_id namespace already
+        # isolates tenants, drop any stray hits whose metadata
+        # tenant_id mismatches. Defends against a Mem0 backend that
+        # ignores user_id (e.g. a misconfigured shared store).
+        filtered = []
+        for r in results or []:
+            md = r.get("metadata") or {}
+            rid_tenant = md.get("tenant_id")
+            if rid_tenant and rid_tenant != tenant_id:
+                continue
+            filtered.append(r)
+        return filtered
 
     def delete(self, tenant_id: str, mid: str) -> bool:
         client = self._client()
@@ -95,11 +133,11 @@ class MemoryBackend:
             return False
 
 
-def _compose_id(tenant_id: str, user_id: str) -> str:
+def _compose_id(prefix: str, user_id: str) -> str:
     """Mem0's `user_id` is the only first-class isolation key.
-    Compose `<tenant>:<user>` so two tenants can't accidentally
-    share memory through identical user ids."""
-    return f"{tenant_id}:{user_id or 'anon'}"
+    Compose `<tenant_prefix>:<user>` so two tenants can't
+    accidentally share memory through identical user ids."""
+    return f"{prefix}:{user_id or 'anon'}"
 
 
 class MemoryServicer(memory_pb2_grpc.MemoryServiceServicer):

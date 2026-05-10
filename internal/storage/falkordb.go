@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -140,6 +141,38 @@ func (g *goRedisFalkor) Do(ctx context.Context, args ...any) FalkorCmd {
 // GraphFor returns the per-tenant graph name. Exposed for tests.
 func (c *FalkorDBClient) GraphFor(tenantID string) string {
 	return c.cfg.GraphPrefix + tenantID
+}
+
+// Ping issues a no-op `GRAPH.LIST` against FalkorDB to keep the
+// underlying redis connection warm and verify the server is up.
+// Used by /readyz and the connection-keep-alive ticker (Phase 1
+// Task 19 retrieval optimisation).
+func (c *FalkorDBClient) Ping(ctx context.Context) error {
+	if c == nil || c.cfg.Client == nil {
+		return errors.New("falkordb: client not configured")
+	}
+	_, err := c.cfg.Client.Do(ctx, "GRAPH.LIST").Result()
+	return err
+}
+
+// KeepAlive pings the FalkorDB graph at every `interval` until ctx
+// is cancelled. Run as a background goroutine to keep the redis
+// pool warm so the first user-facing graph traversal doesn't pay
+// connection-establishment latency.
+func (c *FalkorDBClient) KeepAlive(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			_ = c.Ping(ctx)
+		}
+	}
 }
 
 // WriteNodes upserts the supplied nodes and edges into the tenant's

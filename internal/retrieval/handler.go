@@ -227,10 +227,25 @@ type RetrievePolicy struct {
 	PrivacyMode string `json:"privacy_mode,omitempty"`
 }
 
+// RetrieveTimings reports the wall-clock duration of every stage
+// in milliseconds so operators can identify the long pole. The
+// fan-out backends (vector / bm25 / graph / memory) run in
+// parallel; their values are independent. Merge and Rerank run
+// serially after fan-out completes.
+type RetrieveTimings struct {
+	VectorMs int64 `json:"vector_ms"`
+	BM25Ms   int64 `json:"bm25_ms"`
+	GraphMs  int64 `json:"graph_ms"`
+	MemoryMs int64 `json:"memory_ms"`
+	MergeMs  int64 `json:"merge_ms"`
+	RerankMs int64 `json:"rerank_ms"`
+}
+
 // RetrieveResponse is the JSON envelope for POST /v1/retrieve.
 type RetrieveResponse struct {
-	Hits   []RetrieveHit  `json:"hits"`
-	Policy RetrievePolicy `json:"policy"`
+	Hits    []RetrieveHit   `json:"hits"`
+	Policy  RetrievePolicy  `json:"policy"`
+	Timings RetrieveTimings `json:"timings"`
 	// TraceID echoes the OpenTelemetry trace_id of the retrieval
 	// span so clients can correlate slow requests with backend
 	// traces. Empty when no tracer is active. See
@@ -344,10 +359,16 @@ func (h *Handler) retrieve(c *gin.Context) {
 		}
 	}
 
-	streams, degraded := h.fanOut(c.Request.Context(), tenantID, req, vec, topK)
+	streams, degraded, backendTimings := h.fanOut(c.Request.Context(), tenantID, req, vec, topK)
 
+	mergeStart := time.Now()
 	merged := h.cfg.Merger.Merge(streams...)
+	mergeMs := time.Since(mergeStart).Milliseconds()
+	observability.ObserveBackendDuration("merge", time.Since(mergeStart).Seconds())
+	rerankStart := time.Now()
 	reranked, rerr := h.cfg.Reranker.Rerank(c.Request.Context(), req.Query, merged)
+	rerankMs := time.Since(rerankStart).Milliseconds()
+	observability.ObserveBackendDuration("rerank", time.Since(rerankStart).Seconds())
 	if rerr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "rerank failed"})
 
@@ -373,6 +394,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 			BlockedCount: pres.BlockedCount,
 			PrivacyMode:  privacyMode,
 		},
+		Timings: timingsFromMap(backendTimings, mergeMs, rerankMs),
 	}
 	for _, m := range pres.Allowed {
 		hit := hitFromMatch(m)
@@ -441,10 +463,14 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 		return RetrieveResponse{}, err
 	}
 
-	streams, degraded := h.fanOut(ctx, tenantID, req, vec, topK)
+	streams, degraded, backendTimings := h.fanOut(ctx, tenantID, req, vec, topK)
 
+	mergeStart := time.Now()
 	merged := h.cfg.Merger.Merge(streams...)
+	mergeMs := time.Since(mergeStart).Milliseconds()
+	rerankStart := time.Now()
 	reranked, rerr := h.cfg.Reranker.Rerank(ctx, req.Query, merged)
+	rerankMs := time.Since(rerankStart).Milliseconds()
 	if rerr != nil {
 		return RetrieveResponse{}, rerr
 	}
@@ -465,6 +491,7 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 			BlockedCount: pres.BlockedCount,
 			PrivacyMode:  privacyMode,
 		},
+		Timings: timingsFromMap(backendTimings, mergeMs, rerankMs),
 	}
 	for _, m := range pres.Allowed {
 		hit := hitFromMatch(m)
@@ -476,8 +503,10 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 
 // fanOut runs every wired-in backend in parallel under
 // errgroup.WithContext, applying a per-backend deadline. Returns the
-// per-stream []*Match list and the list of degraded sources.
-func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveRequest, vec []float32, topK int) ([][]*Match, []string) {
+// per-stream []*Match list, the list of degraded sources, and the
+// per-backend duration map keyed by backend name (vector/bm25/
+// graph/memory).
+func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveRequest, vec []float32, topK int) ([][]*Match, []string, map[string]time.Duration) {
 	ctx, fanSpan := observability.StartSpan(ctx, "retrieval.fanout",
 		observability.AttrTenantID.String(tenantID),
 	)
@@ -489,6 +518,7 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 		mu       sync.Mutex
 		streams  = make([][]*Match, 0, 4)
 		degraded []string
+		timings  = make(map[string]time.Duration, 4)
 	)
 
 	push := func(ms []*Match) {
@@ -500,6 +530,13 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 		mu.Lock()
 		defer mu.Unlock()
 		degraded = append(degraded, name)
+	}
+	recordTiming := func(name string, d time.Duration, hits int) {
+		mu.Lock()
+		timings[name] = d
+		mu.Unlock()
+		observability.ObserveBackendDuration(name, d.Seconds())
+		observability.SetBackendHits(name, hits)
 	}
 
 	deadlineCtx := func() (context.Context, context.CancelFunc) {
@@ -519,10 +556,12 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 				Limit:  topK,
 				Filter: buildFilter(req),
 			})
-			span.SetAttributes(observability.AttrLatencyMs.Int64(time.Since(start).Milliseconds()))
+			elapsed := time.Since(start)
+			span.SetAttributes(observability.AttrLatencyMs.Int64(elapsed.Milliseconds()))
 			if err != nil {
 				observability.RecordError(span, err)
 				markDegraded(SourceVector)
+				recordTiming(SourceVector, elapsed, 0)
 
 				return nil
 			}
@@ -533,6 +572,7 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 				out = append(out, m)
 			}
 			span.SetAttributes(observability.AttrHitCount.Int(len(out)))
+			recordTiming(SourceVector, elapsed, len(out))
 			push(out)
 
 			return nil
@@ -548,10 +588,12 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 			defer span.End()
 			start := time.Now()
 			hits, err := h.cfg.BM25.Search(ctx, tenantID, req.Query, topK)
-			span.SetAttributes(observability.AttrLatencyMs.Int64(time.Since(start).Milliseconds()))
+			elapsed := time.Since(start)
+			span.SetAttributes(observability.AttrLatencyMs.Int64(elapsed.Milliseconds()))
 			if err != nil {
 				observability.RecordError(span, err)
 				markDegraded(SourceBM25)
+				recordTiming(SourceBM25, elapsed, 0)
 
 				return nil
 			}
@@ -564,6 +606,7 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 					m.Rank = i + 1
 				}
 			}
+			recordTiming(SourceBM25, elapsed, len(hits))
 			push(hits)
 
 			return nil
@@ -579,10 +622,12 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 			defer span.End()
 			start := time.Now()
 			hits, err := h.cfg.Graph.Traverse(ctx, tenantID, req.Query, topK)
-			span.SetAttributes(observability.AttrLatencyMs.Int64(time.Since(start).Milliseconds()))
+			elapsed := time.Since(start)
+			span.SetAttributes(observability.AttrLatencyMs.Int64(elapsed.Milliseconds()))
 			if err != nil {
 				observability.RecordError(span, err)
 				markDegraded(SourceGraph)
+				recordTiming(SourceGraph, elapsed, 0)
 
 				return nil
 			}
@@ -595,6 +640,7 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 					m.Rank = i + 1
 				}
 			}
+			recordTiming(SourceGraph, elapsed, len(hits))
 			push(hits)
 
 			return nil
@@ -610,10 +656,12 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 			defer span.End()
 			start := time.Now()
 			hits, err := h.cfg.Memory.Search(ctx, tenantID, req.Query, topK)
-			span.SetAttributes(observability.AttrLatencyMs.Int64(time.Since(start).Milliseconds()))
+			elapsed := time.Since(start)
+			span.SetAttributes(observability.AttrLatencyMs.Int64(elapsed.Milliseconds()))
 			if err != nil {
 				observability.RecordError(span, err)
 				markDegraded(SourceMemory)
+				recordTiming(SourceMemory, elapsed, 0)
 
 				return nil
 			}
@@ -626,6 +674,7 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 					m.Rank = i + 1
 				}
 			}
+			recordTiming(SourceMemory, elapsed, len(hits))
 			push(hits)
 
 			return nil
@@ -634,7 +683,7 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 
 	_ = g.Wait()
 
-	return streams, degraded
+	return streams, degraded, timings
 }
 
 // matchFromQdrant projects a *storage.QdrantHit into the merger's
@@ -767,6 +816,27 @@ func cachedFromResponse(resp RetrieveResponse) *storage.CachedResult {
 	}
 
 	return c
+}
+
+// timingsFromMap projects the per-backend duration map produced by
+// fanOut into the public RetrieveTimings shape exposed on
+// RetrieveResponse. Missing entries default to 0 (backend not
+// configured).
+func timingsFromMap(t map[string]time.Duration, mergeMs, rerankMs int64) RetrieveTimings {
+	ms := func(name string) int64 {
+		if d, ok := t[name]; ok {
+			return d.Milliseconds()
+		}
+		return 0
+	}
+	return RetrieveTimings{
+		VectorMs: ms(SourceVector),
+		BM25Ms:   ms(SourceBM25),
+		GraphMs:  ms(SourceGraph),
+		MemoryMs: ms(SourceMemory),
+		MergeMs:  mergeMs,
+		RerankMs: rerankMs,
+	}
 }
 
 // appliedSources returns the unique list of backends that contributed

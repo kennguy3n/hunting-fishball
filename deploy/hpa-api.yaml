@@ -1,0 +1,69 @@
+# HorizontalPodAutoscaler for context-engine-api.
+#
+# Phase 8 Task 14. Scales the Gin retrieval API on:
+#   1. CPU utilisation (the platform-default scaling signal — kept as
+#      a floor in case the custom metric is missing/stale).
+#   2. context_engine_api_requests_total — the QPS signal exposed at
+#      `/metrics` by every API pod (see internal/observability/metrics.go).
+#
+# Custom-metric scaling requires a Prometheus Adapter (or KEDA scaler)
+# bound to the cluster. The metric path is the histogram's *_count
+# rate over a 1-minute window; cluster operators map it to the
+# external metric API at install time.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: context-engine-api
+  labels:
+    app.kubernetes.io/name: context-engine-api
+    app.kubernetes.io/part-of: hunting-fishball
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: context-engine-api
+  minReplicas: 2
+  maxReplicas: 16
+  metrics:
+    # Floor: CPU 70 % across the deployment.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # Memory soft cap.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+    # Custom metric: average requests-per-second per pod. Kicks in
+    # for traffic-driven scale-up before CPU saturates. Operators
+    # tune the target to the per-pod cap measured in the capacity
+    # test (tests/capacity/...).
+    - type: Pods
+      pods:
+        metric:
+          name: context_engine_api_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "50"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60

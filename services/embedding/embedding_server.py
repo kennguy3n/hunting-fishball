@@ -27,8 +27,11 @@ if _SERVICES_DIR not in sys.path:
     sys.path.insert(0, _SERVICES_DIR)
 
 from _proto.embedding.v1 import embedding_pb2, embedding_pb2_grpc  # noqa: E402
+from _metrics import ServiceMetrics, make_metrics, start_metrics_server  # noqa: E402
 
 LOG = logging.getLogger("embedding-server")
+
+METRICS: ServiceMetrics = make_metrics("embedding")
 
 _DEFAULT_MODEL = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 _BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "32"))
@@ -93,11 +96,12 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
                 dimensions=0,
             )
 
-        try:
-            vectors, dim = self.backend.embed(chunks)
-        except Exception as exc:  # noqa: BLE001
-            LOG.exception("embedding failed")
-            context.abort(grpc.StatusCode.INTERNAL, f"embed failed: {exc}")
+        with METRICS.time():
+            try:
+                vectors, dim = self.backend.embed(chunks)
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("embedding failed")
+                context.abort(grpc.StatusCode.INTERNAL, f"embed failed: {exc}")
 
         return embedding_pb2.ComputeEmbeddingsResponse(
             embeddings=[embedding_pb2.Embedding(values=v) for v in vectors],
@@ -123,8 +127,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--addr", default=os.environ.get("EMBEDDING_ADDR", "[::]:50052"))
     parser.add_argument("--model", default=_DEFAULT_MODEL)
+    parser.add_argument("--metrics-port", type=int, default=int(os.environ.get("METRICS_PORT", "9090")))
     args = parser.parse_args()
 
+    start_metrics_server(args.metrics_port)
     server, _ = serve(args.addr, backend=EmbeddingBackend(model_id=args.model))
     server.wait_for_termination()
 

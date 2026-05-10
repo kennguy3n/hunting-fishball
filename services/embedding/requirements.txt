@@ -7,3 +7,4 @@ sentence-transformers>=3.0.0,<4
 # dep to avoid version drift. CPU-only by default; override the base
 # image to a cuda one for GPU inference.
 torch>=2.2.0,<3
+prometheus-client>=0.21,<1

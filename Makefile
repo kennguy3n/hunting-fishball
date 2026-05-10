@@ -39,6 +39,16 @@ test-e2e:
 	CONTEXT_ENGINE_QDRANT_URL="http://localhost:6333" \
 	$(GO) test -tags=e2e -race -count=1 -timeout 5m ./tests/e2e/...
 
+.PHONY: test-connector-smoke
+test-connector-smoke:
+	@echo "Running connector e2e smoke tests (no docker dependencies)..."
+	$(GO) test -tags=e2e -race -count=1 -timeout 2m -run '^TestConnectorSmoke' ./tests/e2e/...
+
+.PHONY: bench-e2e
+bench-e2e:
+	@echo "Running end-to-end P95 benchmark..."
+	$(GO) test -tags=e2e -count=1 -timeout 10m -run '^TestE2E_RetrieveP95' ./tests/benchmark/...
+
 .PHONY: test-integration
 test-integration:
 	@echo "Bringing up Phase 3 ML services (docling, embedding, memory) + falkordb..."

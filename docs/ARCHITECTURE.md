@@ -306,13 +306,48 @@ POST /v1/retrieve
       "text": "..."
     }
   ],
-  "policy": { "applied": [...], "blocked_count": 0 },
+  "policy":  { "applied": [...], "blocked_count": 0 },
+  "timings": {
+    "vector_ms": 12, "bm25_ms": 8, "graph_ms": 0,
+    "memory_ms": 0,  "merge_ms": 1, "rerank_ms": 1
+  },
   "trace_id": "..."
 }
 ```
 
 The same shape is returned on every platform. The privacy label is the
-client's source of truth for the privacy strip UI.
+client's source of truth for the privacy strip UI. The `timings`
+block breaks the request's wall-clock down by backend so operators
+can identify the long pole without reaching for a trace; values are
+0 when the corresponding backend is not configured.
+
+**Operational endpoints.** Each binary (`cmd/api`, `cmd/ingest`)
+additionally exposes:
+
+- `GET /healthz` — liveness probe; always 200 if the process is
+  running. Used by Kubernetes `livenessProbe`.
+- `GET /readyz` — readiness probe. The API binary checks Postgres
+  + Redis + Qdrant; the ingest binary checks Postgres + Redis +
+  TCP connectivity to every Kafka broker. Returns 503 + the failed
+  dependency name if any check fails. Used by Kubernetes
+  `readinessProbe` so traffic is only routed once dependencies are
+  reachable.
+- `GET /metrics` — Prometheus scrape endpoint. Collectors are
+  defined in `internal/observability/metrics.go`; the API binary
+  layers a Gin middleware
+  (`internal/observability/middleware.go`) that records request
+  count + duration per route. The ingest binary records Kafka
+  consumer lag from `internal/pipeline/consumer.go` after every
+  commit, per-stage pipeline duration from
+  `internal/pipeline/coordinator.go::runWithRetry`, and the
+  retrieval handler records per-backend duration in
+  `internal/retrieval/handler.go::fanOut`.
+
+The Python ML sidecars (`services/docling`, `services/embedding`)
+expose `/metrics` on a separate sidecar HTTP listener (default
+port 9090, override via `METRICS_PORT`). Their queue-depth and
+request-duration collectors are defined in the shared
+[`services/_metrics.py`](../services/_metrics.py) module.
 
 ### 4.2 Parallel fan-out
 
@@ -400,9 +435,43 @@ Every component emits **OpenTelemetry** traces, metrics, and logs.
   trace.
 - **Metrics.** Per-tenant ingestion lag, per-stage latency, per-backend
   retrieval latency, per-tier policy block counts, Kafka consumer lag,
-  Python service CPU / RAM, embedding QPS.
+  Python service CPU / RAM, embedding QPS. The Go binaries register
+  the following Prometheus collectors
+  (`internal/observability/metrics.go`):
+
+  | Name | Type | Labels | Owner |
+  |------|------|--------|-------|
+  | `context_engine_api_requests_total` | counter | method, path, status | API HPA QPS metric |
+  | `context_engine_api_request_duration_seconds` | histogram | method, path | API SLOs |
+  | `context_engine_kafka_consumer_lag` | gauge | topic, partition, consumer_group | Ingest HPA backlog metric |
+  | `context_engine_pipeline_stage_duration_seconds` | histogram | stage | Pipeline regression detection |
+  | `context_engine_retrieval_backend_duration_seconds` | histogram | backend | Long-pole detection |
+  | `context_engine_retrieval_backend_hits` | gauge | backend | Backend health |
+
+  The Python sidecars expose a per-prefix triplet (`<prefix>_requests_total`,
+  `<prefix>_duration_seconds`, `<prefix>_queue_depth`) defined by
+  `services/_metrics.py::ServiceMetrics`. Concrete prefixes are
+  `docling_parse` and `embedding`.
+
+- **HPA wiring.** Four `HorizontalPodAutoscaler` manifests under
+  [`deploy/`](../deploy/) target the metrics above:
+
+  | Manifest | Scales | On |
+  |----------|--------|----|
+  | `deploy/hpa-api.yaml` | `context-engine-api` | CPU 70% + `context_engine_api_requests_per_second` |
+  | `deploy/hpa-ingest.yaml` | `context-engine-ingest` | CPU 70% + `context_engine_kafka_consumer_lag` |
+  | `deploy/hpa-docling.yaml` | `docling` | CPU 80% + memory 80% + `docling_parse_queue_depth` |
+  | `deploy/hpa-embedding.yaml` | `embedding` | CPU 80% + memory 85% + `embedding_queue_depth` |
+
 - **Logs.** Structured JSON; every line carries `tenant_id`, `trace_id`,
   `component`. PII is redacted at the log line by the logger middleware.
+- **Per-connector runbooks.** Operations runbooks for every Phase 7
+  connector live in [`docs/runbooks/`](runbooks/) — one Markdown
+  file per connector covering credential rotation, quota /
+  rate-limit incidents, outage detection, and connector-specific
+  error codes. Each runbook is keyed on the connector's auth model
+  (OAuth, API token, service account, app passwords) and the delta
+  cursor / change-feed mechanism it relies on.
 
 Dashboards are owned by SRE and stored in the platform backend's
 `observability/` overlay; runbooks reference dashboard URLs by stable ID.
@@ -533,7 +602,10 @@ hunting-fishball/
 │   │                          # helper + attribute-key constants
 │   │                          # (tracing.go); used by the pipeline
 │   │                          # coordinator and the retrieval
-│   │                          # fan-out
+│   │                          # fan-out. Plus Prometheus collectors
+│   │                          # (metrics.go) and a Gin middleware
+│   │                          # (middleware.go) scraped at /metrics
+│   │                          # on cmd/api and cmd/ingest
 │   └── grpcpool/              # Phase 8: round-robin gRPC connection
 │                              # pool with per-call deadline +
 │                              # circuit breaker (closed → open →
@@ -571,7 +643,19 @@ hunting-fishball/
 │                              # CAPACITY_DOCS_PER_MIN +
 │                              # CAPACITY_DURATION env tunables)
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES /
-│                              # PROGRESS / CUTOVER
+│   │                          # PROGRESS / CUTOVER
+│   └── runbooks/              # Phase 7 per-connector ops runbooks
+│                              # (one Markdown file per connector +
+│                              # a README index): credential rotation,
+│                              # quota / rate-limit incidents, outage
+│                              # detection, and connector-specific
+│                              # error codes
+├── deploy/                    # Phase 8 HorizontalPodAutoscaler
+│                              # manifests: hpa-api.yaml,
+│                              # hpa-ingest.yaml, hpa-docling.yaml,
+│                              # hpa-embedding.yaml — each targets the
+│                              # CPU + custom Prometheus metric for
+│                              # its deployment
 ├── docker-compose.yml         # local dev: Postgres / Redis / Kafka /
 │                              # Qdrant / FalkorDB / Docling /
 │                              # embedding / memory
@@ -907,3 +991,63 @@ hunting-fishball/
   `make capacity-test` runs it in the standard test profile;
   `CAPACITY_DOCS_PER_MIN` and `CAPACITY_DURATION` configure the
   load shape for soak runs.
+- **Prometheus metrics (`internal/observability/metrics.go` +
+  `middleware.go`):** Six Go collectors register against a shared
+  `prometheus.Registry` (so unit tests can spin up an isolated
+  registry per test): `context_engine_api_requests_total`,
+  `context_engine_api_request_duration_seconds`,
+  `context_engine_kafka_consumer_lag`,
+  `context_engine_pipeline_stage_duration_seconds`,
+  `context_engine_retrieval_backend_duration_seconds`,
+  `context_engine_retrieval_backend_hits`. The Gin middleware
+  records request count + duration on every API route. The
+  pipeline coordinator records per-stage duration via
+  `observability.ObserveStageDuration` from
+  `runWithRetry`. The retrieval handler records per-backend
+  duration via `observability.ObserveBackendDuration` from
+  `fanOut`. The Kafka consumer reports lag via
+  `observability.SetKafkaConsumerLag` after every commit. The
+  Python sidecars share `services/_metrics.py::ServiceMetrics`,
+  which exposes a per-prefix triplet (`<prefix>_requests_total`,
+  `<prefix>_duration_seconds`, `<prefix>_queue_depth`) on a
+  separate sidecar HTTP listener (default port 9090).
+- **HPA manifests (`deploy/`):** Four Kubernetes HPAs target the
+  matching collectors: `hpa-api.yaml` scales the API deployment
+  on CPU + `context_engine_api_requests_per_second`;
+  `hpa-ingest.yaml` scales the ingest deployment on CPU +
+  `context_engine_kafka_consumer_lag`; `hpa-docling.yaml` and
+  `hpa-embedding.yaml` scale the Python sidecars on CPU +
+  memory + `<prefix>_queue_depth`. Each manifest sets explicit
+  scale-up / scale-down stabilization windows so the autoscaler
+  is not chatty under bursty traffic.
+- **Mem0 tenant prefix partitioning
+  (`services/memory/memory_server.py`):** Every Mem0 `add` /
+  `search` keys on `<tenant_prefix>:<user_id>`, where the prefix
+  is resolved from `MEM0_TENANT_PREFIX_TEMPLATE` (default
+  `"{tenant_id}"`). Metadata records both `tenant_id` and
+  `tenant_prefix`; `search` additionally drops stray rows whose
+  metadata `tenant_id` mismatches as a defence-in-depth guard.
+  The Go memory client (`cmd/api/main.go::memoryAdapter`) passes
+  `tenant_id` on every `SearchMemory` gRPC call.
+- **Liveness / readiness probes (`cmd/api/readyz.go`,
+  `cmd/ingest/health.go`):** Both binaries expose `GET /healthz`
+  (always 200) and `GET /readyz` (returns 503 + the failed
+  dependency name). The API binary checks Postgres + Redis +
+  Qdrant; the ingest binary checks Postgres + Redis + every
+  Kafka broker via `net.DialTimeout`. The probes share the same
+  HTTP listener as `/metrics`, so a single Kubernetes
+  `livenessProbe` / `readinessProbe` selector covers both.
+- **Retrieval latency optimisations:** `QdrantClient.Warmup` issues
+  N parallel `GET /` requests on startup to pre-establish the
+  `http.Transport` connection pool; `FalkorDBClient.KeepAlive`
+  runs a background ticker that pings `GRAPH.LIST` so the redis
+  connection pool stays warm during idle periods. Both are
+  wired into `cmd/api/main.go` after the listener starts. A new
+  `RetrieveResponse.Timings` envelope (vector_ms / bm25_ms /
+  graph_ms / memory_ms / merge_ms / rerank_ms) breaks each
+  request's wall-clock down by backend so operators can
+  identify the long pole without reaching for traces. The
+  budget is enforced by
+  `tests/benchmark/p95_e2e_test.go::TestE2E_RetrieveP95` (build
+  tag `e2e`, `make bench-e2e`) which fails the build if
+  retrieval P95 > 500 ms or round-trip P95 > 1 s.

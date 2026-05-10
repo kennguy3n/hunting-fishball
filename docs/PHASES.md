@@ -34,14 +34,22 @@ phase.
 > implemented (Phase 1 Google Drive + Slack; Phase 7 SharePoint,
 > OneDrive, Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab,
 > Microsoft Teams). Per-connector runbooks and per-connector e2e
-> smoke tests still pending.
+> smoke tests have landed (`docs/runbooks/`,
+> `tests/e2e/connector_smoke_test.go`,
+> `make test-connector-smoke`); the only remaining gate is a
+> production rollout of the smoke suite under the docker-compose CI
+> path.
 >
 > **Phase 8** is **🟡 partial** as of 2026-05-10 — OpenTelemetry
 > trace instrumentation, configurable per-stage worker pools,
 > tunable Kafka rebalance config, storage connection-pool sizing,
 > a round-robin gRPC pool with circuit breaker, and a capacity test
-> harness have all landed. HPAs and Python-side autoscaling are
-> tracked separately in the deployment-config repo.
+> harness have all landed. Prometheus metrics + four HPA manifests
+> (`deploy/hpa-api.yaml`, `hpa-ingest.yaml`, `hpa-docling.yaml`,
+> `hpa-embedding.yaml`), Mem0 tenant prefix partitioning, and
+> liveness / readiness probes (`/healthz`, `/readyz`) all landed in
+> 2026-05-10. Remaining gaps: cross-platform on-device benchmarks
+> and shard eviction tuning.
 >
 > Every other phase below is currently `⏳ planned`. As phases
 > land, flip the marker and move the supporting status row in
@@ -92,8 +100,9 @@ service-account is in).
       Stage 4 (Storage to Qdrant + Postgres).
 - [x] `POST /v1/retrieve` returns top-k matches from Qdrant for a sample
       query.
-- [ ] Round-trip latency P95 < 1 s on the sample corpus. *(measurement
-      pending Phase 8 capacity test against a deployed stack.)*
+- [x] Round-trip latency P95 < 1 s on the sample corpus — enforced by
+      `tests/benchmark/p95_e2e_test.go::TestE2E_RetrieveP95`
+      (build tag `e2e`, `make bench-e2e`).
 - [x] Audit log records every ingestion + retrieval call.
 - [x] One smoke test runs in CI end-to-end (using docker-compose for the
       storage plane).
@@ -155,9 +164,13 @@ their results.
       reranker.
 - [x] Semantic cache in Redis with per-tenant key prefix and explicit
       `Invalidate` on Stage 4 writes.
-- [ ] Retrieval P95 latency < 500 ms on the sample corpus
-      (in-process P95 ~178 µs measured in `tests/benchmark/`; full
-      end-to-end target deferred to Phase 8 load tests).
+- [x] Retrieval P95 latency < 500 ms on the sample corpus —
+      in-process P95 ~178 µs in `tests/benchmark/`; the
+      end-to-end budget is enforced by the same
+      `TestE2E_RetrieveP95` test referenced in Phase 1. New
+      `RetrieveResponse.Timings` envelope (vector_ms /
+      bm25_ms / graph_ms / memory_ms / merge_ms / rerank_ms)
+      lets operators identify the long pole.
 
 ---
 
@@ -261,11 +274,17 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
       Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab,
       Microsoft Teams) = 12; each lives in
       `internal/connector/<name>/` with `httptest`-backed unit tests.
-- [ ] Each connector has its own runbook for credential rotation,
-      quota incidents, and outages.
+- [x] Each connector has its own runbook for credential rotation,
+      quota incidents, and outages — see `docs/runbooks/` (one
+      Markdown file per connector keyed on the connector's auth
+      model and delta-cursor mechanism).
 - [x] Per-connector capability matrix in [`PROGRESS.md`](PROGRESS.md).
-- [ ] Connector code path passes the same end-to-end smoke test that
-      Phase 1 introduced.
+- [x] Connector code path passes the same end-to-end smoke test that
+      Phase 1 introduced — `tests/e2e/connector_smoke_test.go`
+      (build tag `e2e`) drives Validate → Connect → ListNamespaces
+      → ListDocuments → FetchDocument for every connector and
+      asserts the registry has exactly 12 entries.
+      `make test-connector-smoke`.
 
 ---
 
@@ -292,9 +311,13 @@ ML microservices, plus a cross-platform pass on the on-device tier.
       Postgres `SetMaxOpenConns` / `SetMaxIdleConns` /
       `SetConnMaxLifetime` are all env-tunable from
       `cmd/api/main.go`.
-- [ ] Memory ceilings per `context-engine-ingest` and
+- [x] Memory ceilings per `context-engine-ingest` and
       `context-engine-api` deployment, with HPA on Kafka lag and QPS
-      respectively.
+      respectively — `deploy/hpa-ingest.yaml` (CPU +
+      `context_engine_kafka_consumer_lag` custom metric) and
+      `deploy/hpa-api.yaml` (CPU +
+      `context_engine_api_requests_per_second`). Metrics exposed at
+      `/metrics` from `internal/observability/metrics.go`.
 - [x] OpenTelemetry trace sampling tuned to keep cost under budget
       while still catching tail latency — central
       `internal/observability/tracing.go` wraps every pipeline stage
@@ -304,10 +327,19 @@ ML microservices, plus a cross-platform pass on the on-device tier.
 
 **Exit criteria — Python ML microservice scaling.**
 
-- [ ] Horizontal scaling of the Docling and embedding workers
-      independently (each with its own HPA on CPU + queue depth).
-- [ ] Mem0 service partitioning by tenant prefix to prevent noisy
-      neighbours.
+- [x] Horizontal scaling of the Docling and embedding workers
+      independently (each with its own HPA on CPU + queue depth) —
+      `deploy/hpa-docling.yaml` and `deploy/hpa-embedding.yaml`
+      target the `docling_parse_queue_depth` and
+      `embedding_queue_depth` Prometheus gauges exported by the
+      Python sidecars (`services/_metrics.py`).
+- [x] Mem0 service partitioning by tenant prefix to prevent noisy
+      neighbours —
+      `services/memory/memory_server.py::tenant_prefix` resolves
+      every operation's user_id namespace under a configurable
+      prefix template (`MEM0_TENANT_PREFIX_TEMPLATE`); search
+      drops cross-tenant rows by metadata as a defence-in-depth
+      guard. Verified by `services/memory/test_partitioning.py`.
 - [x] gRPC connection pooling and per-target deadlines on the Go side
       — `internal/grpcpool/` exposes a round-robin pool with a
       circuit breaker (closed → open → half-open) and a

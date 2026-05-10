@@ -320,6 +320,52 @@ func (q *QdrantClient) Delete(ctx context.Context, tenantID string, ids []string
 	return nil
 }
 
+// Ping does a lightweight health check against the Qdrant instance
+// (`GET /`, which Qdrant returns 200 with a small JSON body). Used
+// by /readyz on the API and ingest binaries.
+func (q *QdrantClient) Ping(ctx context.Context) error {
+	resp, err := q.do(ctx, http.MethodGet, q.url("/"), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return q.errFromBody(resp, "ping")
+	}
+	return nil
+}
+
+// Warmup pre-establishes connections to the Qdrant cluster so the
+// first user-facing retrieval doesn't pay the TLS-handshake +
+// idle-pool tax. Phase 1 Task 19 optimisation. Issues `n` parallel
+// `GET /` requests; the http.Transport's connection pool retains
+// them for `IdleConnTimeout`. Best-effort — errors are logged via
+// the returned error but do not fail server startup.
+func (q *QdrantClient) Warmup(ctx context.Context, n int) error {
+	if n <= 0 {
+		n = 4
+	}
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := q.do(ctx, http.MethodGet, q.url("/"), nil)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			_ = resp.Body.Close()
+			errCh <- nil
+		}()
+	}
+	var firstErr error
+	for i := 0; i < n; i++ {
+		if err := <-errCh; err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 func (q *QdrantClient) url(path string) string {
 	u := strings.TrimRight(q.cfg.BaseURL, "/")
 
