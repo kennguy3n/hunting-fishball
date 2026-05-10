@@ -360,6 +360,35 @@ func run() error {
 	}
 	admin.NewSyncProgressHandler(syncProgressStore).Register(api)
 
+	// Round-4 Task 19: per-backend index health endpoint.
+	// Mounts GET /v1/admin/health/indexes — one Ping per backend
+	// in parallel, returns 200 when all green and 503 when any
+	// backend is unhealthy. The DB checker is the GORM connection
+	// itself; vector + cache pings are wired off the existing
+	// clients.
+	indexCheckers := []admin.BackendChecker{
+		admin.PingChecker{
+			BackendName: "postgres",
+			PingFn: func(ctx context.Context) error {
+				sqlDB, err := db.DB()
+				if err != nil {
+					return err
+				}
+				return sqlDB.PingContext(ctx)
+			},
+		},
+		admin.PingChecker{BackendName: "qdrant", PingFn: qdrant.Ping},
+	}
+	if sharedRedis != nil {
+		indexCheckers = append(indexCheckers, admin.PingChecker{
+			BackendName: "redis",
+			PingFn: func(ctx context.Context) error {
+				return sharedRedis.Ping(ctx).Err()
+			},
+		})
+	}
+	admin.NewIndexHealthHandler(indexCheckers...).Register(api)
+
 	// Round-4 Task 18: server-sent-events feed for live sync progress.
 	// Mounts GET /v1/admin/sources/:id/sync/stream and pushes
 	// discovered / processed / failed / completed events as the
