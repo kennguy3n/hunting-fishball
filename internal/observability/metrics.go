@@ -105,6 +105,45 @@ var (
 	)
 )
 
+// Admin / connector lifecycle metrics — Round-5 additions.
+var (
+	// TokenRefreshesTotal counts OAuth token refresh attempts the
+	// background worker (internal/admin/token_refresh.go) drives.
+	// status is one of "success", "skipped", "validation_error",
+	// or "transport_error".
+	TokenRefreshesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_token_refreshes_total",
+			Help: "OAuth token refreshes attempted by the admin worker.",
+		},
+		[]string{"connector", "status"},
+	)
+	// CredentialsExpiring is the per-source gauge tracking how
+	// many days remain before the active credential's grace period
+	// expires. The credential expiry monitor
+	// (internal/admin/credential_monitor.go) writes the value once
+	// per source per scan; alerting fires when it falls below the
+	// configured warning floor.
+	CredentialsExpiring = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "context_engine_credentials_expiring_days",
+			Help: "Days remaining before the active credential's grace period expires.",
+		},
+		[]string{"connector", "source_id"},
+	)
+	// IndexAutoReindexesTotal counts auto-reindex triggers from
+	// the watchdog (internal/admin/index_watchdog.go) so SREs can
+	// alert on a sudden spike (an upstream backend went unhealthy
+	// for more than a handful of tenants).
+	IndexAutoReindexesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_index_auto_reindexes_total",
+			Help: "Auto-triggered reindex jobs the watchdog scheduled.",
+		},
+		[]string{"backend", "result"},
+	)
+)
+
 func init() {
 	Registry.MustRegister(
 		APIRequestsTotal,
@@ -114,6 +153,9 @@ func init() {
 		DLQMessagesTotal,
 		RetrievalBackendDurationSeconds,
 		RetrievalBackendHits,
+		TokenRefreshesTotal,
+		CredentialsExpiring,
+		IndexAutoReindexesTotal,
 	)
 }
 
@@ -133,6 +175,9 @@ func ResetForTest() {
 	Registry.Unregister(DLQMessagesTotal)
 	Registry.Unregister(RetrievalBackendDurationSeconds)
 	Registry.Unregister(RetrievalBackendHits)
+	Registry.Unregister(TokenRefreshesTotal)
+	Registry.Unregister(CredentialsExpiring)
+	Registry.Unregister(IndexAutoReindexesTotal)
 	APIRequestsTotal.Reset()
 	APIRequestDurationSeconds.Reset()
 	KafkaConsumerLag.Reset()
@@ -140,6 +185,9 @@ func ResetForTest() {
 	DLQMessagesTotal.Reset()
 	RetrievalBackendDurationSeconds.Reset()
 	RetrievalBackendHits.Reset()
+	TokenRefreshesTotal.Reset()
+	CredentialsExpiring.Reset()
+	IndexAutoReindexesTotal.Reset()
 	Registry.MustRegister(
 		APIRequestsTotal,
 		APIRequestDurationSeconds,
@@ -148,6 +196,9 @@ func ResetForTest() {
 		DLQMessagesTotal,
 		RetrievalBackendDurationSeconds,
 		RetrievalBackendHits,
+		TokenRefreshesTotal,
+		CredentialsExpiring,
+		IndexAutoReindexesTotal,
 	)
 }
 

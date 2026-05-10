@@ -172,6 +172,43 @@ func (r *SourceRepository) Update(ctx context.Context, tenantID, id string, patc
 	return r.Get(ctx, tenantID, id)
 }
 
+// ListAllActive returns every active source across all tenants in
+// id-ascending order. Used by background workers (token refresh,
+// credential expiry monitor) that intentionally span tenants. The
+// HTTP admin surface NEVER calls this — request-scoped reads must
+// always go through List which enforces tenant scoping.
+func (r *SourceRepository) ListAllActive(ctx context.Context) ([]Source, error) {
+	var out []Source
+	if err := r.db.WithContext(ctx).
+		Where("status = ?", string(SourceStatusActive)).
+		Order("id ASC").
+		Find(&out).Error; err != nil {
+		return nil, fmt.Errorf("admin: list all active sources: %w", err)
+	}
+	return out, nil
+}
+
+// UpdateConfig overwrites the JSONB config blob and bumps updated_at
+// for (tenant_id, id). Used by token refresh and credential expiry
+// workers that need to write back the refreshed access_token without
+// changing any other column on the row.
+func (r *SourceRepository) UpdateConfig(ctx context.Context, tenantID, id string, cfg JSONMap) error {
+	if tenantID == "" || id == "" {
+		return ErrSourceNotFound
+	}
+	res := r.db.WithContext(ctx).
+		Model(&Source{}).
+		Where("tenant_id = ? AND id = ? AND status NOT IN ?", tenantID, id, []string{string(SourceStatusRemoving), string(SourceStatusRemoved)}).
+		Updates(map[string]any{"config": cfg, "updated_at": time.Now().UTC()})
+	if res.Error != nil {
+		return fmt.Errorf("admin: update source config: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrSourceNotFound
+	}
+	return nil
+}
+
 // MarkRemoving flips a source to status=removing. Idempotent — a
 // source already in removing/removed returns its current row.
 func (r *SourceRepository) MarkRemoving(ctx context.Context, tenantID, id string) (*Source, error) {
