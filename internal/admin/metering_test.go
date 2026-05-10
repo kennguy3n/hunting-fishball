@@ -81,6 +81,72 @@ func TestMetering_CounterFlushBuffersIncrements(t *testing.T) {
 	}
 }
 
+// failingMeteringStore wraps a real store and forces Increment to
+// error while fail is true. Used by the regression test below to
+// simulate a transient DB blip during Counter.Flush().
+type failingMeteringStore struct {
+	inner admin.MeteringStore
+	fail  bool
+}
+
+func (f *failingMeteringStore) Increment(ctx context.Context, tenantID string, day time.Time, metric string, delta int64) error {
+	if f.fail {
+		return errSimulatedDBFailure
+	}
+	return f.inner.Increment(ctx, tenantID, day, metric, delta)
+}
+
+func (f *failingMeteringStore) List(ctx context.Context, tenantID string, from, to time.Time) ([]admin.TenantUsage, error) {
+	return f.inner.List(ctx, tenantID, from, to)
+}
+
+var errSimulatedDBFailure = stringError("simulated DB failure")
+
+type stringError string
+
+func (e stringError) Error() string { return string(e) }
+
+// TestMetering_CounterFlushPreservesDeltasOnError is the
+// regression for metering.go's Counter.Flush() swapping out the
+// in-memory buffer before attempting DB writes — a Increment()
+// failure used to permanently drop the delta because (a) the
+// buffer had already been cleared and (b) FlushOnInterval ignores
+// the returned error. For a billing/capacity counter that turned
+// a transient DB blip into silent usage-data loss. The fix
+// re-merges failed (key, delta) pairs back into c.buf so the next
+// Flush retries them; we exercise that by failing the first flush
+// and asserting the second flush lands the original deltas.
+func TestMetering_CounterFlushPreservesDeltasOnError(t *testing.T) {
+	t.Parallel()
+	realStore, _ := newSQLiteMeteringStore(t)
+	fake := &failingMeteringStore{inner: realStore, fail: true}
+	c := admin.NewCounter(fake)
+
+	for i := 0; i < 7; i++ {
+		c.Inc("tenant-a", admin.MetricNames.APIRetrieve, 3)
+	}
+	if err := c.Flush(context.Background()); err == nil {
+		t.Fatal("Flush should have surfaced the simulated DB failure")
+	}
+	day := time.Now().UTC().Truncate(24 * time.Hour)
+	rows, _ := realStore.List(context.Background(), "tenant-a", day, day.Add(24*time.Hour))
+	if len(rows) != 0 {
+		t.Fatalf("first flush failed but rows leaked into the store: %+v", rows)
+	}
+
+	fake.fail = false
+	if err := c.Flush(context.Background()); err != nil {
+		t.Fatalf("second flush after recovery: %v", err)
+	}
+	rows, _ = realStore.List(context.Background(), "tenant-a", day, day.Add(24*time.Hour))
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 (deltas must be preserved across the failed flush)", len(rows))
+	}
+	if rows[0].Count != 21 {
+		t.Fatalf("count = %d, want 21 (7 increments × 3); failed-flush deltas were dropped", rows[0].Count)
+	}
+}
+
 func TestMetering_HTTP_HappyPath(t *testing.T) {
 	t.Parallel()
 	store, _ := newSQLiteMeteringStore(t)

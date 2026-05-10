@@ -71,6 +71,44 @@ func TestFaultInjector_LatencyOnly(t *testing.T) {
 	}
 }
 
+// TestFaultInjector_RollKeepsErrorReachable is the regression for
+// fault.go rolling errorRate twice in sequence — once gated by
+// timeout > 0 (returning FaultTimeout) and a second time for
+// FaultError. With the old code and errorRate=1 + timeout > 0,
+// FaultError was unreachable because the first roll always won.
+// The fix is a single roll against errorRate followed by a 50/50
+// split between timeout and error. We exercise enough rolls that
+// the probability of accidentally never observing FaultError
+// (when it should fire ~50% of the time) is < 1e-15.
+func TestFaultInjector_RollKeepsErrorReachable(t *testing.T) {
+	t.Parallel()
+	f := storage.NewFaultInjector(mapEnv(map[string]string{
+		storage.FaultEnvVar:               "1",
+		"CONTEXT_ENGINE_FAULT_ERROR_RATE": "1",
+		"CONTEXT_ENGINE_FAULT_TIMEOUT":    "1ns",
+	}))
+	if !f.Enabled() {
+		t.Fatal("must be enabled")
+	}
+	var sawError, sawTimeout int
+	for i := 0; i < 200; i++ {
+		switch f.Roll() {
+		case storage.FaultError:
+			sawError++
+		case storage.FaultTimeout:
+			sawTimeout++
+		case storage.FaultNone, storage.FaultLatency:
+			t.Fatalf("at errorRate=1 every roll must be a fault, got %v", f.Roll())
+		}
+	}
+	if sawError == 0 {
+		t.Fatalf("FaultError was never produced across 200 rolls; reachability regressed (timeouts=%d)", sawTimeout)
+	}
+	if sawTimeout == 0 {
+		t.Fatalf("FaultTimeout was never produced across 200 rolls; both modes must remain reachable (errors=%d)", sawError)
+	}
+}
+
 func TestEnvTruthy_PrivateBehavior(t *testing.T) {
 	t.Parallel()
 	// Indirect check: enabled iff env var is one of the truthy

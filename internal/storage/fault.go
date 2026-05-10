@@ -104,16 +104,31 @@ func (f *FaultInjector) Enabled() bool { return f != nil && f.enabled }
 
 // Roll returns the FaultMode the injector wants applied to this
 // call. Safe to call from multiple goroutines.
+//
+// The probability model is two-step:
+//
+//  1. errorRate decides whether ANY synthetic fault fires on this
+//     call. The previous implementation rolled errorRate twice in
+//     sequence (once gated by timeout > 0 → FaultTimeout, once gated
+//     by errorRate > 0 → FaultError) which made FaultError
+//     unreachable when timeout > 0 and errorRate was 1, and produced
+//     an effective error probability of errorRate × (1 − errorRate)
+//     instead of the configured value at intermediate rates.
+//  2. Given a fault fires, we pick timeout vs. error 50/50 if both
+//     modes are configured, otherwise we fall through to the only
+//     enabled fault. Latency-only configs still emit FaultLatency
+//     when no fault was selected, since latency is additive rather
+//     than terminal.
 func (f *FaultInjector) Roll() FaultMode {
 	if f == nil || !f.enabled {
 		return FaultNone
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.timeout > 0 && f.rng.Float64() < f.errorRate {
-		return FaultTimeout
-	}
 	if f.errorRate > 0 && f.rng.Float64() < f.errorRate {
+		if f.timeout > 0 && f.rng.Float64() < 0.5 {
+			return FaultTimeout
+		}
 		return FaultError
 	}
 	if f.latencyAvg > 0 {

@@ -147,6 +147,14 @@ func (c *Counter) Inc(tenantID, metric string, delta int64) {
 // Flush drains the buffer to the store. Errors are returned as a
 // single joined error for observability; partial successes are
 // preserved (already-flushed rows aren't reverted).
+//
+// Failed (key, delta) pairs are merged back into c.buf so the next
+// Flush retries them. Without this, a transient DB blip on a
+// billing-grade counter would silently drop usage data — the
+// buffer was already swapped out before the per-row Increment
+// call, and FlushOnInterval ignores the returned error. The merge
+// uses += so concurrent Inc() calls during the flush are not
+// clobbered, and Increment's UPSERT semantics make the retry safe.
 func (c *Counter) Flush(ctx context.Context) error {
 	c.mu.Lock()
 	snap := c.buf
@@ -154,10 +162,19 @@ func (c *Counter) Flush(ctx context.Context) error {
 	c.mu.Unlock()
 
 	var errs []error
+	failed := map[counterKey]int64{}
 	for k, v := range snap {
 		if err := c.store.Increment(ctx, k.TenantID, k.Day, k.Metric, v); err != nil {
 			errs = append(errs, err)
+			failed[k] = v
 		}
+	}
+	if len(failed) > 0 {
+		c.mu.Lock()
+		for k, v := range failed {
+			c.buf[k] += v
+		}
+		c.mu.Unlock()
 	}
 	if len(errs) == 0 {
 		return nil
