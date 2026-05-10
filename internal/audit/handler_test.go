@@ -189,16 +189,67 @@ func TestHandler_List_BadSinceParam(t *testing.T) {
 	}
 }
 
+// TestHandler_List_BadPageSize covers strictly invalid limit values
+// (non-numeric and negative). limit=0 is intentionally NOT rejected;
+// see TestHandler_List_LimitZero_FallsBackToDefault for the
+// canonical behaviour, which matches DLQ and source handlers.
 func TestHandler_List_BadPageSize(t *testing.T) {
 	t.Parallel()
 
-	h := newHandlerWithReader(fakeReader{})
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/audit-logs?page_size=0", nil)
-	router(h, "tenant-a").ServeHTTP(w, req)
+	cases := []string{
+		"page_size=-1",
+		"limit=-5",
+		"limit=abc",
+	}
+	for _, q := range cases {
+		q := q
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			h := newHandlerWithReader(fakeReader{})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1/audit-logs?"+q, nil)
+			router(h, "tenant-a").ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+// TestHandler_List_LimitZero_FallsBackToDefault is the regression
+// test for BUG_pr-review-job-96794a4ddef143afb93842117129455d_0002:
+// the audit handler previously rejected `limit=0` with `n < 1`,
+// while DLQ and source handlers accept it and fall back to the
+// repository's default page size (parsePageLimit uses `n < 0`).
+// All three pagination endpoints now share the same contract.
+func TestHandler_List_LimitZero_FallsBackToDefault(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{"limit=0", "page_size=0"}
+	for _, q := range cases {
+		q := q
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			var seenSize int
+			h := newHandlerWithReader(fakeReader{
+				listFn: func(_ context.Context, f ListFilter) (*ListResult, error) {
+					seenSize = f.PageSize
+					return &ListResult{}, nil
+				},
+			})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1/audit-logs?"+q, nil)
+			router(h, "tenant-a").ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+			}
+			// limit=0 must NOT propagate as an explicit page size;
+			// the handler leaves filter.PageSize at its zero value
+			// so the repository layer applies its default.
+			if seenSize != 0 {
+				t.Fatalf("limit=0 must not set an explicit PageSize, got %d", seenSize)
+			}
+		})
 	}
 }
 
