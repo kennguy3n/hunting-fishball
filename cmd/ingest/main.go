@@ -35,6 +35,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 	// Blank-imports register each connector in the global registry via
 	// init(). Order is alphabetical to keep diffs minimal.
+	"github.com/kennguy3n/hunting-fishball/internal/config"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
@@ -47,6 +48,8 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	"github.com/kennguy3n/hunting-fishball/internal/lifecycle"
+	"github.com/kennguy3n/hunting-fishball/internal/migrate"
 	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
@@ -70,10 +73,10 @@ func main() {
 }
 
 func run() error {
-	dsn := envOr("CONTEXT_ENGINE_DATABASE_URL", "")
-	if dsn == "" {
-		return errors.New("CONTEXT_ENGINE_DATABASE_URL is required")
+	if err := config.ValidateIngest(config.OSLooker); err != nil {
+		return err
 	}
+	dsn := envOr("CONTEXT_ENGINE_DATABASE_URL", "")
 	brokers := envOr("CONTEXT_ENGINE_KAFKA_BROKERS", "localhost:9092")
 	groupID := envOr("CONTEXT_ENGINE_KAFKA_GROUP", "context-engine-ingest")
 	topics := envOr("CONTEXT_ENGINE_KAFKA_TOPICS", "ingest,reindex,purge")
@@ -93,6 +96,19 @@ func run() error {
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
+	}
+	// Phase 8 / Task 18: optional automatic SQL migration runner.
+	if isAutoMigrateEnabled() {
+		dir := envOr("CONTEXT_ENGINE_MIGRATIONS_DIR", "migrations")
+		runner, mrr := migrate.New(migrate.Config{DB: db, Dir: dir})
+		if mrr != nil {
+			return fmt.Errorf("migrate: %w", mrr)
+		}
+		applied, mrr := runner.Apply(context.Background())
+		if mrr != nil {
+			return fmt.Errorf("auto-migrate: %w", mrr)
+		}
+		slog.Info("ingest: applied migrations", slog.Int("count", len(applied)))
 	}
 	pgStore, err := storage.NewPostgresStore(db)
 	if err != nil {
@@ -205,11 +221,22 @@ func run() error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
+	// coordDone / consDone are closed (in addition to receiving the
+	// final error) so a second receive after the channel has been
+	// drained returns the zero value immediately rather than blocking.
+	// The graceful-shutdown step for the pipeline coordinator relies
+	// on this — see waitChanClosed and its regression test.
 	coordDone := make(chan error, 1)
-	go func() { coordDone <- coord.Run(ctx) }()
+	go func() {
+		coordDone <- coord.Run(ctx)
+		close(coordDone)
+	}()
 
 	consDone := make(chan error, 1)
-	go func() { consDone <- cons.Run(ctx) }()
+	go func() {
+		consDone <- cons.Run(ctx)
+		close(consDone)
+	}()
 
 	// Phase 8 / Task 15: optional DLQ observer. Enables a sidecar
 	// consumer that watches the dead-letter topic and emits both a
@@ -238,6 +265,68 @@ func run() error {
 		}()
 	}
 
+	// Task 6: optional retention worker. Sweeps the chunks table per
+	// tenant and evicts rows whose ingested_at exceeds the effective
+	// MaxAgeDays of the resolved retention policy. Off by default; set
+	// CONTEXT_ENGINE_RETENTION_INTERVAL=1h (any duration string) to
+	// enable.
+	if v := os.Getenv("CONTEXT_ENGINE_RETENTION_INTERVAL"); v != "" {
+		interval, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("retention interval: %w", perr)
+		}
+		policySrc := pipeline.NewRetentionPolicySourceGORM(db)
+		if err := policySrc.AutoMigrate(ctx); err != nil {
+			return fmt.Errorf("retention policy migrate: %w", err)
+		}
+		chunkSrc := pipeline.NewRetentionChunkSourceGORM(db)
+		deleter := pipeline.NewComboRetentionDeleter(pgStore, qdrant)
+		retWorker, werr := pipeline.NewRetentionWorker(pipeline.RetentionWorkerConfig{
+			Chunks: chunkSrc, Policies: policySrc, Deleter: deleter,
+			Logger: slog.Default(), Interval: interval,
+		})
+		if werr != nil {
+			return fmt.Errorf("retention worker: %w", werr)
+		}
+		go func() {
+			if err := retWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("ingest: retention worker", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
+	// Task 5: optional persistent DLQ consumer. Lands every dead-letter
+	// envelope in Postgres so operators can list / replay failed events
+	// from /v1/admin/dlq. Off by default so legacy deployments don't
+	// gain a new consumer group accidentally.
+	if os.Getenv("CONTEXT_ENGINE_DLQ_CONSUME") == "1" {
+		dlqStore := pipeline.NewDLQStoreGORM(db)
+		if err := dlqStore.AutoMigrate(ctx); err != nil {
+			return fmt.Errorf("dlq store automigrate: %w", err)
+		}
+		dlqGroupID := envOr("CONTEXT_ENGINE_DLQ_CONSUMER_GROUP", groupID+"-dlq-consumer")
+		dlqGroup, gerr := sarama.NewConsumerGroup(brokerList, dlqGroupID, saramaCfg)
+		if gerr != nil {
+			return fmt.Errorf("kafka dlq consumer group: %w", gerr)
+		}
+		defer func() { _ = dlqGroup.Close() }()
+		dlqCons, cerr := pipeline.NewDLQConsumer(pipeline.DLQConsumerConfig{
+			Group:       dlqGroup,
+			Topic:       dlqTopic,
+			Store:       dlqStore,
+			Logger:      slog.Default(),
+			MaxAttempts: stageWorkerEnv("CONTEXT_ENGINE_DLQ_MAX_ATTEMPTS"),
+		})
+		if cerr != nil {
+			return fmt.Errorf("dlq consumer: %w", cerr)
+		}
+		go func() {
+			if err := dlqCons.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("ingest: dlq consumer", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
 	// ---- Phase 8 Task 20: HTTP probes + /metrics on a sidecar port.
 	var redisClient *redis.Client
 	if u := os.Getenv("CONTEXT_ENGINE_REDIS_URL"); u != "" {
@@ -257,11 +346,6 @@ func run() error {
 			slog.Warn("ingest: http server", slog.String("error", err.Error()))
 		}
 	}()
-	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		_ = httpSrv.Shutdown(shutdownCtx)
-	}()
 
 	slog.Info("ingest: started", slog.String("topics", topics), slog.String("group", groupID))
 	select {
@@ -277,17 +361,24 @@ func run() error {
 		}
 	}
 	cancel()
-	_ = cons.Stop()
-	coord.CloseInputs()
-	// Drain coordDone non-blockingly: if the select above already fired
-	// the coordDone case, the value has been consumed and the goroutine
-	// has exited, so a blocking <-coordDone would deadlock here.
-	select {
-	case <-coordDone:
-	default:
+	timeout := 30 * time.Second
+	if v, _ := parseInt(os.Getenv("CONTEXT_ENGINE_SHUTDOWN_TIMEOUT_SECONDS")); v > 0 {
+		timeout = time.Duration(v) * time.Second
 	}
-
-	return nil
+	sd := lifecycle.New(timeout, slog.Default())
+	sd.Add("kafka-consumer", func(_ context.Context) error { return cons.Stop() })
+	sd.Add("pipeline-coordinator", func(ctx context.Context) error {
+		coord.CloseInputs()
+		return waitChanClosed(ctx, coordDone)
+	})
+	sd.Add("http-server", func(ctx context.Context) error { return httpSrv.Shutdown(ctx) })
+	if sqlDB, derr := db.DB(); derr == nil {
+		sd.Add("postgres", func(_ context.Context) error { return sqlDB.Close() })
+	}
+	if redisClient != nil {
+		sd.Add("redis", func(_ context.Context) error { return redisClient.Close() })
+	}
+	return sd.Run(context.Background())
 }
 
 func envOr(key, def string) string {
@@ -296,6 +387,39 @@ func envOr(key, def string) string {
 	}
 
 	return def
+}
+
+// waitChanClosed blocks until ch delivers a value, ch is closed, or ctx
+// expires. The original Phase 8 / Task 10 lifecycle step did the same
+// receive inline, but if the value had already been consumed by the
+// outer select (e.g. the coordinator exited cleanly before SIGTERM and
+// the main loop took its err==nil case), the inline `<-ch` blocked for
+// the full lifecycle deadline before returning ctx.Err(), starving
+// every subsequent shutdown step. The fix has two halves:
+//   - the producer goroutines close ch after sending, so a second
+//     receive returns the zero value immediately;
+//   - this helper makes that contract explicit and gives the
+//     regression test a stable surface to exercise.
+func waitChanClosed(ctx context.Context, ch <-chan error) error {
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// isAutoMigrateEnabled mirrors cmd/api: AUTO_MIGRATE / CONTEXT_ENGINE_AUTO_MIGRATE
+// = 1/true/yes/on enables the SQL migration runner on startup.
+func isAutoMigrateEnabled() bool {
+	for _, k := range []string{"AUTO_MIGRATE", "CONTEXT_ENGINE_AUTO_MIGRATE"} {
+		v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+		switch v {
+		case "1", "true", "yes", "on":
+			return true
+		}
+	}
+	return false
 }
 
 // stageWorkerEnv reads an integer worker count from the named env

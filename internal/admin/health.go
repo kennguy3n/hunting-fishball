@@ -113,6 +113,23 @@ func NewHealthRepository(db *gorm.DB, thr HealthThresholds) *HealthRepository {
 	return &HealthRepository{db: db, thr: thr}
 }
 
+// ListByTenant returns every health row for the supplied tenant.
+// Phase 8 / Task 19 wires this into the connector health dashboard.
+func (r *HealthRepository) ListByTenant(ctx context.Context, tenantID string) ([]Health, error) {
+	if tenantID == "" {
+		return nil, errors.New("admin: missing tenant")
+	}
+	var rows []Health
+	err := r.db.WithContext(ctx).
+		Where("tenant_id = ?", tenantID).
+		Order("source_id ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("admin: list health: %w", err)
+	}
+	return rows, nil
+}
+
 // Get returns the health row for (tenantID, sourceID), or nil if the
 // row does not yet exist.
 func (r *HealthRepository) Get(ctx context.Context, tenantID, sourceID string) (*Health, error) {

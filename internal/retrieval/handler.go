@@ -177,8 +177,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 // Register mounts the retrieval endpoints on rg. Routes:
 //
 //	POST /v1/retrieve
+//	POST /v1/retrieve/batch
 func (h *Handler) Register(rg *gin.RouterGroup) {
 	rg.POST("/v1/retrieve", h.retrieve)
+	h.RegisterBatch(rg)
 }
 
 // RetrieveRequest is the JSON shape of POST /v1/retrieve.
@@ -508,7 +510,15 @@ func (h *Handler) applyDeviceFirst(ctx context.Context, tenantID, channelID, pri
 // supplied snapshot's EffectiveMode and HandlerConfig
 // .DefaultPrivacyMode are empty (matching the gin handler's
 // resolver-driven precedence).
+//
+// Live, cache-aware callers (the gin handler, the Phase 8 / Task 12
+// batch retrieve fan-out) should use RetrieveWithSnapshotCached so
+// they share the semantic cache with single-request /v1/retrieve.
 func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot) (RetrieveResponse, error) {
+	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
+	if err != nil {
+		return RetrieveResponse{}, err
+	}
 	if tenantID == "" {
 		return RetrieveResponse{}, errors.New("retrieval: tenantID is required")
 	}
@@ -516,23 +526,42 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 		return RetrieveResponse{}, errors.New("retrieval: query is required")
 	}
 
-	topK := req.TopK
-	if topK == 0 {
-		topK = h.cfg.DefaultTopK
-	}
-	if topK < 0 {
-		return RetrieveResponse{}, errors.New("retrieval: top_k must be >= 0")
-	}
-	if topK > h.cfg.MaxTopK {
-		topK = h.cfg.MaxTopK
+	vec, err := h.cfg.Embedder.EmbedQuery(ctx, tenantID, req.Query)
+	if err != nil {
+		return RetrieveResponse{}, err
 	}
 
-	privacyMode := req.PrivacyMode
-	if privacyMode == "" {
-		privacyMode = h.cfg.DefaultPrivacyMode
+	return h.runPipelineFromVec(ctx, tenantID, req, snapshot, vec, topK, privacyMode)
+}
+
+// RetrieveWithSnapshotCached is the cache-aware twin of
+// RetrieveWithSnapshot. It is the entry point for live-snapshot
+// callers that want the same semantic-cache short-circuit the gin
+// handler applies (Phase 8 / Task 12 batch retrieve, in-process admin
+// tooling). The pipeline is identical to RetrieveWithSnapshot — same
+// fan-out, same policy gates — except for the cache I/O bookends:
+//
+//   - GET on entry. A hit re-runs the privacy-label PolicyFilter, ACL,
+//     and recipient gates against the supplied snapshot before
+//     returning, mirroring the gin handler so a policy change between
+//     write and read can never serve content the new policy denies.
+//   - SET on success. The merged + reranked + filtered response is
+//     written back so the next caller (single-request OR batch) can
+//     hit the cache.
+//
+// Pre-fix (Phase 8 / Task 12), batch retrieve called RetrieveWithSnapshot
+// directly and bypassed the cache entirely — a documented performance
+// regression on dashboards that fan a hot query out across N panels.
+func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot) (RetrieveResponse, error) {
+	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
+	if err != nil {
+		return RetrieveResponse{}, err
 	}
-	if snapshot.EffectiveMode != "" {
-		privacyMode = string(snapshot.EffectiveMode)
+	if tenantID == "" {
+		return RetrieveResponse{}, errors.New("retrieval: tenantID is required")
+	}
+	if req.Query == "" {
+		return RetrieveResponse{}, errors.New("retrieval: query is required")
 	}
 
 	vec, err := h.cfg.Embedder.EmbedQuery(ctx, tenantID, req.Query)
@@ -540,6 +569,65 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 		return RetrieveResponse{}, err
 	}
 
+	channelID := firstNonEmpty(req.Channels)
+	scopeHash := scopeHashFor(req, topK, privacyMode)
+
+	if h.cfg.Cache != nil {
+		cached, cerr := h.cfg.Cache.Get(ctx, tenantID, channelID, vec, scopeHash)
+		if cerr == nil && cached != nil {
+			filtered, blockedByPrivacy := filterCachedByPrivacyMode(cached, h.cfg.PolicyFilter, privacyMode)
+			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
+			resp := responseFromCache(filtered, privacyMode, topK)
+			resp.Policy.BlockedCount = blockedByPrivacy + blockedByACL + blockedByRecipient
+			for i := range resp.Hits {
+				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
+			}
+			h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+			return resp, nil
+		}
+	}
+
+	resp, perr := h.runPipelineFromVec(ctx, tenantID, req, snapshot, vec, topK, privacyMode)
+	if perr != nil {
+		return RetrieveResponse{}, perr
+	}
+	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
+		_ = h.cfg.Cache.Set(ctx, tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), h.cfg.CacheTTL)
+	}
+	h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+	return resp, nil
+}
+
+// resolveTopKAndPrivacy applies the same topK / privacyMode resolution
+// rules the gin handler uses, lifted out so the snapshot-driven
+// callers (RetrieveWithSnapshot and RetrieveWithSnapshotCached) can
+// share them verbatim.
+func (h *Handler) resolveTopKAndPrivacy(req RetrieveRequest, snapshot policy.PolicySnapshot) (int, string, error) {
+	topK := req.TopK
+	if topK == 0 {
+		topK = h.cfg.DefaultTopK
+	}
+	if topK < 0 {
+		return 0, "", errors.New("retrieval: top_k must be >= 0")
+	}
+	if topK > h.cfg.MaxTopK {
+		topK = h.cfg.MaxTopK
+	}
+	privacyMode := req.PrivacyMode
+	if privacyMode == "" {
+		privacyMode = h.cfg.DefaultPrivacyMode
+	}
+	if snapshot.EffectiveMode != "" {
+		privacyMode = string(snapshot.EffectiveMode)
+	}
+	return topK, privacyMode, nil
+}
+
+// runPipelineFromVec is the cache-free inner pipeline shared by
+// RetrieveWithSnapshot and RetrieveWithSnapshotCached's miss path.
+// It expects the query to already be embedded and the topK /
+// privacyMode resolution to be done by the caller.
+func (h *Handler) runPipelineFromVec(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot, vec []float32, topK int, privacyMode string) (RetrieveResponse, error) {
 	streams, degraded, backendTimings := h.fanOut(ctx, tenantID, req, vec, topK)
 
 	mergeStart := time.Now()

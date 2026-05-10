@@ -243,6 +243,25 @@ semantic-cache key (query embedding + scope hash).
 For the long-form rationale on language choice and retrieval-layer mapping,
 see [`docs/PROPOSAL.md` §3.1](docs/PROPOSAL.md#31-context-engine-language-choice).
 
+The full set of public + admin endpoints is documented in
+[`docs/openapi.yaml`](docs/openapi.yaml). Highlights added in the
+2026-05-10 production-hardening batch:
+
+- `POST /v1/retrieve/batch` — fan out up to 32 retrieves at once
+  with a configurable `max_parallel` cap.
+- `GET /v1/admin/audit` — search/filter audit logs by `action`,
+  `resource_id`, `source_id`, free-text `q=` query, and time range.
+- `GET /v1/admin/sources/:id/progress` — per-namespace sync
+  progress (discovered / processed / failed / percent_done).
+- `GET /v1/admin/dashboard` — connector + pipeline + retrieval
+  health summary suited to an admin dashboard widget.
+- `GET /v1/admin/dlq`, `GET /v1/admin/dlq/:id`,
+  `POST /v1/admin/dlq/:id/replay` — dead-letter inspection +
+  replay (`max_retries` guard).
+- `POST /v1/admin/reindex` — re-emit Stage 2–4 events for an
+  existing tenant / source / namespace without re-fetching from
+  the upstream source.
+
 ---
 
 ## Quick start
@@ -414,8 +433,14 @@ hunting-fishball/
 │   │                          # Prometheus metrics + Gin middleware
 │   │                          # (metrics.go, middleware.go) scraped at
 │   │                          # /metrics on cmd/api and cmd/ingest
-│   └── grpcpool/              # Phase 8: round-robin gRPC pool with
-│                              # circuit breaker for the Python sidecars
+│   ├── grpcpool/              # Phase 8: round-robin gRPC pool with
+│   │                          # circuit breaker for the Python sidecars
+│   ├── lifecycle/             # Phase 8: ordered shutdown runner used
+│   │                          # by cmd/api + cmd/ingest
+│   ├── config/                # Phase 8: startup config validation
+│   │                          # (validate.go)
+│   └── migrate/               # Phase 8: SQL migration runner backed
+│                              # by schema_migrations (AUTO_MIGRATE)
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
@@ -483,6 +508,8 @@ landed) is documented in
   tasks.
 - [`docs/CUTOVER.md`](docs/CUTOVER.md) — cutover plan and rollback procedure
   for the Python → Go context engine migration.
+- [`docs/openapi.yaml`](docs/openapi.yaml) — OpenAPI 3.0 spec for the
+  full public + admin HTTP surface (Phase 8 / Task 17).
 
 ---
 

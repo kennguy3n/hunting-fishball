@@ -40,8 +40,9 @@ type Credentials struct {
 
 // Connector is the SourceConnector implementation.
 type Connector struct {
-	httpClient *http.Client
-	baseURL    string
+	httpClient    *http.Client
+	baseURL       string
+	webhookSecret []byte
 }
 
 // Option configures a Connector.
@@ -54,6 +55,14 @@ func WithHTTPClient(c *http.Client) Option { return func(g *Connector) { g.httpC
 // site_url.
 func WithBaseURL(u string) Option { return func(g *Connector) { g.baseURL = u } }
 
+// WithWebhookSecret enables signature verification on incoming
+// webhooks. Atlassian Jira signs the body with the configured secret
+// and sends the SHA-256 digest in `X-Hub-Signature-256` (Phase 8 /
+// Task 9).
+func WithWebhookSecret(secret string) Option {
+	return func(g *Connector) { g.webhookSecret = []byte(secret) }
+}
+
 // New constructs a Connector.
 func New(opts ...Option) *Connector {
 	c := &Connector{httpClient: &http.Client{Timeout: 30 * time.Second}}
@@ -61,6 +70,16 @@ func New(opts ...Option) *Connector {
 		o(c)
 	}
 	return c
+}
+
+// VerifyWebhookRequest validates the Jira `X-Hub-Signature-256`
+// header against the configured webhook secret. Implements
+// connector.WebhookVerifier.
+func (g *Connector) VerifyWebhookRequest(headers map[string][]string, payload []byte) error {
+	if len(g.webhookSecret) == 0 {
+		return nil
+	}
+	return connector.VerifyHMACSHA256(g.webhookSecret, payload, connector.FirstHeader(headers, "X-Hub-Signature-256"))
 }
 
 type connection struct {

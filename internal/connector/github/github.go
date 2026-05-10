@@ -39,8 +39,9 @@ type Credentials struct {
 
 // Connector is the SourceConnector implementation.
 type Connector struct {
-	httpClient *http.Client
-	baseURL    string
+	httpClient    *http.Client
+	baseURL       string
+	webhookSecret []byte
 }
 
 // Option configures a Connector.
@@ -52,6 +53,13 @@ func WithHTTPClient(c *http.Client) Option { return func(g *Connector) { g.httpC
 // WithBaseURL overrides the API base URL — used by tests.
 func WithBaseURL(u string) Option { return func(g *Connector) { g.baseURL = u } }
 
+// WithWebhookSecret enables signature verification on incoming
+// webhooks. GitHub signs the body with the configured secret and
+// sends the digest in `X-Hub-Signature-256` (Phase 8 / Task 9).
+func WithWebhookSecret(secret string) Option {
+	return func(g *Connector) { g.webhookSecret = []byte(secret) }
+}
+
 // New constructs a Connector.
 func New(opts ...Option) *Connector {
 	c := &Connector{httpClient: &http.Client{Timeout: 30 * time.Second}, baseURL: defaultBaseURL}
@@ -59,6 +67,17 @@ func New(opts ...Option) *Connector {
 		o(c)
 	}
 	return c
+}
+
+// VerifyWebhookRequest validates the GitHub `X-Hub-Signature-256`
+// header against the configured webhook secret. Implements
+// connector.WebhookVerifier. When no secret is configured the call
+// returns nil (verification disabled).
+func (g *Connector) VerifyWebhookRequest(headers map[string][]string, payload []byte) error {
+	if len(g.webhookSecret) == 0 {
+		return nil
+	}
+	return connector.VerifyHMACSHA256(g.webhookSecret, payload, connector.FirstHeader(headers, "X-Hub-Signature-256"))
 }
 
 type connection struct {

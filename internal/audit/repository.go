@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -25,9 +26,20 @@ type ListFilter struct {
 	// ResourceType filters by exact match.
 	ResourceType string
 
+	// ResourceID filters by exact match. Phase 8 / Task 13 addition —
+	// admin search/filter API binds `source_id=` to ResourceID for the
+	// common case of "show me everything that touched this source".
+	ResourceID string
+
 	// Since/Until bracket created_at. Zero values are open-ended.
 	Since time.Time
 	Until time.Time
+
+	// PayloadSearch is a substring matched against the JSONB-serialised
+	// payload. Phase 8 / Task 13 adds rudimentary text search on top of
+	// the existing exact-match filters; the comparison is dialect-agnostic
+	// (LIKE ?) so SQLite + Postgres tests stay in sync.
+	PayloadSearch string
 
 	// PageSize is the LIMIT clause. <=0 falls back to defaultPageSize.
 	PageSize int
@@ -41,6 +53,25 @@ const (
 	defaultPageSize = 50
 	maxPageSize     = 200
 )
+
+// likeEscaper escapes the three characters that have special meaning
+// inside a LIKE pattern paired with `ESCAPE '\'`: `\` itself, `%` (any
+// sequence) and `_` (any single character). The order matters — `\`
+// must be replaced first so the escape sequences inserted by the later
+// replacements aren't doubled.
+var likeEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	`%`, `\%`,
+	`_`, `\_`,
+)
+
+// escapeLike makes user-supplied substrings safe for the surrounding
+// `%...%` wildcards we add for PayloadSearch. The result must be paired
+// with an `ESCAPE '\'` clause for the database to interpret the
+// backslashes as escapes rather than literals.
+func escapeLike(s string) string {
+	return likeEscaper.Replace(s)
+}
 
 // ListResult is the ListAuditLogs response.
 type ListResult struct {
@@ -133,6 +164,28 @@ func (r *Repository) List(ctx context.Context, f ListFilter) (*ListResult, error
 	}
 	if f.ResourceType != "" {
 		q = q.Where("resource_type = ?", f.ResourceType)
+	}
+	if f.ResourceID != "" {
+		q = q.Where("resource_id = ?", f.ResourceID)
+	}
+	if f.PayloadSearch != "" {
+		// CAST(metadata AS TEXT) lets the same LIKE expression run on
+		// Postgres (where metadata is JSONB) and SQLite (where it is
+		// TEXT). The column is named `metadata`, NOT `payload` — the
+		// migration in migrations/001_audit_log.sql is the source of
+		// truth and the GORM model maps the field via column:metadata.
+		//
+		// PayloadSearch is documented as a substring match. Without
+		// escaping, the LIKE meta-characters `%` (any sequence) and `_`
+		// (any single char) in user input would silently turn into
+		// wildcards: `q=%` would match every row, `q=_` would match any
+		// row whose metadata is non-empty. We escape them (and `\`
+		// itself) and pin the escape character with the ESCAPE clause —
+		// portable across Postgres and SQLite.
+		q = q.Where(
+			`CAST(metadata AS TEXT) LIKE ? ESCAPE '\'`,
+			"%"+escapeLike(f.PayloadSearch)+"%",
+		)
 	}
 	if !f.Since.IsZero() {
 		q = q.Where("created_at >= ?", f.Since)

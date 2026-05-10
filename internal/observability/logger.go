@@ -159,6 +159,9 @@ func LoggerFromContext(ctx context.Context) *slog.Logger {
 	if tr := TraceIDFromContext(ctx); tr != "" {
 		attrs = append(attrs, slog.String("trace_id", tr))
 	}
+	if rid := RequestIDFromContext(ctx); rid != "" {
+		attrs = append(attrs, slog.String("request_id", rid))
+	}
 	if len(attrs) == 0 {
 		return base
 	}

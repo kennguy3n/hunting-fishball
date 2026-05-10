@@ -235,6 +235,118 @@ func TestRepository_PendingPublishAndMark(t *testing.T) {
 	}
 }
 
+func TestRepository_ListPayloadSearch(t *testing.T) {
+	t.Parallel()
+
+	repo, _ := newSQLiteRepo(t)
+	ctx := context.Background()
+
+	matched := audit.NewAuditLog(
+		"tenant-a", "actor-1",
+		audit.ActionConnectorConnected,
+		"source", "src-1",
+		audit.JSONMap{"connector": "google-drive"},
+		"",
+	)
+	other := audit.NewAuditLog(
+		"tenant-a", "actor-1",
+		audit.ActionConnectorConnected,
+		"source", "src-2",
+		audit.JSONMap{"connector": "github"},
+		"",
+	)
+	for i, log := range []*audit.AuditLog{matched, other} {
+		log.CreatedAt = time.Now().UTC().Add(time.Duration(i) * time.Millisecond)
+		if err := repo.Create(ctx, log); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	got, err := repo.List(ctx, audit.ListFilter{
+		TenantID:      "tenant-a",
+		PayloadSearch: "google-drive",
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("expected 1 row matching payload, got %d", len(got.Items))
+	}
+	if got.Items[0].ID != matched.ID {
+		t.Fatalf("wrong row matched: %s want %s", got.Items[0].ID, matched.ID)
+	}
+}
+
+// TestRepository_ListPayloadSearchEscapesLikeWildcards is the regression
+// test for the LIKE-meta-character bug surfaced by Devin Review on
+// PR #12. The original implementation interpolated the user query
+// directly between `%` wildcards; supplying `%` would match every row
+// (because `%%%` == `LIKE '%any%'` == match-anything) and supplying
+// `_` would match any row whose metadata is non-empty.
+//
+// After the fix the LIKE pattern is paired with `ESCAPE '\'` and the
+// escapeLike helper turns user `%`, `_`, `\` into their escaped form,
+// so the wildcards are interpreted as literal characters.
+func TestRepository_ListPayloadSearchEscapesLikeWildcards(t *testing.T) {
+	t.Parallel()
+
+	repo, _ := newSQLiteRepo(t)
+	ctx := context.Background()
+
+	// `withPercent` carries a literal '%' in metadata so we can prove
+	// it's still findable when the search query is a literal '%'.
+	withPercent := audit.NewAuditLog(
+		"tenant-a", "actor-1",
+		audit.ActionConnectorConnected,
+		"source", "src-1",
+		audit.JSONMap{"connector": "100% success"},
+		"",
+	)
+	plain := audit.NewAuditLog(
+		"tenant-a", "actor-1",
+		audit.ActionConnectorConnected,
+		"source", "src-2",
+		audit.JSONMap{"connector": "github"},
+		"",
+	)
+	for i, log := range []*audit.AuditLog{withPercent, plain} {
+		log.CreatedAt = time.Now().UTC().Add(time.Duration(i) * time.Millisecond)
+		if err := repo.Create(ctx, log); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	// Pre-fix: `%` matched everything. Post-fix: it must only match the
+	// row whose metadata literally contains `%`.
+	got, err := repo.List(ctx, audit.ListFilter{
+		TenantID:      "tenant-a",
+		PayloadSearch: "%",
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("`%%` query should match only the row containing a literal '%%'; got %d rows", len(got.Items))
+	}
+	if got.Items[0].ID != withPercent.ID {
+		t.Fatalf("`%%` query matched wrong row: %s want %s", got.Items[0].ID, withPercent.ID)
+	}
+
+	// Pre-fix: `_` matched any row with at least one metadata char.
+	// Post-fix: no row contains a literal `_`, so the result must be
+	// empty.
+	got, err = repo.List(ctx, audit.ListFilter{
+		TenantID:      "tenant-a",
+		PayloadSearch: "_",
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got.Items) != 0 {
+		t.Fatalf("`_` query must not match rows without a literal '_'; got %d rows", len(got.Items))
+	}
+}
+
 func TestRepository_RejectsMissingTenant(t *testing.T) {
 	t.Parallel()
 

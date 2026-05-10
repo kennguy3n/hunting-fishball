@@ -187,3 +187,43 @@ func TestStaticSyncResolver_NilFnFallsBackToDefault(t *testing.T) {
 		t.Fatalf("got %+v want %+v", got, want)
 	}
 }
+
+func TestDefaultSyncSchedule_FloorsAreNonZero(t *testing.T) {
+	t.Parallel()
+	got := b2c.DefaultSyncSchedule("tenant-a")
+	if got.MinForegroundSyncSeconds <= 0 {
+		t.Fatalf("min foreground floor must be > 0, got %d", got.MinForegroundSyncSeconds)
+	}
+	if got.MinBackgroundSyncSeconds <= 0 {
+		t.Fatalf("min background floor must be > 0, got %d", got.MinBackgroundSyncSeconds)
+	}
+	if got.ForegroundSyncInterval < time.Duration(got.MinForegroundSyncSeconds)*time.Second {
+		t.Fatalf("foreground interval %v < floor %ds", got.ForegroundSyncInterval, got.MinForegroundSyncSeconds)
+	}
+	if got.BackgroundSyncInterval < time.Duration(got.MinBackgroundSyncSeconds)*time.Second {
+		t.Fatalf("background interval %v < floor %ds", got.BackgroundSyncInterval, got.MinBackgroundSyncSeconds)
+	}
+}
+
+func TestHandler_Capabilities_EmptyBackendsRendersJSONArray(t *testing.T) {
+	t.Parallel()
+	h, _ := b2c.NewHandler(b2c.HandlerConfig{})
+	r := newRouter(t, h, "tenant-a")
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d", w.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	v, ok := got["enabled_backends"]
+	if !ok {
+		t.Fatalf("missing enabled_backends")
+	}
+	if _, isSlice := v.([]any); !isSlice {
+		t.Fatalf("enabled_backends must be JSON array, got %T", v)
+	}
+}

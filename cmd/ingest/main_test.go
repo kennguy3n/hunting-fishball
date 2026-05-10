@@ -1,6 +1,94 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+// TestWaitChanClosed_DrainedChannelDoesNotBlock is the regression test
+// for the pipeline-coordinator graceful-shutdown bug surfaced by Devin
+// Review on PR #12. Pre-fix, the lifecycle step waited inline on
+// `<-coordDone`; if the outer select had already consumed the value
+// (coord.Run returned nil before SIGTERM), the second receive blocked
+// for the full 30 s lifecycle deadline, starving every shutdown step
+// that ran after it.
+//
+// The fix closes the channel after send. A receive on a closed channel
+// returns the zero value immediately, so waitChanClosed must return nil
+// well within the test's tight deadline rather than waiting for ctx
+// expiry.
+func TestWaitChanClosed_DrainedChannelDoesNotBlock(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan error, 1)
+	ch <- nil
+	close(ch)
+	// Drain the value so we exercise the post-consumption path.
+	<-ch
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := waitChanClosed(ctx, ch); err != nil {
+		t.Fatalf("waitChanClosed: unexpected error %v", err)
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("waitChanClosed blocked %s on a drained-and-closed channel", d)
+	}
+}
+
+func TestWaitChanClosed_PendingValueReturnsImmediately(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan error, 1)
+	ch <- nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := waitChanClosed(ctx, ch); err != nil {
+		t.Fatalf("waitChanClosed: unexpected error %v", err)
+	}
+}
+
+func TestWaitChanClosed_ProducerCloseAfterSendIsObservable(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan error, 1)
+	go func() {
+		ch <- nil
+		close(ch)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := waitChanClosed(ctx, ch); err != nil {
+		t.Fatalf("first wait: %v", err)
+	}
+	// Second wait: simulates the lifecycle step running after the main
+	// loop already consumed the value. With the closed-channel fix it
+	// returns immediately; without it (the original bug) it hangs.
+	start := time.Now()
+	if err := waitChanClosed(ctx, ch); err != nil {
+		t.Fatalf("second wait: %v", err)
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("second wait blocked %s; close-after-send was lost", d)
+	}
+}
+
+func TestWaitChanClosed_ContextDeadlineHonoured(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan error)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := waitChanClosed(ctx, ch)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded, got %v", err)
+	}
+}
 
 // TestStageWorkerEnv covers the env-var → int conversion that drives
 // per-stage worker pool sizing in the coordinator. Empty / invalid

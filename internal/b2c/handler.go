@@ -188,8 +188,9 @@ func (h *Handler) health(c *gin.Context) {
 }
 
 func (h *Handler) capabilities(c *gin.Context) {
+	backends := append([]string{}, h.cfg.EnabledBackends...) // never nil so JSON renders []
 	c.JSON(http.StatusOK, Capabilities{
-		EnabledBackends: append([]string(nil), h.cfg.EnabledBackends...),
+		EnabledBackends: backends,
 		PrivacyModes: []string{
 			"no-ai",
 			"local-only",

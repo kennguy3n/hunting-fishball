@@ -50,6 +50,27 @@ phase.
 > production rollout of the smoke suite under the docker-compose CI
 > path.
 >
+> **Phase 8 production-hardening (2026-05-10 batch).** A 20-task
+> next-batch of operational + admin surfaces has landed: graceful
+> shutdown for both binaries (`internal/lifecycle/`), startup config
+> validation (`internal/config/validate.go`), a SQL migration runner
+> behind `AUTO_MIGRATE` (`internal/migrate/runner.go`), bulk
+> retrieval (`POST /v1/retrieve/batch`), audit log search/filter
+> (`/v1/admin/audit`), per-namespace sync progress
+> (`/v1/admin/sources/:id/progress`), DLQ inspection + replay
+> (`/v1/admin/dlq`), retention policy enforcement
+> (`internal/policy/retention.go` + `internal/pipeline/retention_worker.go`),
+> a reindex orchestrator (`POST /v1/admin/reindex`), per-tenant API
+> rate limit, webhook signature verification across the four
+> `WebhookReceiver` connectors (jira / github / gitlab / teams),
+> the connector dashboard (`/v1/admin/dashboard`), the request-ID
+> middleware (`internal/observability/request_id.go`), the
+> e2e tenant deletion + degradation smoke suites
+> (`tests/e2e/tenant_deletion_test.go`,
+> `tests/e2e/degradation_test.go`), and the OpenAPI spec
+> (`docs/openapi.yaml`). See `docs/PROGRESS.md` 2026-05-10
+> changelog entry for the per-task breakdown.
+>
 > **Phase 8** is **🟡 partial** as of 2026-05-10 — OpenTelemetry
 > trace instrumentation, configurable per-stage worker pools,
 > tunable Kafka rebalance config, storage connection-pool sizing,

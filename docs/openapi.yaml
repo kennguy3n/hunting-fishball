@@ -1,0 +1,591 @@
+openapi: 3.0.3
+info:
+  title: Hunting-Fishball Context Engine API
+  description: |
+    Public HTTP surface for the Hunting-Fishball multi-tenant
+    knowledge / context platform. All `/v1/*` endpoints expect:
+
+    - `X-Tenant-ID`: required, ULID-formatted tenant identifier
+      (the auth middleware writes this into the gin context;
+      handlers never read tenant identity from query / body).
+    - `X-Actor-ID`: optional, ULID-formatted actor for audit logs.
+
+    Liveness / readiness / metrics are served without auth on
+    `/healthz`, `/readyz`, `/metrics`.
+  version: 0.8.0
+servers:
+  - url: http://localhost:8080
+    description: Local development
+components:
+  parameters:
+    TenantHeader:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      schema: { type: string, minLength: 26, maxLength: 26 }
+    ActorHeader:
+      name: X-Actor-ID
+      in: header
+      required: false
+      schema: { type: string, minLength: 26, maxLength: 26 }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    RetrieveRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        top_k: { type: integer, default: 10 }
+        sources: { type: array, items: { type: string } }
+        channels: { type: array, items: { type: string } }
+        document_ids: { type: array, items: { type: string } }
+        privacy_mode: { type: string, enum: [no-ai, internal, public, local-only] }
+        skill_id: { type: string }
+        device_tier: { type: string, enum: [low, mid, high] }
+    RetrieveResponse:
+      type: object
+      properties:
+        hits:
+          type: array
+          items: { $ref: '#/components/schemas/RetrieveHit' }
+        policy: { $ref: '#/components/schemas/RetrievePolicy' }
+        timings: { $ref: '#/components/schemas/RetrieveTimings' }
+        trace_id: { type: string }
+        prefer_local: { type: boolean }
+        prefer_local_reason: { type: string }
+    RetrieveHit:
+      type: object
+      properties:
+        id: { type: string }
+        score: { type: number }
+        tenant_id: { type: string }
+        source_id: { type: string }
+        document_id: { type: string }
+        block_id: { type: string }
+        title: { type: string }
+        uri: { type: string }
+        privacy_label: { type: string }
+        text: { type: string }
+        connector: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        privacy_strip: { type: object, additionalProperties: true }
+    RetrievePolicy:
+      type: object
+      properties:
+        applied: { type: array, items: { type: string } }
+        degraded: { type: array, items: { type: string } }
+        blocked_count: { type: integer }
+        cache_hit: { type: boolean }
+        privacy_mode: { type: string }
+    RetrieveTimings:
+      type: object
+      properties:
+        vector_ms: { type: integer }
+        bm25_ms: { type: integer }
+        graph_ms: { type: integer }
+        memory_ms: { type: integer }
+        merge_ms: { type: integer }
+        rerank_ms: { type: integer }
+    BatchRequest:
+      type: object
+      required: [requests]
+      properties:
+        requests:
+          type: array
+          maxItems: 32
+          items: { $ref: '#/components/schemas/RetrieveRequest' }
+        max_parallel: { type: integer, default: 8 }
+    BatchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              response: { $ref: '#/components/schemas/RetrieveResponse' }
+              error: { type: string }
+    Source:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        connector_type: { type: string }
+        scopes: { type: array, items: { type: string } }
+        config: { type: object, additionalProperties: true }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ConnectRequest:
+      type: object
+      required: [connector_type]
+      properties:
+        connector_type: { type: string }
+        scopes: { type: array, items: { type: string } }
+        config: { type: object, additionalProperties: true }
+    ShardManifest:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        shard_version: { type: integer }
+        chunks_count: { type: integer }
+        privacy_mode: { type: string }
+        status: { type: string, enum: [building, ready, superseded] }
+        created_at: { type: string, format: date-time }
+    AuditLog:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        action: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: string }
+        actor_id: { type: string }
+        payload: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+    DLQEntry:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        topic: { type: string }
+        partition: { type: integer }
+        offset: { type: integer }
+        payload: { type: string }
+        reason: { type: string }
+        attempts: { type: integer }
+        created_at: { type: string, format: date-time }
+    SyncProgressItem:
+      type: object
+      properties:
+        namespace_id: { type: string }
+        discovered: { type: integer }
+        processed: { type: integer }
+        failed: { type: integer }
+        percent_done: { type: number }
+    SyncProgressResponse:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        source_id: { type: string }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SyncProgressItem' }
+    DashboardResponse:
+      type: object
+      additionalProperties: true
+    ReindexRequest:
+      type: object
+      required: [tenant_id, source_id]
+      properties:
+        tenant_id: { type: string }
+        source_id: { type: string }
+        namespace_id: { type: string }
+    Capabilities:
+      type: object
+      additionalProperties: true
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe.
+      responses:
+        '200': { description: OK }
+  /readyz:
+    get:
+      summary: Readiness probe.
+      responses:
+        '200': { description: OK }
+        '503': { description: Not ready }
+  /metrics:
+    get:
+      summary: Prometheus metrics scrape endpoint.
+      responses:
+        '200': { description: OK, content: { text/plain: { schema: { type: string } } } }
+  /v1/health:
+    get:
+      summary: B2C health summary.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200': { description: OK }
+  /v1/capabilities:
+    get:
+      summary: B2C capabilities (enabled backends, privacy modes, feature flags).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Capabilities' } } } }
+  /v1/sync/schedule:
+    get:
+      summary: B2C sync schedule (with minimum-interval floors).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200': { description: OK }
+  /v1/retrieve:
+    post:
+      summary: Run a single retrieval (vector + BM25 + graph + memory fan-out).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ActorHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RetrieveRequest' }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/RetrieveResponse' } } }
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '401': { description: Missing tenant }
+        '503': { description: Policy resolver unavailable }
+  /v1/retrieve/batch:
+    post:
+      summary: Run multiple retrieves concurrently in one request.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchRequest' }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BatchResponse' } } } }
+        '400': { description: Bad request }
+        '413': { description: Batch too large }
+  /v1/shards/{tenant_id}:
+    get:
+      summary: List shard manifests for a tenant.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: tenant_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /v1/shards/{tenant_id}/delta:
+    get:
+      summary: Delta shard manifest.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: tenant_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /v1/shards/{tenant_id}/coverage:
+    get:
+      summary: Shard coverage report.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: tenant_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /v1/tenants/{tenant_id}/keys:
+    delete:
+      summary: Cryptographic forget — destroy per-tenant DEKs and supersede shards.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: tenant_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '202': { description: Accepted (asynchronous) }
+        '204': { description: No content }
+  /v1/models/catalog:
+    get:
+      summary: SLM model catalog (Bonsai-1.7B builds, eviction config).
+      responses:
+        '200': { description: OK }
+  /v1/audit-logs:
+    get:
+      summary: Audit log list (legacy path; identical to /v1/admin/audit).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: query
+          name: action
+          schema: { type: array, items: { type: string } }
+        - in: query
+          name: resource_type
+          schema: { type: string }
+        - in: query
+          name: source_id
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: page_size
+          schema: { type: integer }
+        - in: query
+          name: page_token
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /v1/audit-logs/{id}:
+    get:
+      summary: Get a single audit log entry.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AuditLog' } } } }
+        '404': { description: Not found }
+  /v1/admin/audit:
+    get:
+      summary: Admin audit log search/filter (Phase 8 / Task 13).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: query
+          name: action
+          schema: { type: array, items: { type: string } }
+        - in: query
+          name: source_id
+          schema: { type: string }
+        - in: query
+          name: resource_id
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: page_size
+          schema: { type: integer }
+        - in: query
+          name: page_token
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /v1/admin/audit/{id}:
+    get:
+      summary: Admin audit log lookup by id.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '404': { description: Not found }
+  /v1/admin/sources:
+    post:
+      summary: Connect a new data source.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ActorHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConnectRequest' }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
+    get:
+      summary: List sources for the current tenant.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200': { description: OK }
+  /v1/admin/sources/{id}:
+    get:
+      summary: Fetch a source.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '404': { description: Not found }
+    patch:
+      summary: Update a source.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses:
+        '200': { description: OK }
+    delete:
+      summary: Disconnect a source.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: No content }
+  /v1/admin/sources/{id}/health:
+    get:
+      summary: Connector health for a single source.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /v1/admin/sources/{id}/progress:
+    get:
+      summary: Per-namespace sync progress for a source (Phase 8 / Task 14).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SyncProgressResponse' } } } }
+  /v1/admin/dashboard:
+    get:
+      summary: Connector / pipeline / retrieval health summary (Phase 8 / Task 19).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DashboardResponse' } } } }
+  /v1/admin/dlq:
+    get:
+      summary: List dead-letter messages.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/DLQEntry' } } } } }
+  /v1/admin/dlq/{id}:
+    get:
+      summary: Get a single DLQ entry.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /v1/admin/dlq/{id}/replay:
+    post:
+      summary: Replay a DLQ entry into the main ingest topic.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '202': { description: Accepted }
+        '409': { description: Max retries exceeded }
+  /v1/admin/reindex:
+    post:
+      summary: Trigger a tenant-/source-/namespace-scoped reindex (Phase 8 / Task 7).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ActorHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReindexRequest' }
+      responses:
+        '202': { description: Accepted }
+  /v1/admin/policy/drafts:
+    post:
+      summary: Create a policy draft.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' }, { $ref: '#/components/parameters/ActorHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '201': { description: Created } }
+    get:
+      summary: List policy drafts.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/policy/drafts/{id}:
+    get:
+      summary: Get a policy draft.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+  /v1/admin/policy/drafts/{id}/promote:
+    post:
+      summary: Promote a draft to the active policy.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+  /v1/admin/policy/drafts/{id}/reject:
+    post:
+      summary: Reject a draft.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+  /v1/admin/policy/simulate:
+    post:
+      summary: Simulate a policy change against the current corpus.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: OK } }
+  /v1/admin/policy/simulate/diff:
+    post:
+      summary: Simulate a data-flow diff for a proposed policy.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: OK } }
+  /v1/admin/policy/conflicts:
+    post:
+      summary: Detect conflicts between draft + active policies.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: OK } }
+  /v1/admin/tenants/{tenant_id}:
+    delete:
+      summary: Admin tenant deletion (forget orchestrator).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ActorHeader'
+        - in: path
+          name: tenant_id
+          required: true
+          schema: { type: string }
+      responses:
+        '202': { description: Accepted }
