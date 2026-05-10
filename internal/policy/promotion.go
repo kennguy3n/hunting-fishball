@@ -53,6 +53,12 @@ type PromotionConfig struct {
 	Drafts    *DraftRepository
 	LiveStore LiveStore
 	Audit     AuditWriter
+	// Versions, when non-nil, records every promote/reject as a
+	// row in policy_versions inside the same transaction so the
+	// admin portal's history endpoint can list and rollback to
+	// any past snapshot. Nil for backwards compatibility — the
+	// promoter still works without history wiring.
+	Versions *PolicyVersionRepository
 }
 
 // Promoter coordinates the four-step draft → live transition:
@@ -145,7 +151,23 @@ func (p *Promoter) PromoteDraft(ctx context.Context, tenantID, draftID, actorID 
 		// without this the row would commit on the repository's
 		// default handle and leave the feed claiming a promotion
 		// that never happened.
-		return p.cfg.Audit.CreateInTx(ctx, tx, log)
+		if err := p.cfg.Audit.CreateInTx(ctx, tx, log); err != nil {
+			return err
+		}
+		if p.cfg.Versions != nil {
+			v := &PolicyVersion{
+				TenantID:  tenantID,
+				ChannelID: d.ChannelID,
+				DraftID:   draftID,
+				Action:    string(audit.ActionPolicyPromoted),
+				ActorID:   actorID,
+				Snapshot:  d.Payload,
+			}
+			if err := p.cfg.Versions.Insert(ctx, tx, v); err != nil {
+				return fmt.Errorf("policy: insert version: %w", err)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -188,7 +210,23 @@ func (p *Promoter) RejectDraft(ctx context.Context, tenantID, draftID, actorID, 
 		// Same transactional-outbox guarantee as PromoteDraft —
 		// the rejection audit row commits with the MarkRejected
 		// state flip or rolls back with it.
-		return p.cfg.Audit.CreateInTx(ctx, tx, log)
+		if err := p.cfg.Audit.CreateInTx(ctx, tx, log); err != nil {
+			return err
+		}
+		if p.cfg.Versions != nil {
+			v := &PolicyVersion{
+				TenantID:  tenantID,
+				ChannelID: updated.ChannelID,
+				DraftID:   draftID,
+				Action:    string(audit.ActionPolicyRejected),
+				ActorID:   actorID,
+				Snapshot:  updated.Payload,
+			}
+			if err := p.cfg.Versions.Insert(ctx, tx, v); err != nil {
+				return fmt.Errorf("policy: insert version: %w", err)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
