@@ -30,8 +30,20 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
+	// Blank-imports register each connector in the global registry via
+	// init(). Order is alphabetical to keep diffs minimal.
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/notion"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 	doclingv1 "github.com/kennguy3n/hunting-fishball/proto/docling/v1"

@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -47,9 +48,27 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/pipeline"
 	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/retrieval"
+	"github.com/kennguy3n/hunting-fishball/internal/shard"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 	embeddingv1 "github.com/kennguy3n/hunting-fishball/proto/embedding/v1"
 	memoryv1 "github.com/kennguy3n/hunting-fishball/proto/memory/v1"
+
+	// Phase 7 connector blank-imports — the registry's init()
+	// hooks register each implementation under the global registry
+	// so admin source-management can mint Connection objects from
+	// the connector name alone.
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/notion"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
 )
 
 func main() {
@@ -77,12 +96,33 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
 	}
+	// Phase 8 Task 18: configurable Postgres pool sizes. Defaults are
+	// chosen for the per-tenant write rate observed in the Phase 1
+	// load tests; callers tune via env in capacity-test runs.
+	if sqlDB, derr := db.DB(); derr == nil {
+		maxOpen := 32
+		if v, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_PG_MAX_OPEN")); v > 0 {
+			maxOpen = v
+		}
+		maxIdle := 16
+		if v, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_PG_MAX_IDLE")); v > 0 {
+			maxIdle = v
+		}
+		sqlDB.SetMaxOpenConns(maxOpen)
+		sqlDB.SetMaxIdleConns(maxIdle)
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	}
 
 	auditRepo := audit.NewRepository(db)
 
+	qdrantPool := 32
+	if v, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_QDRANT_POOL_SIZE")); v > 0 {
+		qdrantPool = v
+	}
 	qdrant, err := storage.NewQdrantClient(storage.QdrantConfig{
-		BaseURL:    qdrantURL,
-		VectorSize: vectorSize,
+		BaseURL:                 qdrantURL,
+		VectorSize:              vectorSize,
+		PoolMaxIdleConnsPerHost: qdrantPool,
 	})
 	if err != nil {
 		return fmt.Errorf("qdrant: %w", err)
@@ -130,6 +170,11 @@ func run() error {
 		opts, perr := redis.ParseURL(redisURL)
 		if perr != nil {
 			return fmt.Errorf("redis url: %w", perr)
+		}
+		// Phase 8 Task 18: configurable connection pool size for the
+		// Redis-backed semantic cache + FalkorDB adapter.
+		if v, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_REDIS_POOL_SIZE")); v > 0 {
+			opts.PoolSize = v
 		}
 		rc := redis.NewClient(opts)
 		handlerCfg.Cache, err = storage.NewSemanticCache(storage.SemanticCacheConfig{
@@ -226,6 +271,21 @@ func run() error {
 		return fmt.Errorf("simulator handler: %w", err)
 	}
 	simHandler.Register(api)
+
+	// Phase 5 server-side: shard sync API. The handler exposes
+	// `GET /v1/shards/:tenant_id`, `GET /v1/shards/:tenant_id/delta`,
+	// and (when a Forget orchestrator is wired)
+	// `DELETE /v1/tenants/:tenant_id/keys`. The actual sweepers (Qdrant,
+	// FalkorDB, Tantivy, Redis, Postgres) are tier-specific and live
+	// under cmd/ingest's wiring; the API binary only needs the read
+	// path to be live.
+	shardRepo := shard.NewRepository(db)
+	shardHandlerCfg := shard.HandlerConfig{Repo: shardRepo}
+	shardHandler, err := shard.NewHandler(shardHandlerCfg)
+	if err != nil {
+		return fmt.Errorf("shard handler: %w", err)
+	}
+	shardHandler.Register(api)
 
 	srv := &http.Server{Addr: listenAddr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)

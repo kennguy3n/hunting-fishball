@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
@@ -230,6 +231,11 @@ type RetrievePolicy struct {
 type RetrieveResponse struct {
 	Hits   []RetrieveHit  `json:"hits"`
 	Policy RetrievePolicy `json:"policy"`
+	// TraceID echoes the OpenTelemetry trace_id of the retrieval
+	// span so clients can correlate slow requests with backend
+	// traces. Empty when no tracer is active. See
+	// docs/ARCHITECTURE.md §4.1.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 func (h *Handler) retrieve(c *gin.Context) {
@@ -373,6 +379,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 		hit.PrivacyStrip = BuildPrivacyStrip(m, snapshot)
 		resp.Hits = append(resp.Hits, hit)
 	}
+	resp.TraceID = observability.TraceID(c.Request.Context())
 
 	// Cache the merged + reranked + filtered response. Errors are
 	// swallowed — failing to write a cache entry must not fail the
@@ -471,6 +478,11 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 // errgroup.WithContext, applying a per-backend deadline. Returns the
 // per-stream []*Match list and the list of degraded sources.
 func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveRequest, vec []float32, topK int) ([][]*Match, []string) {
+	ctx, fanSpan := observability.StartSpan(ctx, "retrieval.fanout",
+		observability.AttrTenantID.String(tenantID),
+	)
+	defer fanSpan.End()
+
 	g, gctx := errgroup.WithContext(ctx)
 
 	var (
@@ -498,11 +510,18 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 		g.Go(func() error {
 			ctx, cancel := deadlineCtx()
 			defer cancel()
+			ctx, span := observability.StartSpan(ctx, "retrieval.vector",
+				observability.AttrBackend.String(SourceVector),
+			)
+			defer span.End()
+			start := time.Now()
 			hits, err := h.cfg.VectorStore.Search(ctx, tenantID, vec, storage.SearchOpts{
 				Limit:  topK,
 				Filter: buildFilter(req),
 			})
+			span.SetAttributes(observability.AttrLatencyMs.Int64(time.Since(start).Milliseconds()))
 			if err != nil {
+				observability.RecordError(span, err)
 				markDegraded(SourceVector)
 
 				return nil
@@ -513,6 +532,7 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 				m.Rank = i + 1
 				out = append(out, m)
 			}
+			span.SetAttributes(observability.AttrHitCount.Int(len(out)))
 			push(out)
 
 			return nil
@@ -522,12 +542,20 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 		g.Go(func() error {
 			ctx, cancel := deadlineCtx()
 			defer cancel()
+			ctx, span := observability.StartSpan(ctx, "retrieval.bm25",
+				observability.AttrBackend.String(SourceBM25),
+			)
+			defer span.End()
+			start := time.Now()
 			hits, err := h.cfg.BM25.Search(ctx, tenantID, req.Query, topK)
+			span.SetAttributes(observability.AttrLatencyMs.Int64(time.Since(start).Milliseconds()))
 			if err != nil {
+				observability.RecordError(span, err)
 				markDegraded(SourceBM25)
 
 				return nil
 			}
+			span.SetAttributes(observability.AttrHitCount.Int(len(hits)))
 			for i, m := range hits {
 				if m.Source == "" {
 					m.Source = SourceBM25
@@ -545,12 +573,20 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 		g.Go(func() error {
 			ctx, cancel := deadlineCtx()
 			defer cancel()
+			ctx, span := observability.StartSpan(ctx, "retrieval.graph",
+				observability.AttrBackend.String(SourceGraph),
+			)
+			defer span.End()
+			start := time.Now()
 			hits, err := h.cfg.Graph.Traverse(ctx, tenantID, req.Query, topK)
+			span.SetAttributes(observability.AttrLatencyMs.Int64(time.Since(start).Milliseconds()))
 			if err != nil {
+				observability.RecordError(span, err)
 				markDegraded(SourceGraph)
 
 				return nil
 			}
+			span.SetAttributes(observability.AttrHitCount.Int(len(hits)))
 			for i, m := range hits {
 				if m.Source == "" {
 					m.Source = SourceGraph
@@ -568,12 +604,20 @@ func (h *Handler) fanOut(ctx context.Context, tenantID string, req RetrieveReque
 		g.Go(func() error {
 			ctx, cancel := deadlineCtx()
 			defer cancel()
+			ctx, span := observability.StartSpan(ctx, "retrieval.memory",
+				observability.AttrBackend.String(SourceMemory),
+			)
+			defer span.End()
+			start := time.Now()
 			hits, err := h.cfg.Memory.Search(ctx, tenantID, req.Query, topK)
+			span.SetAttributes(observability.AttrLatencyMs.Int64(time.Since(start).Milliseconds()))
 			if err != nil {
+				observability.RecordError(span, err)
 				markDegraded(SourceMemory)
 
 				return nil
 			}
+			span.SetAttributes(observability.AttrHitCount.Int(len(hits)))
 			for i, m := range hits {
 				if m.Source == "" {
 					m.Source = SourceMemory

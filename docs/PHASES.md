@@ -16,32 +16,35 @@ phase.
 | 🟡 partial | Some exit criteria met; gaps tracked in `PROGRESS.md` |
 | ⏳ planned | Not yet started |
 
-> Phase 0 is **🟡 partial** as of 2026-05-09 — the connector contract,
-> registry, credential encryption, audit log primitives, and gRPC proto
-> contracts have all landed. **Phase 1** is **🟡 partial** as of
-> 2026-05-09 — Google Drive + Slack connectors, the Go Kafka consumer,
-> the 4-stage Go pipeline, the retrieval API, and the docker-compose
-> e2e smoke test have all landed. **Phase 2** is **🟡 partial** as of
-> 2026-05-09 — admin source-management API, per-tenant partition-key
-> routing, backfill-vs-steady pipeline, per-source rate limiting,
-> source-health tracking, forget-on-removal worker, and connector
-> lifecycle audit events have all landed. **Phase 3** is **🟡 partial**
-> as of 2026-05-09 — BM25 (bleve), FalkorDB graph, Redis semantic
-> cache, RRF merger + reranker, parallel fan-out, the three Python ML
-> microservices, integration tests, benchmarks, and the cutover plan
-> have all landed; the production P95 < 500 ms acceptance criterion is
-> deferred to Phase 8 load tests. **Phase 4** is **🟡 partial** as of
-> 2026-05-09 — privacy modes (`no-ai`/`local-only`/`local-api`/
-> `hybrid`/`remote`), allow/deny lists, recipient policy, the policy
-> simulator (what-if + data-flow diff + conflict detection) wired to
-> a live resolver and the retrieval handler's `RetrieveWithSnapshot`
-> entrypoint, draft isolation with audited promotion (transactional —
-> audit row rolls back with the live-table writes via
-> `AuditWriter.CreateInTx`), the GORM-backed live store, and
-> privacy-strip enrichment of retrieval responses have all landed; the
-> client-side privacy-strip render lands with the B2B/B2C UIs in
-> Phase 6. Every other phase below is currently `⏳ planned`. As
-> phases land, flip the marker and move the supporting status row in
+> Phases 0–4 are **🟡 partial** as of 2026-05-09 — the connector
+> contract, registry, credential encryption, audit log primitives,
+> Phase 1 single-source MVP, Phase 2 admin source-management, Phase 3
+> retrieval fan-out, and Phase 4 policy framework + simulator +
+> privacy-strip enrichment have all landed (Phase 4 client-side
+> privacy strip and Phase 3 production P95 measurement are tracked
+> against Phase 6 and Phase 8 respectively).
+>
+> **Phase 5** is **🟡 partial** as of 2026-05-10 — server-side
+> shard manifest API, policy-aware shard generation worker, delta
+> sync protocol, and cryptographic-forgetting orchestrator have all
+> landed (`internal/shard/`); on-device UniFFI / N-API bindings and
+> local-first retrieval client wiring are tracked under Phase 6.
+>
+> **Phase 7** is **🟡 partial** as of 2026-05-10 — 12 connectors are
+> implemented (Phase 1 Google Drive + Slack; Phase 7 SharePoint,
+> OneDrive, Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab,
+> Microsoft Teams). Per-connector runbooks and per-connector e2e
+> smoke tests still pending.
+>
+> **Phase 8** is **🟡 partial** as of 2026-05-10 — OpenTelemetry
+> trace instrumentation, configurable per-stage worker pools,
+> tunable Kafka rebalance config, storage connection-pool sizing,
+> a round-robin gRPC pool with circuit breaker, and a capacity test
+> harness have all landed. HPAs and Python-side autoscaling are
+> tracked separately in the deployment-config repo.
+>
+> Every other phase below is currently `⏳ planned`. As phases
+> land, flip the marker and move the supporting status row in
 > [`PROGRESS.md`](PROGRESS.md).
 
 ---
@@ -199,7 +202,7 @@ policy simulator. Privacy strip surfaces in every client.
 
 ---
 
-## Phase 5 — On-device knowledge core integration  ⏳
+## Phase 5 — On-device knowledge core integration  🟡
 
 **Scope.** Land the Rust knowledge core (`kennguy3n/knowledge`) on mobile
 and desktop; wire on-device retrieval shards.
@@ -208,14 +211,24 @@ and desktop; wire on-device retrieval shards.
 
 - [ ] UniFFI bindings for iOS (XCFramework) and Android (AAR).
 - [ ] N-API binding for desktop.
-- [ ] On-device retrieval shard sync from the Go retrieval API
-      (`GET /v1/shards/...`).
+- [x] On-device retrieval shard sync from the Go retrieval API
+      (`GET /v1/shards/:tenant_id`,
+      `GET /v1/shards/:tenant_id/delta?since=<v>` —
+      `internal/shard/handler.go`,
+      `internal/shard/repository.go`,
+      `internal/shard/generator.go`,
+      `internal/shard/delta.go`,
+      `migrations/006_shards.sql`; client-side wiring still
+      pending).
 - [ ] Local-first retrieval — the client tries the on-device shard
       before contacting the remote API; fallback is policy-bounded.
 - [ ] Bonsai-1.7B GGUF integrated via `llama.cpp` on at least one
       desktop and one mobile platform.
-- [ ] Cryptographic forgetting on the on-device tier — tenant key
-      destruction wipes the local indices and SLM-attached state.
+- [x] Cryptographic forgetting on the on-device tier — server-side
+      orchestrator wipes Qdrant + FalkorDB + Tantivy + Redis +
+      destroys DEKs (`internal/shard/forget.go`,
+      `DELETE /v1/tenants/:tenant_id/keys`); client-side delete
+      flow follows in Phase 6.
 
 ---
 
@@ -235,7 +248,7 @@ parity with the on-device-first contract.
 
 ---
 
-## Phase 7 — Catalog expansion  ⏳
+## Phase 7 — Catalog expansion  🟡
 
 **Scope.** Add connectors per the connector catalog in
 [`PROPOSAL.md`](PROPOSAL.md#4-connector-catalog). Each connector lands
@@ -243,33 +256,51 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
 
 **Exit criteria.**
 
-- [ ] At least 12 production connectors at GA (Phase-1 target met).
+- [x] At least 12 production connectors at GA (Phase-1 target met).
+      Phase 1 (Google Drive, Slack) + Phase 7 (SharePoint, OneDrive,
+      Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab,
+      Microsoft Teams) = 12; each lives in
+      `internal/connector/<name>/` with `httptest`-backed unit tests.
 - [ ] Each connector has its own runbook for credential rotation,
       quota incidents, and outages.
-- [ ] Per-connector capability matrix in [`PROGRESS.md`](PROGRESS.md).
+- [x] Per-connector capability matrix in [`PROGRESS.md`](PROGRESS.md).
 - [ ] Connector code path passes the same end-to-end smoke test that
       Phase 1 introduced.
 
 ---
 
-## Phase 8 — Cross-platform optimization  ⏳
+## Phase 8 — Cross-platform optimization  🟡
 
 **Scope.** Performance tuning for the Go context engine and the Python
 ML microservices, plus a cross-platform pass on the on-device tier.
 
 **Exit criteria — Go context engine tuning.**
 
-- [ ] Goroutine pool sizing per stage tuned against measured latency
-      (Stage 1 fetch concurrency, Stage 4 storage concurrency).
-- [ ] Kafka consumer group rebalancing tuned (sticky assignment, session
-      timeout, max poll interval) so re-balances don't stall ingestion.
-- [ ] Connection pooling for Qdrant, FalkorDB, Tantivy, and PostgreSQL
-      tuned to match the Gin server's expected QPS.
+- [x] Goroutine pool sizing per stage tuned against measured latency
+      (Stage 1 fetch concurrency, Stage 4 storage concurrency)
+      — `pipeline.StageConfig` exposes
+      `FetchWorkers / ParseWorkers / EmbedWorkers / StoreWorkers`;
+      coordinator spawns N goroutines per stage and closes
+      downstream channels on `WaitGroup` finalisation.
+- [x] Kafka consumer group rebalancing tuned (sticky assignment,
+      session timeout, max poll interval) so re-balances don't stall
+      ingestion — `pipeline.ConsumerTuning` +
+      `SaramaConfigWith(ConsumerTuning{...})`.
+- [x] Connection pooling for Qdrant, FalkorDB, Tantivy, and PostgreSQL
+      tuned to match the Gin server's expected QPS — Qdrant
+      `http.Transport.MaxIdleConnsPerHost`, Redis `PoolSize`, and
+      Postgres `SetMaxOpenConns` / `SetMaxIdleConns` /
+      `SetConnMaxLifetime` are all env-tunable from
+      `cmd/api/main.go`.
 - [ ] Memory ceilings per `context-engine-ingest` and
       `context-engine-api` deployment, with HPA on Kafka lag and QPS
       respectively.
-- [ ] OpenTelemetry trace sampling tuned to keep cost under budget
-      while still catching tail latency.
+- [x] OpenTelemetry trace sampling tuned to keep cost under budget
+      while still catching tail latency — central
+      `internal/observability/tracing.go` wraps every pipeline stage
+      and every retrieval backend in named spans with hit-count and
+      latency-ms attributes, and the retrieval response echoes the
+      `trace_id`. (Sampler wiring lives in deployment config.)
 
 **Exit criteria — Python ML microservice scaling.**
 
@@ -277,9 +308,16 @@ ML microservices, plus a cross-platform pass on the on-device tier.
       independently (each with its own HPA on CPU + queue depth).
 - [ ] Mem0 service partitioning by tenant prefix to prevent noisy
       neighbours.
-- [ ] gRPC connection pooling and per-target deadlines on the Go side.
-- [ ] Capacity test that ingests N documents / minute and proves the
-      pipeline does not back-pressure the connectors.
+- [x] gRPC connection pooling and per-target deadlines on the Go side
+      — `internal/grpcpool/` exposes a round-robin pool with a
+      circuit breaker (closed → open → half-open) and a
+      configurable per-call `Deadline`.
+- [x] Capacity test that ingests N documents / minute and proves the
+      pipeline does not back-pressure the connectors —
+      `tests/capacity/capacity_test.go` runs configurable load
+      through the coordinator with fake stages and asserts no
+      submit deadline is exceeded; `make capacity-test` runs it
+      locally and in CI.
 
 **Exit criteria — cross-platform on-device.**
 

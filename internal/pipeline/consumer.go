@@ -78,17 +78,59 @@ func (c *ConsumerConfig) defaults() {
 	}
 }
 
+// ConsumerTuning configures the sarama session/heartbeat/rebalance
+// knobs the Phase 8 capacity work needs to expose to ops.
+//
+// Defaults are conservative — long enough to absorb a slow GC pause
+// without dropping a partition, short enough that a real broker
+// outage rebalances within ~30s. Override per-cluster via the env
+// variables CONTEXT_ENGINE_KAFKA_SESSION_TIMEOUT,
+// CONTEXT_ENGINE_KAFKA_MAX_POLL_INTERVAL,
+// CONTEXT_ENGINE_KAFKA_REBALANCE_STRATEGY.
+type ConsumerTuning struct {
+	SessionTimeout    time.Duration `json:"session_timeout"`
+	MaxPollInterval   time.Duration `json:"max_poll_interval"`
+	RebalanceStrategy string        `json:"rebalance_strategy"`
+}
+
+func (t *ConsumerTuning) defaults() {
+	if t.SessionTimeout == 0 {
+		t.SessionTimeout = 30 * time.Second
+	}
+	if t.MaxPollInterval == 0 {
+		t.MaxPollInterval = 5 * time.Minute
+	}
+	if t.RebalanceStrategy == "" {
+		t.RebalanceStrategy = "sticky"
+	}
+}
+
 // SaramaConfig returns a sarama.Config with the sticky partition
 // assignment + manual offset commit semantics this consumer expects.
 // Exposed so callers can override before passing the consumer config.
 func SaramaConfig() *sarama.Config {
+	return SaramaConfigWith(ConsumerTuning{})
+}
+
+// SaramaConfigWith builds a sarama.Config and applies the tuning
+// overrides from the supplied ConsumerTuning. Empty fields fall back
+// to ConsumerTuning.defaults().
+func SaramaConfigWith(t ConsumerTuning) *sarama.Config {
+	t.defaults()
 	cfg := sarama.NewConfig()
 	cfg.Version = sarama.V3_5_0_0
 	cfg.Consumer.Offsets.Initial = sarama.OffsetOldest
 	cfg.Consumer.Offsets.AutoCommit.Enable = false
-	cfg.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{
-		sarama.NewBalanceStrategySticky(),
+	switch t.RebalanceStrategy {
+	case "range":
+		cfg.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRange()}
+	case "roundrobin":
+		cfg.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRoundRobin()}
+	default: // "sticky" or unrecognised → sticky for ordering
+		cfg.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategySticky()}
 	}
+	cfg.Consumer.Group.Session.Timeout = t.SessionTimeout
+	cfg.Consumer.MaxProcessingTime = t.MaxPollInterval
 	cfg.Consumer.Return.Errors = true
 	cfg.Producer.Return.Successes = true
 	cfg.Producer.RequiredAcks = sarama.WaitForAll

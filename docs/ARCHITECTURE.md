@@ -461,7 +461,18 @@ hunting-fishball/
 │   │   │                      # interfaces (DeltaSyncer / WebhookReceiver /
 │   │   │                      # Provisioner), process-global registry
 │   │   ├── googledrive/       # Google Drive connector (Phase 1)
-│   │   └── slack/             # Slack connector + Events API (Phase 1)
+│   │   ├── slack/             # Slack connector + Events API (Phase 1)
+│   │   ├── sharepoint/        # SharePoint Online (Phase 7, Graph delta)
+│   │   ├── onedrive/          # OneDrive personal (Phase 7, Graph delta)
+│   │   ├── dropbox/           # Dropbox v2 (Phase 7, list_folder cursor)
+│   │   ├── box/               # Box (Phase 7, events stream)
+│   │   ├── notion/            # Notion (Phase 7, last_edited_time)
+│   │   ├── confluence/        # Confluence Cloud (Phase 7, CQL delta)
+│   │   ├── jira/              # Jira Cloud (Phase 7, JQL + webhooks)
+│   │   ├── github/            # GitHub issues / PRs (Phase 7, webhooks)
+│   │   ├── gitlab/            # GitLab issues (Phase 7, webhooks)
+│   │   └── teams/             # Microsoft Teams (Phase 7, Graph delta +
+│   │                          # change notifications)
 │   ├── credential/            # AES-256-GCM envelope encryption for
 │   │                          # connector credentials
 │   ├── audit/                 # AuditLog model, repository (transactional
@@ -507,11 +518,26 @@ hunting-fishball/
 │   │                          # snapshot resolver (policy_snapshot.go)
 │   │                          # + Phase 4 privacy strip enrichment
 │   │                          # (privacy_strip.go)
-│   └── storage/               # Qdrant + Postgres storage clients
-│                              # (Phase 1) + BM25 (tantivy.go),
-│                              # FalkorDB (falkordb.go), Redis
-│                              # semantic cache (redis_cache.go)
-│                              # (Phase 3)
+│   ├── storage/               # Qdrant + Postgres storage clients
+│   │                          # (Phase 1) + BM25 (tantivy.go),
+│   │                          # FalkorDB (falkordb.go), Redis
+│   │                          # semantic cache (redis_cache.go)
+│   │                          # (Phase 3)
+│   ├── shard/                 # Phase 5: shard manifest API
+│   │                          # (handler.go, repository.go),
+│   │                          # generation worker (generator.go),
+│   │                          # delta protocol (delta.go),
+│   │                          # cryptographic-forgetting orchestrator
+│   │                          # (forget.go)
+│   ├── observability/         # Phase 8: OpenTelemetry tracing
+│   │                          # helper + attribute-key constants
+│   │                          # (tracing.go); used by the pipeline
+│   │                          # coordinator and the retrieval
+│   │                          # fan-out
+│   └── grpcpool/              # Phase 8: round-robin gRPC connection
+│                              # pool with per-call deadline +
+│                              # circuit breaker (closed → open →
+│                              # half-open) for the Python sidecars
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
@@ -530,14 +556,20 @@ hunting-fishball/
 │   ├── 004_policy.sql         # Phase 4 tenant_policies +
 │   │                          # channel_policies + policy_acl_rules
 │   │                          # + recipient_policies tables
-│   └── 005_policy_drafts.sql  # Phase 4 policy_drafts table
-│                              # (JSONB payload + status FSM)
+│   ├── 005_policy_drafts.sql  # Phase 4 policy_drafts table
+│   │                          # (JSONB payload + status FSM)
+│   └── 006_shards.sql         # Phase 5 shards table (manifest +
+│                              # version + chunk_count + status)
 ├── tests/
 │   ├── e2e/                   # docker-compose smoke test
 │   │                          # (build tag: //go:build e2e)
 │   ├── integration/           # Go ↔ Python gRPC integration tests
 │   │                          # (build tag: //go:build integration)
-│   └── benchmark/             # pipeline + retrieval benchmarks
+│   ├── benchmark/             # pipeline + retrieval benchmarks
+│   └── capacity/              # Phase 8 capacity test
+│                              # (`make capacity-test`,
+│                              # CAPACITY_DOCS_PER_MIN +
+│                              # CAPACITY_DURATION env tunables)
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES /
 │                              # PROGRESS / CUTOVER
 ├── docker-compose.yml         # local dev: Postgres / Redis / Kafka /
@@ -759,3 +791,119 @@ hunting-fishball/
   serve time from the live snapshot rather than cached, so a
   policy change between cache write and read does not surface a
   stale disclosure.
+
+### Tech choices added in Phase 5
+
+- **Shard manifest API:** `internal/shard/handler.go` mounts
+  `GET /v1/shards/:tenant_id` (full manifest list) and
+  `GET /v1/shards/:tenant_id/delta?since=<v>` (incremental delta)
+  against `internal/shard/repository.go`, a GORM-backed metadata
+  store. The repository columns mirror the on-device shard contract
+  (`tenant_id`, `user_id`, `channel_id`, `privacy_mode`,
+  `shard_version`, `chunks_count`, `status`,
+  `created_at`/`updated_at`) so a client can resume sync after a
+  network interruption from the last seen `shard_version`.
+- **Shard generation worker:** `internal/shard/generator.go` runs
+  inside `cmd/ingest/main.go` as an optional Stage 4 fan-out hook
+  triggered by a `shard.requested` Kafka event. It calls
+  `policy.PolicyResolver.Resolve` for the requested
+  (tenant, user, channel, privacy_mode) tuple before reading from
+  the storage plane, so the produced shard is policy-bounded by
+  construction — privacy-mode + ACL + recipient gates run before
+  the chunk IDs and embeddings hit the manifest.
+- **Delta sync protocol:** `internal/shard/delta.go` diffs two
+  shard versions into add/remove operations and emits stable JSON
+  the client can apply offline. Versions are monotonic per
+  (tenant_id, user_id, channel_id, privacy_mode) so concurrent
+  generations on the server don't observe ABA.
+- **Cryptographic-forgetting orchestrator:**
+  `internal/shard/forget.go` extends the Phase 2
+  `internal/admin/forget_worker.go` pattern to the full tenant
+  delete workflow described in §5: mark `pending_deletion` →
+  drain the pipeline → drop Qdrant collections, FalkorDB graphs,
+  Tantivy directories, and Redis keys → destroy the per-tenant
+  DEKs in the credential store → mark `deleted`.
+  `cmd/api/main.go` mounts `DELETE /v1/tenants/:tenant_id/keys`
+  as the trigger.
+
+### Tech choices added in Phase 7
+
+- **Connector skeleton:** Each new connector (`internal/connector/<name>/`)
+  follows the Phase 1 pattern — stdlib `net/http`, a small
+  `Connection` struct implementing `connector.Connection`, an
+  iterator-style `DocumentIterator` for paginated listing, and an
+  `init()` side-effect that calls
+  `connector.RegisterSourceConnector`. Tests use
+  `httptest.NewServer` against handcrafted JSON fixtures.
+- **Microsoft Graph (SharePoint, OneDrive, Teams):** Bearer token
+  auth on every request; delta tokens captured from the
+  `@odata.deltaLink` query parameter; pagination follows
+  `@odata.nextLink`. Teams encodes its hierarchical
+  Team→Channel→Messages structure as `team_id/channel_id` in the
+  `Namespace.ID` so the same iterator can serve list and fetch.
+- **Atlassian (Confluence, Jira):** Basic auth with email + API
+  token. Jira additionally implements `WebhookReceiver` for the
+  Atlassian webhook payload (issue created / updated / deleted).
+- **Dropbox / Box:** Bearer token auth; `list_folder/continue`
+  cursor for Dropbox delta and the `events` stream
+  (`next_stream_position`) for Box.
+- **Notion:** Notion REST API with `last_edited_time` filter for
+  delta and bearer-token auth.
+- **GitHub / GitLab:** REST API with personal-access-token auth
+  (`Authorization: token <pat>` for GitHub, `PRIVATE-TOKEN: <pat>`
+  for GitLab). Both implement `WebhookReceiver` for issue events.
+- **Connector registration wiring:** `cmd/api/main.go` and
+  `cmd/ingest/main.go` blank-import every connector so the
+  `init()` registry hooks fire on startup. The order is
+  alphabetical to keep diffs minimal across phases.
+
+### Tech choices added in Phase 8
+
+- **OpenTelemetry tracing (`internal/observability/`):** A small
+  package centralises the tracer name (`context-engine`), the
+  `StartSpan(ctx, name, attrs...)` helper, the
+  `RecordError(span, err)` shim, and the attribute keys reused
+  across packages (`tenant_id`, `document_id`, `backend`,
+  `hit_count`, `latency_ms`, `stage`). The pipeline coordinator
+  wraps each retry of each stage in `pipeline.<stage>` and the
+  retrieval fan-out wraps each backend call in
+  `retrieval.<backend>` with `latency_ms` + `hit_count`
+  attributes. `RetrieveResponse.TraceID` echoes the trace id so
+  clients can correlate slow requests with backend traces.
+- **Per-stage worker pools (`pipeline.StageConfig`):** The
+  coordinator spawns N goroutines per stage that share the
+  upstream channel, with the downstream channel closed via a
+  `sync.WaitGroup` after all stage workers exit — so adding
+  parallelism does not race the close-on-shutdown invariant.
+  Defaults are 1-per-stage to preserve pre-Phase-8 ordering;
+  callers crank up `EmbedWorkers` first since the embedder is
+  normally the long-pole.
+- **Sticky Kafka rebalance (`pipeline.ConsumerTuning` +
+  `SaramaConfigWith`):** Sticky assignment keeps a partition glued
+  to one consumer across restarts, preserving per-source ordering
+  through a rebalance. `SessionTimeout` and `MaxPollInterval` are
+  exposed for tuning against the upstream broker config.
+- **Storage connection pools:** Qdrant uses a sized
+  `http.Transport` (`MaxIdleConnsPerHost` configurable via
+  `CONTEXT_ENGINE_QDRANT_POOL_SIZE`); the Redis client used by the
+  semantic cache and the FalkorDB adapter takes
+  `CONTEXT_ENGINE_REDIS_POOL_SIZE`; Postgres goes through GORM's
+  `*sql.DB` with `SetMaxOpenConns` / `SetMaxIdleConns` /
+  `SetConnMaxLifetime` driven by `CONTEXT_ENGINE_PG_MAX_OPEN` and
+  `CONTEXT_ENGINE_PG_MAX_IDLE`.
+- **gRPC connection pool (`internal/grpcpool/`):** Round-robin
+  selection across `Size` long-lived `*grpc.ClientConn`s with a
+  per-call deadline and a circuit breaker. The breaker tracks
+  consecutive failures; once `Threshold` is hit it transitions to
+  open, refuses calls for `OpenFor`, then half-opens — a single
+  trial call decides closed (success) or open (failure). Callers
+  Borrow / Release; the helper does not wrap the generated stubs
+  because every sidecar has a different proto surface.
+- **Capacity test harness (`tests/capacity/`):** A Go test that
+  submits N documents/minute through the coordinator with fake
+  fetch / parse / embed / store stages, asserts every Submit
+  completes within a per-call deadline (no producer
+  back-pressure), and logs P50 / P95 / P99 submit latency.
+  `make capacity-test` runs it in the standard test profile;
+  `CAPACITY_DOCS_PER_MIN` and `CAPACITY_DURATION` configure the
+  load shape for soak runs.

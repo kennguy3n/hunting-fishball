@@ -1,6 +1,7 @@
 # hunting-fishball
 
-> **Status.** Phases 0, 1, 2, 3, and 4 are in `main` (all 🟡 partial — see
+> **Status.** Phases 0, 1, 2, 3, 4, 5 (server-side), 7, and 8 are in
+> `main` (all 🟡 partial — see
 > [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live checklist).
 > Phase 1 brings the Google Drive + Slack connectors, the Go Kafka
 > consumer, the 4-stage pipeline (fetch / parse / embed / store), the
@@ -24,9 +25,26 @@
 > isolation with audited promotion (`policy.promoted` /
 > `policy.rejected` audit events), and structured `privacy_strip`
 > enrichment on every retrieval row. The admin HTTP surface lives at
-> `/v1/admin/policy/{drafts,simulate,conflicts}`. The product thesis
-> lives in [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target
-> system design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> `/v1/admin/policy/{drafts,simulate,conflicts}`.
+> **Phase 5 (server-side)** brings the on-device shard contract:
+> the manifest API (`GET /v1/shards/:tenant_id`), the policy-aware
+> generation worker, the delta sync protocol
+> (`GET /v1/shards/:tenant_id/delta?since=<v>`), and the
+> cryptographic-forgetting orchestrator
+> (`DELETE /v1/tenants/:tenant_id/keys`) — all in
+> `internal/shard/`.
+> **Phase 7** brings ten new connectors (SharePoint, OneDrive,
+> Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab, Microsoft
+> Teams), bringing the production catalog to 12.
+> **Phase 8** brings OpenTelemetry tracing
+> (`internal/observability/`), per-stage worker pools
+> (`pipeline.StageConfig`), tunable Kafka rebalance, storage
+> connection-pool sizing, a round-robin gRPC pool with circuit
+> breaker (`internal/grpcpool/`), and a capacity test harness
+> (`tests/capacity/`, `make capacity-test`).
+> The product thesis lives in
+> [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target system
+> design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 `hunting-fishball` is a privacy-preserving **knowledge & context platform** that
 unifies an organization's documents, chat history, files, and SaaS records into
@@ -215,10 +233,13 @@ make test-integration
 # 7. (Phase 3) Run the throughput / latency benchmarks
 make bench
 
-# 8. Generate proto stubs (only needed when proto files change)
+# 8. (Phase 8) Run the capacity harness against the in-process pipeline
+make capacity-test  # tunable via CAPACITY_DOCS_PER_MIN / CAPACITY_DURATION
+
+# 9. Generate proto stubs (only needed when proto files change)
 make proto-gen
 
-# 9. Build the binaries
+# 10. Build the binaries
 make build          # produces ./bin/context-engine-ingest and ./bin/context-engine-api
 ```
 
@@ -232,6 +253,7 @@ Other targets:
 | `make services-test`    | Run Python unit tests for `services/{docling,embedding,memory}` |
 | `make services-protos`  | Regenerate Python gRPC stubs into `services/_proto/`        |
 | `make bench`            | Run pipeline + retrieval benchmarks in `tests/benchmark/`   |
+| `make capacity-test`    | Run Phase 8 capacity harness in `tests/capacity/` (configurable via `CAPACITY_DOCS_PER_MIN` / `CAPACITY_DURATION`) |
 | `make build`            | Build both binaries into `./bin/`                           |
 | `make vet`              | `go vet ./...`                                              |
 | `make fmt`              | `gofmt -s -w` over hand-written sources                     |
@@ -271,9 +293,20 @@ hunting-fishball/
 │   └── api/                   # context-engine-api    binary entry point
 ├── internal/
 │   ├── connector/             # SourceConnector interface, optional
-│   │   │                      # interfaces, process-global registry
-│   │   ├── googledrive/       # Google Drive connector (Phase 1)
-│   │   └── slack/             # Slack connector + Events API (Phase 1)
+│   │   │                      # interfaces, process-global registry.
+│   │   │                      # 12 connectors at Phase 7:
+│   │   ├── googledrive/       # Google Drive (Phase 1)
+│   │   ├── slack/             # Slack + Events API (Phase 1)
+│   │   ├── sharepoint/        # SharePoint Online (Phase 7)
+│   │   ├── onedrive/          # OneDrive personal (Phase 7)
+│   │   ├── dropbox/           # Dropbox v2 (Phase 7)
+│   │   ├── box/               # Box (Phase 7)
+│   │   ├── notion/            # Notion (Phase 7)
+│   │   ├── confluence/        # Confluence Cloud (Phase 7)
+│   │   ├── jira/              # Jira Cloud (Phase 7)
+│   │   ├── github/            # GitHub (Phase 7)
+│   │   ├── gitlab/            # GitLab (Phase 7)
+│   │   └── teams/             # Microsoft Teams (Phase 7)
 │   ├── credential/            # AES-256-GCM envelope encryption
 │   ├── audit/                 # audit_logs model + repository + Kafka
 │   │                          # outbox + Gin handler
@@ -303,8 +336,15 @@ hunting-fishball/
 │   │                          # (policy_snapshot.go) + Phase 4
 │   │                          # privacy strip enrichment
 │   │                          # (privacy_strip.go)
-│   └── storage/               # Qdrant + Postgres + BM25 (bleve) +
-│                              # FalkorDB + Redis semantic cache
+│   ├── storage/               # Qdrant + Postgres + BM25 (bleve) +
+│   │                          # FalkorDB + Redis semantic cache
+│   ├── shard/                 # Phase 5: shard manifest API,
+│   │                          # generation worker, delta sync,
+│   │                          # cryptographic-forgetting orchestrator
+│   ├── observability/         # Phase 8: OpenTelemetry tracing helper
+│   │                          # used by the pipeline + retrieval
+│   └── grpcpool/              # Phase 8: round-robin gRPC pool with
+│                              # circuit breaker for the Python sidecars
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
@@ -324,7 +364,8 @@ hunting-fishball/
 │   │                          # ACL-deny via LiveResolverGORM, draft
 │   │                          # promote/reject, simulator endpoints)
 │   ├── integration/           # Go ↔ Python gRPC tests (//go:build integration)
-│   └── benchmark/             # pipeline + retrieval benchmarks
+│   ├── benchmark/             # pipeline + retrieval benchmarks
+│   └── capacity/              # Phase 8 capacity test (`make capacity-test`)
 ├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS
 │                              # / CUTOVER
 ├── docker-compose.yml         # Postgres / Redis / Kafka / Qdrant /

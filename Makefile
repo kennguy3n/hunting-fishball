@@ -54,6 +54,10 @@ test-integration:
 bench:
 	$(GO) test -bench . -benchmem -benchtime=3s ./tests/benchmark/...
 
+.PHONY: capacity-test
+capacity-test:
+	$(GO) test -count=1 -timeout 10m -v ./tests/capacity/...
+
 .PHONY: services-test
 services-test:
 	@echo "Running unit tests for Python ML services..."
