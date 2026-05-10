@@ -227,6 +227,34 @@ func TestGinLoggerMiddleware_HandlesMalformedTraceparent(t *testing.T) {
 	}
 }
 
+func TestGinLoggerMiddleware_MalformedTraceparentFallsBackToXTraceID(t *testing.T) {
+	// Regression: a malformed `traceparent` header used to short-
+	// circuit the X-Trace-Id fallback because the `else if` chain
+	// only fired when traceparent was *empty*. With both headers
+	// set, the request lost trace correlation entirely. The
+	// middleware now always tries X-Trace-Id when parseTraceID
+	// returns "".
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(observability.GinLoggerMiddleware("api"))
+	var captured string
+	r.GET("/", func(c *gin.Context) {
+		captured = observability.TraceIDFromContext(c.Request.Context())
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("traceparent", "garbage")
+	req.Header.Set("X-Trace-Id", "trace-fallback-2")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if captured != "trace-fallback-2" {
+		t.Errorf("trace_id=%q want trace-fallback-2 (malformed traceparent must fall through to X-Trace-Id)", captured)
+	}
+}
+
 func TestSetDefault_RestoresPrevious(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer

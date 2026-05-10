@@ -192,11 +192,19 @@ func GinLoggerMiddleware(component string) gin.HandlerFunc {
 			ctx = WithTenantID(ctx, h)
 		}
 
-		// Trace ID: prefer the W3C `traceparent` header.
+		// Trace ID: prefer the W3C `traceparent` header. A malformed
+		// traceparent (parseTraceID returns "") falls through to the
+		// X-Trace-Id fallback so a single bad header on the request
+		// doesn't strip trace correlation entirely.
+		var traceID string
 		if tp := c.GetHeader("traceparent"); tp != "" {
-			ctx = WithTraceID(ctx, parseTraceID(tp))
-		} else if h := c.GetHeader("X-Trace-Id"); h != "" {
-			ctx = WithTraceID(ctx, h)
+			traceID = parseTraceID(tp)
+		}
+		if traceID == "" {
+			traceID = c.GetHeader("X-Trace-Id")
+		}
+		if traceID != "" {
+			ctx = WithTraceID(ctx, traceID)
 		}
 
 		c.Request = c.Request.WithContext(ctx)
