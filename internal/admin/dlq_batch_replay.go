@@ -38,12 +38,12 @@ const MaxReplayBatchSize = 100
 
 // DLQBatchReplayRequest is the JSON body of POST /v1/admin/dlq/replay.
 type DLQBatchReplayRequest struct {
-	SourceID       string `json:"source_id,omitempty"`
-	MinCreatedAt   string `json:"min_created_at,omitempty"`
-	MaxCreatedAt   string `json:"max_created_at,omitempty"`
-	ErrorContains  string `json:"error_contains,omitempty"`
-	Force          bool   `json:"force,omitempty"`
-	IncludeReplayed bool  `json:"include_replayed,omitempty"`
+	SourceID        string `json:"source_id,omitempty"`
+	MinCreatedAt    string `json:"min_created_at,omitempty"`
+	MaxCreatedAt    string `json:"max_created_at,omitempty"`
+	ErrorContains   string `json:"error_contains,omitempty"`
+	Force           bool   `json:"force,omitempty"`
+	IncludeReplayed bool   `json:"include_replayed,omitempty"`
 }
 
 // DLQReplayOutcome reports the per-row result of a batch replay.
