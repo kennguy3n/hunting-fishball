@@ -157,6 +157,68 @@ func TestPolicyHistory_List_HappyPath(t *testing.T) {
 	}
 }
 
+// TestPolicyHistory_List_NoPhantomCursorOnExactBoundary regression-tests
+// the fix for the fetch-N+1 pagination bug: when the dataset size is
+// an exact multiple of `limit`, the handler must NOT emit a
+// next_cursor (the next page would be empty). Mirrors the same
+// guarantee dlq_handler.go enforces.
+func TestPolicyHistory_List_NoPhantomCursorOnExactBoundary(t *testing.T) {
+	t.Parallel()
+	r, versions, drafts, _ := newHistoryRig(t, "tenant-a")
+	const total = 5
+	for i := 0; i < total; i++ {
+		seedPromotedDraft(t, drafts, versions, "tenant-a", policy.PrivacyModeRemote)
+	}
+	// limit == total → exactly one page, no more rows. NextCursor
+	// must be empty.
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/admin/policy/history?limit=5", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp admin.PolicyHistoryListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Items) != total {
+		t.Fatalf("expected %d items, got %d", total, len(resp.Items))
+	}
+	if resp.NextCursor != "" {
+		t.Fatalf("expected empty next_cursor on exact-boundary page, got %q", resp.NextCursor)
+	}
+}
+
+// TestPolicyHistory_List_NextCursorWhenOverflow verifies the inverse:
+// when more rows exist than the caller's limit, NextCursor must be
+// emitted and point at the last row of the trimmed page.
+func TestPolicyHistory_List_NextCursorWhenOverflow(t *testing.T) {
+	t.Parallel()
+	r, versions, drafts, _ := newHistoryRig(t, "tenant-a")
+	const total = 6
+	for i := 0; i < total; i++ {
+		seedPromotedDraft(t, drafts, versions, "tenant-a", policy.PrivacyModeRemote)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/admin/policy/history?limit=5", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp admin.PolicyHistoryListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Items) != 5 {
+		t.Fatalf("expected page of 5, got %d", len(resp.Items))
+	}
+	if resp.NextCursor == "" {
+		t.Fatalf("expected next_cursor when more pages exist")
+	}
+	if resp.NextCursor != resp.Items[len(resp.Items)-1].ID {
+		t.Fatalf("next_cursor must be id of last item: got %q want %q",
+			resp.NextCursor, resp.Items[len(resp.Items)-1].ID)
+	}
+}
+
 func TestPolicyHistory_List_TenantIsolation(t *testing.T) {
 	t.Parallel()
 	r, versions, drafts, _ := newHistoryRig(t, "tenant-a")

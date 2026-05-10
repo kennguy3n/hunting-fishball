@@ -96,8 +96,14 @@ func (r *PolicyVersionRepository) List(ctx context.Context, f VersionListFilter)
 	if f.Limit <= 0 {
 		f.Limit = 50
 	}
-	if f.Limit > 200 {
-		f.Limit = 200
+	// The cap accommodates the handler's fetch-N+1 pagination
+	// pattern: callers ask for `userLimit+1` so they can detect
+	// whether more pages exist without an extra COUNT(*). The
+	// admin pagination ceiling is 200, so the repo cap is 201 to
+	// pass that extra row through. See policy_history_handler.go
+	// list() for the consumer.
+	if f.Limit > 201 {
+		f.Limit = 201
 	}
 	q := r.db.WithContext(ctx).
 		Where("tenant_id = ?", f.TenantID).

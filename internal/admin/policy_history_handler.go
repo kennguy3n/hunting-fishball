@@ -93,19 +93,29 @@ func (h *PolicyHistoryHandler) list(c *gin.Context) {
 		limit = DefaultPageLimit
 	}
 	cursor := firstNonEmpty(c.Query("cursor"), c.Query("page_token"))
+	// Fetch-N+1 pagination: ask the repo for one more row than the
+	// caller's limit so we can detect whether another page exists
+	// without an extra COUNT(*). When the repo returns >limit rows
+	// we trim to limit and emit next_cursor; when it returns ≤limit
+	// rows the result is the final page and next_cursor stays empty.
+	// Mirrors the pattern used by source_repository.go:129-141 and
+	// dlq_handler.go:124-140 — fixes the prior bug where a dataset
+	// whose size was an exact multiple of `limit` emitted a phantom
+	// cursor that resolved to an empty next page.
 	rows, err := h.cfg.Versions.List(c.Request.Context(), policy.VersionListFilter{
 		TenantID:  tenantID,
 		ChannelID: c.Query("channel_id"),
 		Cursor:    cursor,
-		Limit:     limit,
+		Limit:     limit + 1,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	resp := PolicyHistoryListResponse{Items: rows}
-	if len(rows) == limit && limit > 0 {
-		resp.NextCursor = rows[len(rows)-1].ID
+	if len(rows) > limit {
+		resp.Items = rows[:limit]
+		resp.NextCursor = resp.Items[len(resp.Items)-1].ID
 	}
 	c.JSON(http.StatusOK, resp)
 }
