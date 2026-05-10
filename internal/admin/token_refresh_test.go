@@ -153,6 +153,50 @@ func TestTokenRefreshWorker_RefreshesWithinWindow(t *testing.T) {
 	}
 }
 
+// TestTokenRefreshWorker_DoesNotMutateCallerConfig regression-tests
+// FLAG_pr-review-job-b10ff0a8305841f98c7f1ed361d5ee8b_0007: a Tick
+// must not alias-mutate the caller's nested credentials map. Even
+// though the current refresh loop replaces the credentials sub-map
+// wholesale (so the bug was latent), cloneConfig must deep-copy
+// nested maps and slices to defend against future call sites that
+// would write into the nested map directly.
+func TestTokenRefreshWorker_DoesNotMutateCallerConfig(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 10, 14, 0, 0, 0, time.UTC)
+	src := newOAuthSource("01HQYK0000000000000000DEEP", "tenant-a", "google-drive",
+		now.Add(2*time.Minute), "refresh-token-orig")
+	// Hold our own pointer to the nested credentials map so we can
+	// detect aliased mutation from inside the worker. The worker
+	// receives src by value via the lister, so any mutation to the
+	// nested map would surface here.
+	originalCreds := src.Config["credentials"].(map[string]any)
+	originalAccess, _ := originalCreds["access_token"].(string)
+	originalRefresh, _ := originalCreds["refresh_token"].(string)
+
+	store := newFakeListUpdater([]admin.Source{src})
+	ref := &fakeRefresher{result: admin.RefreshResult{
+		AccessToken:  "new-access-deep",
+		RefreshToken: "new-refresh-deep",
+		ExpiresAt:    now.Add(time.Hour),
+	}}
+	w, _ := admin.NewTokenRefreshWorker(admin.TokenRefreshWorkerConfig{
+		Lister: store, Updater: store, Refresher: ref, Audit: &fakeAudit{},
+		Now: func() time.Time { return now },
+	})
+	if _, err := w.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	// The original nested map must still hold the pre-refresh
+	// values. If cloneConfig was shallow, the worker's mutations
+	// would surface here.
+	if got, _ := originalCreds["access_token"].(string); got != originalAccess {
+		t.Fatalf("original credentials map was mutated; access_token=%q want %q", got, originalAccess)
+	}
+	if got, _ := originalCreds["refresh_token"].(string); got != originalRefresh {
+		t.Fatalf("original credentials map was mutated; refresh_token=%q want %q", got, originalRefresh)
+	}
+}
+
 func TestTokenRefreshWorker_SkipsOutsideWindow(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 10, 14, 0, 0, 0, time.UTC)

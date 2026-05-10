@@ -122,7 +122,18 @@ func NewIdempotencyMiddleware(cfg IdempotencyMiddlewareConfig) (gin.HandlerFunc,
 		w.flush()
 
 		if w.status >= 200 && w.status < 300 {
-			payload := encodeCachedResponse(w.status, c.Writer.Header().Get("Content-Type"), w.body.Bytes())
+			// Content-Type read order (FLAG_pr-review-job_0005):
+			// the handler always sets Content-Type before its
+			// first Write call (c.JSON / c.Render set it via
+			// render.WriteContentType before serializing the
+			// body). The capturing writer embeds the underlying
+			// ResponseWriter without overriding Header(), so
+			// w.Header() returns the same map that Gin populated.
+			// We snapshot from the writer's Header() rather than
+			// c.Writer (which is identical here, but reading the
+			// concrete writer makes the intent obvious to readers
+			// scanning for stale-header-after-commit bugs).
+			payload := encodeCachedResponse(w.status, w.Header().Get("Content-Type"), w.body.Bytes())
 			_ = cfg.Store.SetNX(c.Request.Context(), cacheKey, payload, ttl).Err()
 		}
 	}, nil

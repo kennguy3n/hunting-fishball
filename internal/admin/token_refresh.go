@@ -356,12 +356,66 @@ func credentialsFromConfig(cfg JSONMap) map[string]any {
 	return nil
 }
 
+// cloneConfig returns a deep copy of cfg so the worker can mutate
+// the cloned blob (rotating access_token, refresh_token,
+// expires_at, credentials_rotated_at) without aliasing the
+// in-memory representation of the source's config that callers
+// may still hold a pointer to.
+//
+// Addresses FLAG_pr-review-job-b10ff0a8305841f98c7f1ed361d5ee8b_0007:
+// the previous implementation copied only the top-level keys, so
+// nested maps (notably `credentials`) and slices were shared
+// between the clone and the original. The current call sites
+// happen to substitute the credentials sub-map wholesale, which
+// hid the bug, but a future caller that did
+// `newCfg["credentials"].(map[string]any)["access_token"] = ...`
+// would have silently mutated s.Config in place. The deep clone
+// closes that footgun.
 func cloneConfig(cfg JSONMap) JSONMap {
 	out := make(JSONMap, len(cfg))
 	for k, v := range cfg {
-		out[k] = v
+		out[k] = deepCopyJSONValue(v)
 	}
 	return out
+}
+
+// deepCopyJSONValue recursively clones a JSON-shaped value. Only
+// the shapes that survive a JSONB round-trip are honoured; pointer
+// types, channels, funcs, etc. should never appear in cfg blobs and
+// would be a programming error if they did.
+func deepCopyJSONValue(v any) any {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case JSONMap:
+		out := make(JSONMap, len(t))
+		for k, vv := range t {
+			out[k] = deepCopyJSONValue(vv)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, vv := range t {
+			out[k] = deepCopyJSONValue(vv)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, vv := range t {
+			out[i] = deepCopyJSONValue(vv)
+		}
+		return out
+	case []byte:
+		// JSON-encoded bytes are sometimes round-tripped as
+		// raw byte slices; copy so the clone owns its buffer.
+		out := make([]byte, len(t))
+		copy(out, t)
+		return out
+	default:
+		// Strings, numbers, bools — value types with no
+		// aliasing to worry about.
+		return t
+	}
 }
 
 func stringField(m map[string]any, key string) string {
