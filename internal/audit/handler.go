@@ -125,16 +125,22 @@ func (h *Handler) list(c *gin.Context) {
 		}
 		filter.Until = t
 	}
-	if ps := c.Query("page_size"); ps != "" {
+	// Round-5 Task 3: accept the canonical `limit` / `cursor`
+	// query parameters in addition to the existing `page_size` /
+	// `page_token` aliases used by the audit handler since Phase 2.
+	if ps := firstNonEmpty(c.Query("limit"), c.Query("page_size")); ps != "" {
 		n, err := strconv.Atoi(ps)
 		if err != nil || n < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "page_size must be a positive integer"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
 
 			return
 		}
+		if n > maxPageLimit {
+			n = maxPageLimit
+		}
 		filter.PageSize = n
 	}
-	filter.PageToken = c.Query("page_token")
+	filter.PageToken = firstNonEmpty(c.Query("cursor"), c.Query("page_token"))
 
 	res, err := h.reader.List(c.Request.Context(), filter)
 	if err != nil {
@@ -146,6 +152,7 @@ func (h *Handler) list(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"items":           res.Items,
 		"next_page_token": res.NextPageToken,
+		"next_cursor":     res.NextPageToken,
 	})
 }
 
@@ -178,6 +185,23 @@ func (h *Handler) get(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, log)
+}
+
+// maxPageLimit caps the audit list page size so a misbehaving caller
+// can't request an unbounded scan. Mirrors the cap in
+// internal/admin/pagination.go.
+const maxPageLimit = 200
+
+// firstNonEmpty returns the first non-empty string in args. Used so
+// the handler can accept Round-5 canonical names (`cursor`, `limit`)
+// alongside the original (`page_token`, `page_size`).
+func firstNonEmpty(args ...string) string {
+	for _, a := range args {
+		if a != "" {
+			return a
+		}
+	}
+	return ""
 }
 
 // tenantIDFromContext pulls the authenticated tenant ID out of the Gin

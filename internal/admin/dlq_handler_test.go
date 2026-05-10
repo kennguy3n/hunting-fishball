@@ -344,6 +344,40 @@ func TestDLQHandler_List_BadPageSize(t *testing.T) {
 	}
 }
 
+// TestDLQHandler_List_CursorAlias asserts cursor / limit aliases
+// are forwarded as PageToken / PageSize and `next_cursor` is
+// emitted alongside the legacy `next_page_token`.
+func TestDLQHandler_List_CursorAlias(t *testing.T) {
+	t.Parallel()
+	store := newMemDLQ()
+	// Seed 3 messages so a limit=1 query has a cursor to emit.
+	store.seed(
+		&pipeline.DLQMessage{ID: "01HZRYDLQID00000000000000A", TenantID: "tenant-a", OriginalTopic: "ingest"},
+		&pipeline.DLQMessage{ID: "01HZRYDLQID00000000000000B", TenantID: "tenant-a", OriginalTopic: "ingest"},
+		&pipeline.DLQMessage{ID: "01HZRYDLQID00000000000000C", TenantID: "tenant-a", OriginalTopic: "ingest"},
+	)
+	r := setupDLQRouter(t, store, &recordAudit{}, store, "tenant-a", "user-1")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/admin/dlq?limit=1", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Items         []map[string]any `json:"items"`
+		NextPageToken string           `json:"next_page_token"`
+		NextCursor    string           `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v body: %s", err, w.Body.String())
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(body.Items))
+	}
+	if body.NextCursor == "" || body.NextCursor != body.NextPageToken {
+		t.Fatalf("next_cursor / next_page_token must mirror: %+v", body)
+	}
+}
+
 func TestDLQHandler_List_RequiresTenant(t *testing.T) {
 	t.Parallel()
 	store := newMemDLQ()

@@ -97,10 +97,10 @@ func TestSourceRepository_List_TenantOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 rows for tenant-a, got %d", len(got))
+	if len(got.Items) != 2 {
+		t.Fatalf("expected 2 rows for tenant-a, got %d", len(got.Items))
 	}
-	for _, s := range got {
+	for _, s := range got.Items {
 		if s.TenantID != "tenant-a" {
 			t.Fatalf("tenant leak: %+v", s)
 		}

@@ -97,16 +97,22 @@ func (h *DLQHandler) list(c *gin.Context) {
 	filter := pipeline.DLQListFilter{
 		TenantID:      tenantID,
 		OriginalTopic: c.Query("original_topic"),
-		PageToken:     c.Query("page_token"),
+		// Round-5 Task 3 alias: `cursor` is the canonical name; we
+		// keep `page_token` working for backwards compatibility.
+		PageToken: firstNonEmpty(c.Query("cursor"), c.Query("page_token")),
 	}
 	if v := c.Query("include_replayed"); v != "" {
 		filter.IncludeReplayed = v == "true" || v == "1"
 	}
-	if v := c.Query("page_size"); v != "" {
-		n, err := strconv.Atoi(v)
+	rawPageSize := firstNonEmpty(c.Query("limit"), c.Query("page_size"))
+	if rawPageSize != "" {
+		n, err := strconv.Atoi(rawPageSize)
 		if err != nil || n < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "page_size must be a positive integer"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
 			return
+		}
+		if n > MaxPageLimit {
+			n = MaxPageLimit
 		}
 		filter.PageSize = n
 	}
@@ -135,6 +141,7 @@ func (h *DLQHandler) list(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"items":           rows,
 		"next_page_token": nextToken,
+		"next_cursor":     nextToken,
 	})
 }
 

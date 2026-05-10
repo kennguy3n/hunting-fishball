@@ -118,6 +118,64 @@ func TestHandler_List_TenantIsolation_RejectsQueryParam(t *testing.T) {
 	}
 }
 
+// TestHandler_List_CursorAlias asserts the Round-5 Task 3 alias
+// behaviour: clients can pass `cursor` / `limit` and the handler
+// forwards them as PageToken / PageSize, with a `next_cursor` key
+// emitted alongside the legacy `next_page_token`.
+func TestHandler_List_CursorAlias(t *testing.T) {
+	t.Parallel()
+	var seenSize int
+	var seenToken string
+	h := newHandlerWithReader(fakeReader{
+		listFn: func(_ context.Context, f ListFilter) (*ListResult, error) {
+			seenSize = f.PageSize
+			seenToken = f.PageToken
+			return &ListResult{Items: []AuditLog{{ID: "01H", TenantID: "tenant-a"}}, NextPageToken: "next-tok"}, nil
+		},
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/audit-logs?cursor=cur-x&limit=42", nil)
+	router(h, "tenant-a").ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	if seenSize != 42 || seenToken != "cur-x" {
+		t.Fatalf("forwarded: size=%d token=%s", seenSize, seenToken)
+	}
+	var body struct {
+		NextCursor    string `json:"next_cursor"`
+		NextPageToken string `json:"next_page_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if body.NextCursor != "next-tok" || body.NextPageToken != "next-tok" {
+		t.Fatalf("body: %+v", body)
+	}
+}
+
+// TestHandler_List_LimitClamp asserts the limit ceiling matches
+// internal/admin/pagination.go's MaxPageLimit.
+func TestHandler_List_LimitClamp(t *testing.T) {
+	t.Parallel()
+	var seenSize int
+	h := newHandlerWithReader(fakeReader{
+		listFn: func(_ context.Context, f ListFilter) (*ListResult, error) {
+			seenSize = f.PageSize
+			return &ListResult{}, nil
+		},
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/audit-logs?limit=999", nil)
+	router(h, "tenant-a").ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d", w.Code)
+	}
+	if seenSize != 200 {
+		t.Fatalf("limit must be clamped to 200, got %d", seenSize)
+	}
+}
+
 func TestHandler_List_BadSinceParam(t *testing.T) {
 	t.Parallel()
 

@@ -193,8 +193,8 @@ func TestHandler_Connect_ValidationError(t *testing.T) {
 		t.Fatalf("status: %d", w.Code)
 	}
 	rows, _ := repo.List(context.Background(), admin.ListFilter{TenantID: "tenant-a"})
-	if len(rows) != 0 {
-		t.Fatalf("validation failure must not persist: rows=%d", len(rows))
+	if len(rows.Items) != 0 {
+		t.Fatalf("validation failure must not persist: rows=%d", len(rows.Items))
 	}
 }
 
