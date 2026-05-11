@@ -38,6 +38,14 @@ type SyncProgressResponse struct {
 	TenantID string             `json:"tenant_id"`
 	SourceID string             `json:"source_id"`
 	Items    []SyncProgressItem `json:"items"`
+	// PercentComplete — Round-13 Task 6. Source-level
+	// completion percentage weighted by per-namespace discovered
+	// doc count. Computed as
+	//   sum(processed_i) / sum(discovered_i) * 100
+	// clamped to [0, 100]. Returns 0 when no namespaces have
+	// discovered anything yet so consumers don't have to guess
+	// at undefined values.
+	PercentComplete float64 `json:"percent_complete"`
 }
 
 func (h *SyncProgressHandler) get(c *gin.Context) {
@@ -58,6 +66,7 @@ func (h *SyncProgressHandler) get(c *gin.Context) {
 		return
 	}
 	resp := SyncProgressResponse{TenantID: tid, SourceID: id}
+	var totalDiscovered, totalProcessed int64
 	for _, r := range rows {
 		percent := 0.0
 		if r.Discovered > 0 {
@@ -73,6 +82,15 @@ func (h *SyncProgressHandler) get(c *gin.Context) {
 			Failed:      r.Failed,
 			PercentDone: percent,
 		})
+		totalDiscovered += r.Discovered
+		totalProcessed += r.Processed
+	}
+	// Round-13 Task 6: weighted source-level percent_complete.
+	if totalDiscovered > 0 {
+		resp.PercentComplete = float64(totalProcessed) / float64(totalDiscovered) * 100
+		if resp.PercentComplete > 100 {
+			resp.PercentComplete = 100
+		}
 	}
 	c.JSON(http.StatusOK, resp)
 }

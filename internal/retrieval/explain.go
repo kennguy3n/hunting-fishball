@@ -149,3 +149,31 @@ func BuildExplain(m *Match, preRerankScore float32) *RetrievalExplain {
 	}
 	return exp
 }
+
+// computeBackendContributions — Round-13 Task 7.
+//
+// Counts how many top-K hits each backend contributed by walking
+// Match.Sources for every presented match. A single match that
+// surfaced on multiple backends increments the count for each.
+// The returned map is keyed by the same SourceVector / SourceBM25
+// / SourceGraph / SourceMemory constants the backends use.
+// Returns nil when matches is empty so the JSON omitempty drops
+// the field rather than emitting {}.
+func computeBackendContributions(matches []*Match) map[string]int {
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make(map[string]int, 4)
+	for _, m := range matches {
+		if m == nil {
+			continue
+		}
+		for _, s := range m.Sources {
+			out[s]++
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}

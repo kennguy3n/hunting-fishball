@@ -275,3 +275,85 @@ func TestExplain_NotRequestedReturnsNil(t *testing.T) {
 		t.Fatalf("admin without explain:true should not see explain block")
 	}
 }
+
+// TestExplain_BackendContributions_Round13 — Round-13 Task 7.
+//
+// With vector + BM25 backends both contributing and explain=true,
+// the response top-level must include a backend_contributions map
+// reporting how many top-K hits each backend contributed.
+func TestExplain_BackendContributions_Round13(t *testing.T) {
+t.Parallel()
+vs := &fakeVectorStore{
+hits: []storage.QdrantHit{
+{ID: "doc:b1", Score: 0.91, Payload: map[string]any{
+"tenant_id": "tenant-a", "document_id": "doc", "block_id": "b1",
+"title": "T", "text": "x", "privacy_label": "internal",
+}},
+{ID: "doc:b2", Score: 0.80, Payload: map[string]any{
+"tenant_id": "tenant-a", "document_id": "doc", "block_id": "b2",
+"title": "T2", "text": "y", "privacy_label": "internal",
+}},
+},
+}
+emb := &fakeEmbedder{vec: []float32{1, 2, 3}}
+bm := &stubBM25{matches: []*retrieval.Match{{
+ID: "doc:b1", Source: retrieval.SourceBM25, Score: 5.5, OriginalScore: 5.5, Rank: 1,
+TenantID: "tenant-a", DocumentID: "doc", BlockID: "b1",
+}}}
+h, err := retrieval.NewHandler(retrieval.HandlerConfig{VectorStore: vs, Embedder: emb, BM25: bm})
+if err != nil {
+t.Fatalf("NewHandler: %v", err)
+}
+r := newExplainRouter(t, h, "tenant-a", admin.RoleAdmin)
+w := postExplain(r, retrieval.RetrieveRequest{Query: "hi", Explain: true})
+if w.Code != http.StatusOK {
+t.Fatalf("status: %d body: %s", w.Code, w.Body.String())
+}
+var got retrieval.RetrieveResponse
+if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+t.Fatal(err)
+}
+if got.BackendContributions == nil {
+t.Fatalf("expected backend_contributions to be populated; got nil")
+}
+// Vector contributed two hits (b1 and b2); BM25 contributed
+// one (b1 merged with the vector match). The exact counts
+// depend on Match.Sources after the merge.
+if got.BackendContributions[retrieval.SourceVector] == 0 {
+t.Fatalf("expected vector contribution > 0; got %+v", got.BackendContributions)
+}
+if got.BackendContributions[retrieval.SourceBM25] == 0 {
+t.Fatalf("expected bm25 contribution > 0; got %+v", got.BackendContributions)
+}
+}
+
+// TestExplain_BackendContributions_OmittedWhenNotExplain — Round-13 Task 7.
+func TestExplain_BackendContributions_OmittedWhenNotExplain(t *testing.T) {
+t.Parallel()
+vs := &fakeVectorStore{
+hits: []storage.QdrantHit{
+{ID: "doc:b1", Score: 0.91, Payload: map[string]any{
+"tenant_id": "tenant-a", "document_id": "doc", "block_id": "b1",
+"title": "T", "text": "x", "privacy_label": "internal",
+}},
+},
+}
+emb := &fakeEmbedder{vec: []float32{1, 2, 3}}
+h, err := retrieval.NewHandler(retrieval.HandlerConfig{VectorStore: vs, Embedder: emb})
+if err != nil {
+t.Fatalf("NewHandler: %v", err)
+}
+r := newExplainRouter(t, h, "tenant-a", admin.RoleAdmin)
+// explain=false (default)
+w := postExplain(r, retrieval.RetrieveRequest{Query: "hi"})
+if w.Code != http.StatusOK {
+t.Fatalf("status: %d", w.Code)
+}
+var got retrieval.RetrieveResponse
+if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+t.Fatal(err)
+}
+if got.BackendContributions != nil {
+t.Fatalf("expected backend_contributions nil when explain=false; got %+v", got.BackendContributions)
+}
+}

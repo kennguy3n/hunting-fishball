@@ -384,6 +384,13 @@ type RetrieveResponse struct {
 	// traces. Empty when no tracer is active. See
 	// docs/ARCHITECTURE.md §4.1.
 	TraceID string `json:"trace_id,omitempty"`
+	// BackendContributions — Round-13 Task 7. Per-backend count
+	// of how many top-K hits each backend contributed after the
+	// RRF merger. Only populated when the request opted into
+	// explain mode AND the caller is authorised. Helps
+	// operators understand which backends are pulling weight
+	// for a given query class.
+	BackendContributions map[string]int `json:"backend_contributions,omitempty"`
 
 	// PreferLocal is the on-device-first hint. When true the client
 	// SHOULD serve the query from its local shard at
@@ -630,6 +637,9 @@ func (h *Handler) retrieve(c *gin.Context) {
 			hit.Explain = BuildExplain(m, preRerankByID[m.ID])
 		}
 		resp.Hits = append(resp.Hits, hit)
+	}
+	if emitExplain {
+		resp.BackendContributions = computeBackendContributions(pres.Allowed)
 	}
 
 	// Round-8 Task 16: apply operator-pinned chunks after policy
