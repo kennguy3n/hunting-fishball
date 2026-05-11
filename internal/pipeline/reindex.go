@@ -28,6 +28,10 @@ type ReindexRequest struct {
 	TenantID    string
 	SourceID    string
 	NamespaceID string
+	// DryRun, when true, enumerates the affected documents and
+	// returns a summary without emitting any reindex events.
+	// Round-6 Task 15.
+	DryRun bool
 }
 
 // Validate enforces tenant_id + source_id are present.
@@ -78,6 +82,10 @@ type ReindexResult struct {
 	DocumentsEnumerated int
 	EventsEmitted       int
 	EmitErrors          int
+	// DryRun mirrors the request flag; when true, EventsEmitted is
+	// always zero and DocumentsEnumerated reports what *would*
+	// have been emitted. Round-6 Task 15.
+	DryRun bool
 }
 
 // Reindex enumerates documents and emits one EventReindex per row.
@@ -85,7 +93,7 @@ type ReindexResult struct {
 // are counted but do not abort the run so a single Kafka hiccup
 // doesn't strand the rest of the source.
 func (r *ReindexOrchestrator) Reindex(ctx context.Context, req ReindexRequest) (ReindexResult, error) {
-	res := ReindexResult{}
+	res := ReindexResult{DryRun: req.DryRun}
 	if err := req.Validate(); err != nil {
 		return res, err
 	}
@@ -94,6 +102,9 @@ func (r *ReindexOrchestrator) Reindex(ctx context.Context, req ReindexRequest) (
 		return res, fmt.Errorf("reindex: enumerate: %w", err)
 	}
 	res.DocumentsEnumerated = len(docs)
+	if req.DryRun {
+		return res, nil
+	}
 	for _, doc := range docs {
 		if ctx.Err() != nil {
 			return res, ctx.Err()

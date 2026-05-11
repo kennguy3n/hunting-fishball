@@ -491,6 +491,94 @@ func TestFanout_CacheKey_DiffersBySkillID(t *testing.T) {
 	}
 }
 
+// TestFanout_CacheKey_DiffersByDiversity exercises the Round-6
+// regression where scopeHashFor omitted Diversity. Two requests
+// with the same query / channel / topK / skill but different
+// diversity lambdas must produce distinct scope hashes — otherwise
+// the MMR-re-ranked diverse response would be silently served from
+// (or to) a pure-relevance cache slot.
+func TestFanout_CacheKey_DiffersByDiversity(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeCache{}
+	vs := &fakeVectorStore{
+		hits: []storage.QdrantHit{{ID: "chunk-1", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}}},
+	}
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore: vs,
+		Embedder:    &fakeEmbedder{vec: []float32{1}},
+		Cache:       cache,
+	})
+	r := newRouter(t, h, "tenant-a")
+
+	w1 := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "secret", Diversity: 0})
+	if w1.Code != http.StatusOK {
+		t.Fatalf("diversity=0 status: %d", w1.Code)
+	}
+	w2 := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "secret", Diversity: 0.7})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("diversity=0.7 status: %d", w2.Code)
+	}
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if len(cache.setHashes) != 2 {
+		t.Fatalf("setHashes: %v", cache.setHashes)
+	}
+	if cache.setHashes[0] == cache.setHashes[1] {
+		t.Fatalf("scope hash must differ by Diversity; both = %q", cache.setHashes[0])
+	}
+	if len(cache.getHashes) != 2 || cache.getHashes[0] == cache.getHashes[1] {
+		t.Fatalf("Get scope hash must differ by Diversity: %v", cache.getHashes)
+	}
+}
+
+// TestFanout_CacheKey_DiffersByExperiment exercises the regression
+// where scopeHashFor omitted ExperimentName / ExperimentBucketKey.
+// Two requests with identical inputs except experiment routing must
+// land in distinct cache slots — otherwise the variant response
+// (different reranker / fan-out weights) would be served from the
+// control cache entry, contaminating A/B measurements.
+func TestFanout_CacheKey_DiffersByExperiment(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakeCache{}
+	vs := &fakeVectorStore{
+		hits: []storage.QdrantHit{{ID: "chunk-1", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}}},
+	}
+	h, _ := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore: vs,
+		Embedder:    &fakeEmbedder{vec: []float32{1}},
+		Cache:       cache,
+	})
+	r := newRouter(t, h, "tenant-a")
+
+	w1 := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "secret"})
+	if w1.Code != http.StatusOK {
+		t.Fatalf("no-experiment status: %d", w1.Code)
+	}
+	w2 := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "secret", ExperimentName: "rerank-v2"})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("experiment status: %d", w2.Code)
+	}
+	w3 := doPost(r, retrieval.RetrieveRequest{Query: "hi", TopK: 5, PrivacyMode: "secret", ExperimentName: "rerank-v2", ExperimentBucketKey: "user-42"})
+	if w3.Code != http.StatusOK {
+		t.Fatalf("bucket-key status: %d", w3.Code)
+	}
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if len(cache.setHashes) != 3 {
+		t.Fatalf("setHashes: %v", cache.setHashes)
+	}
+	if cache.setHashes[0] == cache.setHashes[1] {
+		t.Fatalf("scope hash must differ by ExperimentName; both = %q", cache.setHashes[0])
+	}
+	if cache.setHashes[1] == cache.setHashes[2] {
+		t.Fatalf("scope hash must differ by ExperimentBucketKey; both = %q", cache.setHashes[1])
+	}
+}
+
 // TestFanout_CacheHit_AppliesACL verifies the cache-hit short-circuit
 // re-applies the Phase 4 ACL gate to cached chunks. A policy change
 // landed between the cache write and read MUST drop denied chunks

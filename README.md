@@ -3,6 +3,11 @@
 > **Status.** Phases 0, 1, 2, 3, 4, 5, 6 (server-side), 7, and 8
 > are in `main` (all 🟡 partial — see
 > [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live checklist).
+> Round 6 (this PR) layers retrieval diversity (MMR), semantic
+> deduplication, per-source embedding model selection, query
+> expansion, chunk-level ACL, adaptive rate limiting, SSE
+> streaming retrieval, API versioning, pipeline retry analytics,
+> and 11 more admin surfaces on top of those phases.
 > Phase 1 brings the Google Drive + Slack connectors, the Go Kafka
 > consumer, the 4-stage pipeline (fetch / parse / embed / store), the
 > `POST /v1/retrieve` API, and a docker-compose CI smoke test.
@@ -280,6 +285,37 @@ The full set of public + admin endpoints is documented in
 - `GET /v1/admin/analytics/global` — cross-tenant super-admin
   analytics (requires super_admin role).
 - `make eval` — run eval quality gate against golden corpus.
+
+**Round 6 additions:**
+
+- `POST /v1/retrieve` `diversity: { lambda: 0.7 }` — MMR
+  diversifier on the merged result set.
+- `POST /v1/retrieve/stream` — Server-Sent-Events streaming
+  retrieval (clients render partial results as each backend
+  completes).
+- `GET /v1/admin/sources/:id/schema` — connector schema discovery.
+- `GET/PUT /v1/admin/sources/:id/embedding` — per-source embedding
+  model config.
+- `POST /v1/admin/synonyms` — manage tenant-scoped query
+  expansion synonym sets.
+- `POST/GET/DELETE /v1/admin/retrieval/experiments` — retrieval
+  A/B testing experiment CRUD.
+- `GET/POST/DELETE /v1/admin/notifications` — admin notification
+  preferences (webhook / email).
+- `GET/POST /v1/admin/connector-templates` — connector default
+  config templates per tenant.
+- `POST /v1/admin/isolation-check` — cross-tenant isolation
+  audit report.
+- `POST /v1/admin/tenants/:tenant_id/export` — full tenant data
+  export (asynchronous job).
+- `POST /v1/admin/reindex` `dry_run: true` — pipeline dry-run.
+- `GET /v1/admin/pipeline/retry-stats` — pipeline stage retry
+  analytics snapshot.
+- Pipeline backpressure gauge
+  `context_engine_pipeline_channel_depth{stage}` + alert rule in
+  `deploy/alerts/pipeline_backpressure.yaml`.
+- API versioning middleware emits `X-API-Version` on every
+  response and rejects unsupported versions with 406.
 
 ---
 

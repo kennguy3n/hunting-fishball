@@ -47,6 +47,19 @@ type StoreConfig struct {
 	// Connector names the source connector for provenance ("google_drive",
 	// "slack"). Set per-pipeline by the consumer wiring.
 	Connector string
+
+	// Deduplicator, when non-nil and Enabled(), runs a semantic
+	// dedup pass over (blocks, embeddings) before the metadata /
+	// vector writes (Round-6 Task 2). The dropped chunks emit
+	// `chunk.deduplicated` audit entries via the deduplicator's
+	// own audit sink.
+	Deduplicator *Deduplicator
+
+	// DryRun, when true, skips Stage 4 writes entirely (metadata
+	// + vector) and only logs what would have been written
+	// (Round-6 Task 15). Pipelines run with DryRun=true return
+	// without persisting anything.
+	DryRun bool
 }
 
 // Storer is the Stage 4 worker.
@@ -83,6 +96,25 @@ func (s *Storer) Store(ctx context.Context, doc *Document, blocks []Block, embed
 	}
 	if len(blocks) != len(embeddings) {
 		return fmt.Errorf("store: block / embedding count mismatch: %d vs %d", len(blocks), len(embeddings))
+	}
+
+	// Round-6 Task 2: optional semantic dedup pass before any
+	// downstream writes. The deduplicator emits its own audit
+	// entries for each suppressed chunk.
+	if s.cfg.Deduplicator != nil && s.cfg.Deduplicator.Enabled() {
+		res, err := s.cfg.Deduplicator.Apply(ctx, doc, blocks, embeddings)
+		if err != nil {
+			return fmt.Errorf("store: dedup: %w", err)
+		}
+		blocks = res.Blocks
+		embeddings = res.Embeddings
+	}
+
+	// Round-6 Task 15: dry-run mode skips the storage writes
+	// entirely. Returning here keeps the pipeline metric +
+	// OnSuccess accounting intact.
+	if s.cfg.DryRun {
+		return nil
 	}
 
 	// Make sure the per-tenant collection exists.

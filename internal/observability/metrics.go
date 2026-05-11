@@ -79,6 +79,32 @@ var (
 		},
 		[]string{"original_topic"},
 	)
+
+	// PipelineChannelDepth (Round-6 Task 9) is the current depth of
+	// each inter-stage channel in the pipeline. The coordinator
+	// records channel len after each submit so operators can spot
+	// back-pressure (channel near capacity) before it manifests as
+	// rising stage latency.
+	PipelineChannelDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "context_engine_pipeline_channel_depth",
+			Help: "Current length of each inter-stage pipeline channel.",
+		},
+		[]string{"stage"},
+	)
+
+	// PipelineRetriesTotal (Round-6 Task 19) counts retries per
+	// pipeline stage tagged with outcome=retry|exhausted|recovered.
+	// Operators alert on a high `exhausted` rate per stage; the
+	// `recovered` outcome quantifies how often transient errors
+	// resolve on retry.
+	PipelineRetriesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_pipeline_retries_total",
+			Help: "Pipeline stage retries by stage and outcome.",
+		},
+		[]string{"stage", "outcome"},
+	)
 )
 
 // Retrieval metrics.
@@ -151,6 +177,8 @@ func init() {
 		KafkaConsumerLag,
 		PipelineStageDurationSeconds,
 		DLQMessagesTotal,
+		PipelineChannelDepth,
+		PipelineRetriesTotal,
 		RetrievalBackendDurationSeconds,
 		RetrievalBackendHits,
 		TokenRefreshesTotal,
@@ -173,6 +201,8 @@ func ResetForTest() {
 	Registry.Unregister(KafkaConsumerLag)
 	Registry.Unregister(PipelineStageDurationSeconds)
 	Registry.Unregister(DLQMessagesTotal)
+	Registry.Unregister(PipelineChannelDepth)
+	Registry.Unregister(PipelineRetriesTotal)
 	Registry.Unregister(RetrievalBackendDurationSeconds)
 	Registry.Unregister(RetrievalBackendHits)
 	Registry.Unregister(TokenRefreshesTotal)
@@ -183,6 +213,8 @@ func ResetForTest() {
 	KafkaConsumerLag.Reset()
 	PipelineStageDurationSeconds.Reset()
 	DLQMessagesTotal.Reset()
+	PipelineChannelDepth.Reset()
+	PipelineRetriesTotal.Reset()
 	RetrievalBackendDurationSeconds.Reset()
 	RetrievalBackendHits.Reset()
 	TokenRefreshesTotal.Reset()
@@ -194,6 +226,8 @@ func ResetForTest() {
 		KafkaConsumerLag,
 		PipelineStageDurationSeconds,
 		DLQMessagesTotal,
+		PipelineChannelDepth,
+		PipelineRetriesTotal,
 		RetrievalBackendDurationSeconds,
 		RetrievalBackendHits,
 		TokenRefreshesTotal,

@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -87,6 +88,30 @@ type HandlerConfig struct {
 	Merger       *Merger
 	Reranker     Reranker
 	PolicyFilter *PolicyFilter
+
+	// Diversifier optionally re-orders post-rerank results to
+	// favour topical diversity (Round-6 Task 1, MMR). When nil
+	// the handler installs `*MMRDiversifier` with the default
+	// token-Jaccard similarity. Callers opt in per-request via
+	// `RetrieveRequest.Diversity`; the default lambda of 0.0
+	// keeps the legacy passthrough behaviour intact.
+	Diversifier Diversifier
+
+	// QueryExpander optionally expands the user's query with
+	// per-tenant synonyms before the BM25 / memory fan-out
+	// (Round-6 Task 4). When nil the handler skips expansion.
+	QueryExpander QueryExpander
+
+	// ChunkACL optionally enforces per-chunk ACL tags after the
+	// snapshot ACL has been applied (Round-6 Task 6). When nil
+	// the handler runs no chunk-level filter.
+	ChunkACL ChunkACLEvaluator
+
+	// ABTests is the optional retrieval A/B-testing surface
+	// (Round-6 Task 10). When nil the handler runs the control
+	// configuration on every request. The concrete type lives in
+	// ab_test.go.
+	ABTests ABTestRouter
 
 	// DefaultTopK is the default top_k when the request doesn't set
 	// one. Defaults to 10.
@@ -178,6 +203,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if cfg.PolicyResolver == nil {
 		cfg.PolicyResolver = noopPolicyResolver{}
 	}
+	if cfg.Diversifier == nil {
+		cfg.Diversifier = NewMMRDiversifier(nil)
+	}
 
 	return &Handler{cfg: cfg}, nil
 }
@@ -223,6 +251,20 @@ type RetrieveRequest struct {
 	// feature flag), populates a per-hit `explain` block exposing
 	// the raw signal scores and policy decision. Off by default.
 	Explain bool `json:"explain,omitempty"`
+
+	// Diversity is the MMR `lambda` parameter in [0, 1]. 0
+	// (default) keeps the legacy ordering, 1 maximises
+	// inter-result dissimilarity, intermediate values blend
+	// relevance with diversity. Round-6 Task 1.
+	Diversity float32 `json:"diversity,omitempty"`
+
+	// ExperimentName, when set, opts the request into a named
+	// retrieval A/B test (Round-6 Task 10). The handler resolves
+	// the experiment from the configured `ABTestStore`, computes
+	// the bucket from `ExperimentBucketKey || tenant_id`, and
+	// applies either the control or the variant retrieval config.
+	ExperimentName      string `json:"experiment_name,omitempty"`
+	ExperimentBucketKey string `json:"experiment_bucket_key,omitempty"`
 }
 
 // RetrieveHit is one entry in the response.
@@ -272,6 +314,13 @@ type RetrievePolicy struct {
 	// PrivacyMode is the channel privacy mode the request resolved
 	// to (echoed for the client UI).
 	PrivacyMode string `json:"privacy_mode,omitempty"`
+
+	// ExperimentName is set when the request was routed through
+	// an A/B test (Round-6 Task 10). Empty otherwise.
+	ExperimentName string `json:"experiment_name,omitempty"`
+	// ExperimentArm is the arm the request was routed to
+	// ("control" or "variant"). Empty when no experiment applied.
+	ExperimentArm string `json:"experiment_arm,omitempty"`
 }
 
 // RetrieveTimings reports the wall-clock duration of every stage
@@ -338,6 +387,15 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 		return
 	}
+	// Round-6 Task 10: route the request through the configured
+	// A/B test (if any) BEFORE topK is resolved so the variant's
+	// `top_k` override (when present) flows into the topK cap, the
+	// cache scope hash, and the fan-out limit. A nil result means
+	// "no experiment applied"; the original request flows through
+	// unchanged. The route result is later stamped onto
+	// `resp.Policy` so analytics can attribute the response to the
+	// arm it was served from.
+	route, req := h.resolveExperiment(tenantID, req)
 	topK := req.TopK
 	if topK == 0 {
 		topK = h.cfg.DefaultTopK
@@ -411,6 +469,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
 			resp.Policy.BlockedCount = blockedByPrivacy + blockedByACL + blockedByRecipient
+			stampExperiment(&resp, route)
 			// Cached hits carry the same PrivacyStrip enrichment as
 			// fresh hits — caching only the strip would
 			// double-count if the live policy changes between
@@ -426,7 +485,12 @@ func (h *Handler) retrieve(c *gin.Context) {
 		}
 	}
 
-	streams, degraded, backendTimings := h.fanOut(c.Request.Context(), tenantID, req, vec, topK)
+	// Round-6 Task 4: optional synonym expansion before fan-out.
+	// The expanded query is what BM25 / memory see; the embedding
+	// path stays on the original (already vectorised above).
+	fanOutReq := req
+	fanOutReq.Query = h.expandQuery(c.Request.Context(), tenantID, req.Query)
+	streams, degraded, backendTimings := h.fanOut(c.Request.Context(), tenantID, fanOutReq, vec, topK)
 
 	mergeStart := time.Now()
 	merged := h.cfg.Merger.Merge(streams...)
@@ -450,6 +514,13 @@ func (h *Handler) retrieve(c *gin.Context) {
 		return
 	}
 
+	// Round-6 Task 1: optional MMR diversification after rerank,
+	// before the policy filter so chunks rejected by ACL never
+	// influence diversity.
+	if req.Diversity > 0 && h.cfg.Diversifier != nil {
+		reranked = h.cfg.Diversifier.Diversify(c.Request.Context(), reranked, req.Diversity, 0)
+	}
+
 	pres := h.cfg.PolicyFilter.Apply(reranked, privacyMode)
 	// Phase 4: ACL + recipient gate. The snapshot's ACL drops chunks
 	// the tenant has explicitly excluded; the recipient policy gates
@@ -471,6 +542,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 		},
 		Timings: timingsFromMap(backendTimings, mergeMs, rerankMs),
 	}
+	stampExperiment(&resp, route)
 	emitExplain := req.Explain && IsExplainAuthorized(c, h.cfg.ExplainEnvEnabled)
 	for _, m := range pres.Allowed {
 		hit := hitFromMatch(m)
@@ -548,15 +620,22 @@ func (h *Handler) applyDeviceFirst(ctx context.Context, tenantID, channelID, pri
 // batch retrieve fan-out) should use RetrieveWithSnapshotCached so
 // they share the semantic cache with single-request /v1/retrieve.
 func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot) (RetrieveResponse, error) {
-	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
-	if err != nil {
-		return RetrieveResponse{}, err
-	}
 	if tenantID == "" {
 		return RetrieveResponse{}, errors.New("retrieval: tenantID is required")
 	}
 	if req.Query == "" {
 		return RetrieveResponse{}, errors.New("retrieval: query is required")
+	}
+	// Round-6 Task 10: route through the configured A/B test (if
+	// any) BEFORE topK is resolved so the variant's `top_k`
+	// override propagates into the resolver below and into the
+	// fan-out limit. The route result is stamped onto the response
+	// before return so the simulator's diff view sees which arm
+	// produced the candidate result set.
+	route, req := h.resolveExperiment(tenantID, req)
+	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
+	if err != nil {
+		return RetrieveResponse{}, err
 	}
 
 	vec, err := h.cfg.Embedder.EmbedQuery(ctx, tenantID, req.Query)
@@ -564,7 +643,12 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 		return RetrieveResponse{}, err
 	}
 
-	return h.runPipelineFromVec(ctx, tenantID, req, snapshot, vec, topK, privacyMode)
+	resp, perr := h.runPipelineFromVec(ctx, tenantID, req, snapshot, vec, topK, privacyMode)
+	if perr != nil {
+		return RetrieveResponse{}, perr
+	}
+	stampExperiment(&resp, route)
+	return resp, nil
 }
 
 // RetrieveWithSnapshotCached is the cache-aware twin of
@@ -586,15 +670,22 @@ func (h *Handler) RetrieveWithSnapshot(ctx context.Context, tenantID string, req
 // directly and bypassed the cache entirely — a documented performance
 // regression on dashboards that fan a hot query out across N panels.
 func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot) (RetrieveResponse, error) {
-	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
-	if err != nil {
-		return RetrieveResponse{}, err
-	}
 	if tenantID == "" {
 		return RetrieveResponse{}, errors.New("retrieval: tenantID is required")
 	}
 	if req.Query == "" {
 		return RetrieveResponse{}, errors.New("retrieval: query is required")
+	}
+	// Round-6 Task 10: route through the configured A/B test (if
+	// any) BEFORE topK resolution so the variant's `top_k`
+	// override flows into both the cache scope hash and the
+	// fan-out limit. The route result is stamped onto the response
+	// (cache hit OR miss path) so the batch caller's downstream
+	// analytics can attribute hits to the correct arm.
+	route, req := h.resolveExperiment(tenantID, req)
+	topK, privacyMode, err := h.resolveTopKAndPrivacy(req, snapshot)
+	if err != nil {
+		return RetrieveResponse{}, err
 	}
 
 	vec, err := h.cfg.Embedder.EmbedQuery(ctx, tenantID, req.Query)
@@ -612,6 +703,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
 			resp.Policy.BlockedCount = blockedByPrivacy + blockedByACL + blockedByRecipient
+			stampExperiment(&resp, route)
 			for i := range resp.Hits {
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
@@ -624,6 +716,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	if perr != nil {
 		return RetrieveResponse{}, perr
 	}
+	stampExperiment(&resp, route)
 	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
 		_ = h.cfg.Cache.Set(ctx, tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), h.cfg.CacheTTL)
 	}
@@ -659,9 +752,15 @@ func (h *Handler) resolveTopKAndPrivacy(req RetrieveRequest, snapshot policy.Pol
 // runPipelineFromVec is the cache-free inner pipeline shared by
 // RetrieveWithSnapshot and RetrieveWithSnapshotCached's miss path.
 // It expects the query to already be embedded and the topK /
-// privacyMode resolution to be done by the caller.
+// privacyMode resolution to be done by the caller. Synonym
+// expansion (Round-6 Task 4) is applied here so the simulator and
+// batch retrieve paths share the same expansion as the gin
+// handler — callers that already pre-expand should leave
+// `HandlerConfig.QueryExpander` nil at construction time.
 func (h *Handler) runPipelineFromVec(ctx context.Context, tenantID string, req RetrieveRequest, snapshot policy.PolicySnapshot, vec []float32, topK int, privacyMode string) (RetrieveResponse, error) {
-	streams, degraded, backendTimings := h.fanOut(ctx, tenantID, req, vec, topK)
+	fanOutReq := req
+	fanOutReq.Query = h.expandQuery(ctx, tenantID, req.Query)
+	streams, degraded, backendTimings := h.fanOut(ctx, tenantID, fanOutReq, vec, topK)
 
 	mergeStart := time.Now()
 	merged := h.cfg.Merger.Merge(streams...)
@@ -671,6 +770,10 @@ func (h *Handler) runPipelineFromVec(ctx context.Context, tenantID string, req R
 	rerankMs := time.Since(rerankStart).Milliseconds()
 	if rerr != nil {
 		return RetrieveResponse{}, rerr
+	}
+
+	if req.Diversity > 0 && h.cfg.Diversifier != nil {
+		reranked = h.cfg.Diversifier.Diversify(ctx, reranked, req.Diversity, 0)
 	}
 
 	pres := h.cfg.PolicyFilter.Apply(reranked, privacyMode)
@@ -1106,6 +1209,23 @@ func scopeHashFor(req RetrieveRequest, topK int, privacyMode string) string {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(topK))
 	_, _ = h.Write(buf[:])
+	// Diversity (Round-6 Task 1) re-ranks the result set via MMR,
+	// so two requests with the same query but different diversity
+	// lambdas MUST NOT share a cache slot — otherwise a request
+	// asking for diverse results would be served the cached pure-
+	// relevance ordering (or vice versa).
+	_, _ = h.Write([]byte("|diversity|"))
+	binary.BigEndian.PutUint32(buf[:4], math.Float32bits(req.Diversity))
+	_, _ = h.Write(buf[:4])
+	// Experiment routing (Round-6 Task 10) swaps the active
+	// retrieval config (different reranker, fan-out weights,
+	// etc.), which changes the result set. Including the
+	// experiment name and bucket key keeps control/variant
+	// responses from cross-contaminating each other's cache slot.
+	_, _ = h.Write([]byte("|experiment|"))
+	_, _ = h.Write([]byte(req.ExperimentName))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(req.ExperimentBucketKey))
 
 	return hex.EncodeToString(h.Sum(nil))
 }

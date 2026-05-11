@@ -38,7 +38,9 @@ func applyPolicySnapshot(allowed []*Match, snap PolicySnapshot, skillID string) 
 	if snap.Recipient != nil && !snap.Recipient.IsAllowed(skillID) {
 		return nil, 0, len(allowed)
 	}
-	if snap.ACL == nil || len(snap.ACL.Rules) == 0 {
+	noSourceACL := snap.ACL == nil || len(snap.ACL.Rules) == 0
+	noChunkACL := snap.ChunkACL == nil || snap.ChunkACL.Len() == 0
+	if noSourceACL && noChunkACL {
 		return allowed, 0, 0
 	}
 	out := make([]*Match, 0, len(allowed))
@@ -49,16 +51,58 @@ func applyPolicySnapshot(allowed []*Match, snap PolicySnapshot, skillID string) 
 		}
 		path, _ := matchPath(m)
 		nsID, _ := metadataString(m.Metadata, "namespace_id")
-		v := snap.ACL.Evaluate(policy.ChunkAttrs{
-			SourceID: m.SourceID, NamespaceID: nsID, Path: path,
-		})
-		if v.Allowed {
-			out = append(out, m)
-		} else {
-			blockedByACL++
+		if !noSourceACL {
+			v := snap.ACL.Evaluate(policy.ChunkAttrs{
+				SourceID: m.SourceID, NamespaceID: nsID, Path: path,
+			})
+			if !v.Allowed {
+				blockedByACL++
+				continue
+			}
 		}
+		if !noChunkACL {
+			tags := chunkTags(m)
+			if d := snap.ChunkACL.Evaluate(policy.ChunkACLAttrs{ChunkID: m.ID, Tags: tags}); d == policy.ChunkACLDecisionDeny {
+				blockedByACL++
+				continue
+			}
+		}
+		out = append(out, m)
 	}
 	return out, blockedByACL, 0
+}
+
+// chunkTags returns the chunk's per-tag set for chunk-ACL
+// evaluation. The retrieval merger surfaces tag strings under
+// `metadata["chunk_tags"]` (a []any of strings) and we also add
+// the canonical `source.<source_id>` synthetic tag so source-level
+// inheritance works without operators having to write it themselves.
+func chunkTags(m *Match) []string {
+	out := []string{}
+	if m == nil {
+		return out
+	}
+	if m.SourceID != "" {
+		out = append(out, "source."+m.SourceID)
+	}
+	if m.Metadata == nil {
+		return out
+	}
+	raw, ok := m.Metadata["chunk_tags"]
+	if !ok || raw == nil {
+		return out
+	}
+	switch v := raw.(type) {
+	case []string:
+		out = append(out, v...)
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // filterCachedByPrivacyMode re-applies the privacy-label PolicyFilter
