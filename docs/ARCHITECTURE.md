@@ -1794,6 +1794,85 @@ prefix under `migrations/rollback/`** — a reviewer who forgets
 the down-script gets caught at unit-test time, not at incident
 time.
 
+### Tech choices added in Round 9
+
+- **GORM cutover complete.** The five remaining in-memory admin
+  fakes (`NotificationStore`, `ABTestStore`,
+  `ConnectorTemplateStore`, `SynonymStore`, `ChunkQualityStore`)
+  are now Postgres-backed. Each follows the same Round-8 pattern:
+  a `*Row` struct with `TableName()`, an `AutoMigrate` call inside
+  `cmd/api/main.go`, and SQLite-backed unit tests using
+  `github.com/glebarez/sqlite` so the package test suite stays
+  hermetic. After Round 9, no admin handler has an in-memory store
+  fallback — every persisted handler is Postgres-only.
+
+- **Post-merge cross-backend dedup.** The RRF merger
+  (`internal/retrieval/merger.go`) now collapses chunks with the
+  same `chunk_id` arriving from multiple backends (vector + BM25 +
+  graph) before they reach the reranker, keeping the higher-scored
+  entry. This bounds the rerank request size to `O(distinct_chunks)`
+  instead of `O(backends × top_k)`, which matters on the long tail
+  of queries where ≥2 backends return the same blob.
+
+- **Per-stage timeouts decouple retry attempts.** The coordinator
+  now reads `CONTEXT_ENGINE_FETCH_TIMEOUT` / `_PARSE_TIMEOUT` /
+  `_EMBED_TIMEOUT` / `_STORE_TIMEOUT` and wraps each retry attempt
+  in `context.WithTimeout`. Previously the *initial* deadline was
+  shared across retries, so the second/third attempt inherited a
+  stale (near-expired) context — Round-9 makes every attempt
+  independent so a flaky sidecar burst genuinely retries instead of
+  failing on a 1-second residual deadline.
+
+- **Cache warm-on-miss with `context.WithoutCancel`.** When the
+  retrieval handler sees a cache miss and
+  `CONTEXT_ENGINE_CACHE_WARM_ON_MISS=true`, the cache write is
+  scheduled in a fire-and-forget goroutine using
+  `context.WithoutCancel(reqCtx)`. The response returns the moment
+  the result is materialised; Redis-write latency never enters
+  the user's hot path. The detached context inherits values
+  (tenant ID, trace context) but not deadlines or cancellation.
+
+- **gRPC sidecar circuit-breaker Prometheus gauge.** The pool
+  (`internal/grpcpool/pool.go`) emits
+  `context_engine_grpc_circuit_breaker_state{target}` with the
+  spec values `0=closed, 1=half-open, 2=open`. To keep the wire
+  protocol stable as new states get added, the emit path uses an
+  explicit `gaugeValueForState(State) int` switch — not the
+  enum's `iota` value — so renumbering the `State` constants
+  cannot silently drift the wire signal.
+
+- **Prometheus recording rules + multi-file `alertcheck`.**
+  `deploy/recording-rules.yaml` ships pre-computed series
+  (`context_engine_retrieval_availability`, `_p95_latency_ms`,
+  `_pipeline_throughput_per_minute`, `_error_rate_per_minute`,
+  `_cache_hit_rate`) so Grafana panels render in O(1) lookups
+  instead of 5-minute range queries. The `alertcheck` binary now
+  accepts multiple manifest paths and recognises the `record`
+  rule form (with severity/summary checks correctly scoped to
+  alert rules only). `make alerts-check` validates both files.
+
+- **Connection-pool health gauges + sampler goroutine.** Three
+  new gauges
+  (`context_engine_postgres_pool_open_connections`,
+  `_redis_pool_active_connections`,
+  `_qdrant_pool_idle_connections`) report live pool stats. A
+  `PoolSampler` goroutine started from `cmd/api/main.go` reads
+  `db.Stats().OpenConnections`, `redis.PoolStats().TotalConns -
+  IdleConns`, and `qdrant.IdleConnCapacity()` every 30s and
+  publishes the readings. The Qdrant signal reports the
+  configured idle ceiling rather than the live count because
+  `net/http.Transport` doesn't expose live idle-conn counts on
+  its public surface — a stable baseline matching operator
+  capacity is still actionable for alerting.
+
+- **Regression manifest tying PR-#16 + PR-#17 fixes to tests.**
+  `tests/regression/round78_manifest.go` extends the Round-4
+  regression manifest with each Devin Review fix and the
+  regression test that pins it. A meta-test
+  (`round78_manifest_test.go`) reads each entry and verifies the
+  named source file contains a `func TestX(` declaration —
+  so renaming a test without updating the manifest fails CI.
+
 ### Tech choices added in Round 8
 
 - **Stage 4 deduplication is now in the hot path.** The

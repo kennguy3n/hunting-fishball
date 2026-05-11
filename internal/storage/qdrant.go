@@ -131,6 +131,28 @@ func (q *QdrantClient) CollectionFor(tenantID string) string {
 	return q.cfg.CollectionPrefix + tenantID
 }
 
+// IdleConnCapacity returns the configured idle-connection ceiling
+// on the underlying HTTP transport (MaxIdleConnsPerHost). Round-9
+// Task 17 publishes this as the Prometheus gauge
+// context_engine_qdrant_pool_idle_connections so operators can
+// reason about pool sizing.
+//
+// We deliberately publish the configured ceiling rather than the
+// live idle count: net/http.Transport does not expose the latter
+// through its public surface, and reflection-based readout is
+// fragile across Go releases. A constant non-zero baseline that
+// matches operator-configured capacity is still actionable.
+func (q *QdrantClient) IdleConnCapacity() int {
+	if q == nil {
+		return 0
+	}
+	v := q.cfg.PoolMaxIdleConnsPerHost
+	if v <= 0 {
+		return 32
+	}
+	return v
+}
+
 // EnsureCollection makes sure the per-tenant collection exists. Idempotent.
 func (q *QdrantClient) EnsureCollection(ctx context.Context, tenantID string) error {
 	if tenantID == "" {

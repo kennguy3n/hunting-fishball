@@ -435,6 +435,85 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-11: **Round 9: Next 20 tasks — finish GORM cutover, pipeline hardening, regression manifest, recording rules, pool health, openapi/doc audit**.
+  - **Tasks 1–5 (GORM store migrations)**: the last five in-memory
+    fakes in `cmd/api/main.go` are now GORM-backed.
+    - Task 1 → `internal/admin/notification_gorm.go` (+ SQLite tests in
+      `notification_gorm_test.go`) replaces `NewInMemoryNotificationStore`.
+    - Task 2 → `internal/admin/abtest_gorm.go` (+
+      `abtest_gorm_test.go`) replaces `NewInMemoryABTestStore`.
+    - Task 3 → `internal/admin/connector_template_gorm.go` (+
+      `connector_template_gorm_test.go`) replaces
+      `NewInMemoryConnectorTemplateStore`.
+    - Task 4 → `internal/retrieval/synonym_store_gorm.go` (+
+      `synonym_store_gorm_test.go`) + migration
+      `migrations/032_synonyms.sql` (and matching rollback). Replaces
+      `retrieval.NewInMemorySynonymStore`.
+    - Task 5 → `internal/admin/chunk_quality_gorm.go` (+
+      `chunk_quality_gorm_test.go`) replaces
+      `NewInMemoryChunkQualityStore`.
+  - **Task 6**: Post-merge cross-backend dedup in `internal/retrieval/merger.go`
+    collapses duplicate chunk IDs (highest score wins) before reranking. Test
+    in `internal/retrieval/merger_test.go`.
+  - **Task 7**: `POST /v1/retrieve/batch` now honours `explain:true` and fans
+    the per-request explain trace through. Test in
+    `internal/retrieval/batch_handler_test.go`.
+  - **Task 8**: Per-stage timeout env vars
+    `CONTEXT_ENGINE_FETCH_TIMEOUT` / `_PARSE_TIMEOUT` / `_EMBED_TIMEOUT` /
+    `_STORE_TIMEOUT` wired into `pipeline.CoordinatorConfig`; each retry
+    attempt gets its own `context.WithTimeout`. Test in
+    `internal/pipeline/coordinator_test.go`.
+  - **Task 9**: `CONTEXT_ENGINE_CACHE_WARM_ON_MISS=true` makes the retrieval
+    handler write to the cache asynchronously (`context.WithoutCancel`) so the
+    response returns before Redis flushes. Test in `internal/retrieval/handler_test.go`.
+  - **Task 10**: Prometheus gauge `context_engine_grpc_circuit_breaker_state{target}`
+    (0=closed, 1=half-open, 2=open) emitted from
+    `internal/grpcpool/pool.go`. Mapping is decoupled from the `State` iota via
+    `gaugeValueForState`. Test in `pool_test.go`.
+  - **Task 11**: `services/graphrag/test_graphrag.py` — 13 unit tests covering
+    `RegexExtractor` (entities, edges, stopwords, acronyms, idempotence,
+    empty input) and `GraphRAGServicer` initialization. `make services-test`
+    picks it up.
+  - **Task 12**: Admin error-catalog audit — 7 new codes added to
+    `internal/errors/catalog.go` (`ERR_CACHE_WARM_FAILED`, `ERR_BUDGET_INVALID`,
+    `ERR_BUDGET_LOOKUP_FAILED`, `ERR_CACHE_CONFIG_FAILED`,
+    `ERR_SYNC_HISTORY_FAILED`, `ERR_PINNED_RESULTS_FAILED`,
+    `ERR_PIPELINE_HEALTH_FAILED`). Tests in `catalog_test.go`.
+  - **Task 13**: `tests/e2e/notification_lifecycle_test.go` (build tag `e2e`)
+    drives the full notification dispatch → retry → dead-letter loop.
+  - **Task 14**: `tests/e2e/pipeline_priority_test.go` (build tag `e2e`)
+    asserts steady-state events drain before backfill when
+    `CONTEXT_ENGINE_PRIORITY_ENABLED=true` and that near-duplicate chunks
+    are dropped when `CONTEXT_ENGINE_DEDUP_ENABLED=true`.
+  - **Task 15**: `tests/regression/round78_manifest.go` catalogues the
+    Devin Review fixes from PRs #16 and #17 — pin_apply sparse positions,
+    budget cardinality, cache_warm err, 429 retry handling, retry worker
+    attempt counter, phantom-notification on rollback, etc. Meta-tests in
+    `round78_manifest_test.go`.
+  - **Task 16**: `deploy/recording-rules.yaml` ships
+    `context_engine_retrieval_availability`, `..._p95_latency_ms`,
+    `..._pipeline_throughput_per_minute`, `..._error_rate_per_minute`, and
+    `..._cache_hit_rate`. `make alerts-check` now validates both alerts
+    and recording rules; `internal/observability/alertcheck/main.go` accepts
+    multiple files and recognises the `record` rule form. Tests in
+    `deploy/alerts_test.go`.
+  - **Task 17**: Connection-pool health gauges
+    `context_engine_postgres_pool_open_connections`,
+    `context_engine_redis_pool_active_connections`, and
+    `context_engine_qdrant_pool_idle_connections` plus a 30-second sampler
+    goroutine wired in `cmd/api/main.go`. Sampler logic in
+    `internal/observability/pool_sampler.go`; tests in
+    `pool_sampler_test.go`.
+  - **Task 18**: OpenAPI spec audit — `/v1/admin/sources/{id}/rotate-credentials`,
+    `/v1/admin/retrieval/pins[/{id}]`, `/v1/admin/analytics/queries[/top]`,
+    `/v1/admin/health/indexes`, `/v1/admin/sources/{id}/sync/stream`,
+    `/v1/webhooks/{connector}/{source_id}`, and `/v1/admin/dlq/replay` added
+    to `docs/openapi.yaml`. Pinned by `docs/openapi_test.go` so future
+    handlers can't ship without a spec entry.
+  - **Task 19**: This changelog entry + Round-9 status note in `PHASES.md` +
+    Round-9 tech-choices section in `ARCHITECTURE.md`.
+  - **Task 20**: README Round-9 section + project-structure tree refresh.
+
 - 2026-05-11: **Round 8: Next 20 tasks — pipeline wiring, GORM stores, notification delivery, e2e, runbook, docs**.
   - **Task 1**: `pipeline.Deduplicator` wired into Stage 4 store worker; gated
     by `CONTEXT_ENGINE_DEDUP_ENABLED`. Test:

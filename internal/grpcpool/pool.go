@@ -29,6 +29,8 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // State is the breaker state.
@@ -115,7 +117,34 @@ func New(cfg Config) (*Pool, error) {
 		}
 		p.conns = append(p.conns, conn)
 	}
+	// Round-9 Task 10: publish initial closed state to Prometheus.
+	p.publishState(StateClosed)
 	return p, nil
+}
+
+// publishState writes the breaker state to the Prometheus gauge so
+// operators can alert on `context_engine_grpc_circuit_breaker_state{target=...} > 0`.
+// Caller MUST not hold p.mu — publishState is called only from
+// state-transition paths that have already released the lock.
+//
+// The wire mapping is fixed by the Round-9 Task 10 spec — 0=closed,
+// 1=half-open, 2=open — and is decoupled from the iota values of
+// the State enum so adding a future state (e.g. quarantined)
+// doesn't accidentally shift the published values.
+func (p *Pool) publishState(s State) {
+	observability.SetGRPCCircuitBreakerState(p.cfg.Target, gaugeValueForState(s))
+}
+
+func gaugeValueForState(s State) int {
+	switch s {
+	case StateClosed:
+		return 0
+	case StateHalfOpen:
+		return 1
+	case StateOpen:
+		return 2
+	}
+	return 0
 }
 
 // Borrow returns a connection from the pool together with a context
@@ -171,41 +200,53 @@ func (p *Pool) Close() error {
 
 func (p *Pool) allow() bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	transitioned := false
 	switch p.state {
 	case StateClosed:
+		p.mu.Unlock()
 		return true
 	case StateOpen:
 		if time.Since(p.openedAt) < p.cfg.OpenFor {
+			p.mu.Unlock()
 			return false
 		}
 		// First call after OpenFor elapses transitions to
 		// half-open and claims the single trial slot.
 		p.state = StateHalfOpen
 		p.trialInFlight = true
-		return true
+		transitioned = true
 	case StateHalfOpen:
 		// While a trial is in flight every other caller is
 		// rejected — we don't want a burst to flood a recovering
 		// backend. The trial's report() releases the slot.
 		if p.trialInFlight {
+			p.mu.Unlock()
 			return false
 		}
 		p.trialInFlight = true
-		return true
+	}
+	p.mu.Unlock()
+	// Round-9 Task 10: emit gauge update outside the lock.
+	if transitioned {
+		p.publishState(StateHalfOpen)
 	}
 	return true
 }
 
 func (p *Pool) report(success bool) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	wasHalfOpen := p.state == StateHalfOpen
+	prev := p.state
 	if success {
 		p.failures = 0
 		p.state = StateClosed
 		if wasHalfOpen {
 			p.trialInFlight = false
+		}
+		newState := p.state
+		p.mu.Unlock()
+		if newState != prev {
+			p.publishState(newState)
 		}
 		return
 	}
@@ -214,10 +255,19 @@ func (p *Pool) report(success bool) {
 		p.state = StateOpen
 		p.openedAt = time.Now()
 		p.trialInFlight = false
+		p.mu.Unlock()
+		p.publishState(StateOpen)
 		return
 	}
 	if p.failures >= p.cfg.Threshold {
 		p.state = StateOpen
 		p.openedAt = time.Now()
+		newState := p.state
+		p.mu.Unlock()
+		if newState != prev {
+			p.publishState(StateOpen)
+		}
+		return
 	}
+	p.mu.Unlock()
 }

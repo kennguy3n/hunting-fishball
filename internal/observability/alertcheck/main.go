@@ -25,7 +25,11 @@ import (
 )
 
 type rule struct {
-	Alert       string            `yaml:"alert"`
+	Alert string `yaml:"alert"`
+	// Record is the Prometheus recording-rule name. Mutually
+	// exclusive with Alert per the Prometheus spec; alertcheck
+	// validates whichever is set.
+	Record      string            `yaml:"record"`
 	Expr        string            `yaml:"expr"`
 	For         string            `yaml:"for"`
 	Labels      map[string]string `yaml:"labels"`
@@ -47,57 +51,89 @@ type manifest struct {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: alertcheck <path>")
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: alertcheck <path> [<path> ...]")
 		os.Exit(2)
 	}
-	data, err := os.ReadFile(os.Args[1])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "read: %v\n", err)
-		os.Exit(1)
-	}
-	var m manifest
-	if err := yaml.Unmarshal(data, &m); err != nil {
-		fmt.Fprintf(os.Stderr, "yaml: %v\n", err)
-		os.Exit(1)
-	}
-	if m.Kind != "PrometheusRule" {
-		fmt.Fprintf(os.Stderr, "kind=%q, want PrometheusRule\n", m.Kind)
-		os.Exit(1)
-	}
-	if len(m.Spec.Groups) == 0 {
-		fmt.Fprintln(os.Stderr, "no rule groups defined")
-		os.Exit(1)
-	}
 	var fail bool
-	for gi, g := range m.Spec.Groups {
-		if g.Name == "" {
-			fmt.Fprintf(os.Stderr, "group[%d]: missing name\n", gi)
+	totalGroups, totalRules := 0, 0
+	for _, path := range os.Args[1:] {
+		g, r, ok := validateFile(path)
+		totalGroups += g
+		totalRules += r
+		if !ok {
 			fail = true
-		}
-		for ri, r := range g.Rules {
-			if r.Alert == "" {
-				fmt.Fprintf(os.Stderr, "group=%s rule[%d]: missing alert\n", g.Name, ri)
-				fail = true
-			}
-			if r.Expr == "" {
-				fmt.Fprintf(os.Stderr, "alert=%s: missing expr\n", r.Alert)
-				fail = true
-			}
-			if _, ok := r.Labels["severity"]; !ok {
-				fmt.Fprintf(os.Stderr, "alert=%s: missing labels.severity\n", r.Alert)
-				fail = true
-			}
-			if _, ok := r.Annotations["summary"]; !ok {
-				fmt.Fprintf(os.Stderr, "alert=%s: missing annotations.summary\n", r.Alert)
-				fail = true
-			}
 		}
 	}
 	if fail {
 		os.Exit(1)
 	}
-	fmt.Printf("ok: %d groups, %d rules\n", len(m.Spec.Groups), countRules(m.Spec.Groups))
+	fmt.Printf("ok: %d groups, %d rules\n", totalGroups, totalRules)
+}
+
+// validateFile parses one PrometheusRule manifest and reports
+// any shape problems. Returns (group count, rule count, ok).
+func validateFile(path string) (int, int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: read: %v\n", path, err)
+		return 0, 0, false
+	}
+	var m manifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: yaml: %v\n", path, err)
+		return 0, 0, false
+	}
+	if m.Kind != "PrometheusRule" {
+		fmt.Fprintf(os.Stderr, "%s: kind=%q, want PrometheusRule\n", path, m.Kind)
+		return 0, 0, false
+	}
+	if len(m.Spec.Groups) == 0 {
+		fmt.Fprintf(os.Stderr, "%s: no rule groups defined\n", path)
+		return 0, 0, false
+	}
+	fail := false
+	for gi, g := range m.Spec.Groups {
+		if g.Name == "" {
+			fmt.Fprintf(os.Stderr, "%s: group[%d]: missing name\n", path, gi)
+			fail = true
+		}
+		for ri, r := range g.Rules {
+			// Each rule must be EITHER an alert OR a recording rule.
+			isAlert := r.Alert != ""
+			isRecord := r.Record != ""
+			if isAlert && isRecord {
+				fmt.Fprintf(os.Stderr, "%s: group=%s rule[%d]: rule must be alert OR record, not both\n", path, g.Name, ri)
+				fail = true
+			}
+			if !isAlert && !isRecord {
+				fmt.Fprintf(os.Stderr, "%s: group=%s rule[%d]: missing alert or record\n", path, g.Name, ri)
+				fail = true
+				continue
+			}
+			name := r.Alert
+			if isRecord {
+				name = r.Record
+			}
+			if r.Expr == "" {
+				fmt.Fprintf(os.Stderr, "%s: rule=%s: missing expr\n", path, name)
+				fail = true
+			}
+			// Severity/summary annotations are mandatory only for
+			// alerting rules — recording rules don't page anyone.
+			if isAlert {
+				if _, ok := r.Labels["severity"]; !ok {
+					fmt.Fprintf(os.Stderr, "%s: alert=%s: missing labels.severity\n", path, name)
+					fail = true
+				}
+				if _, ok := r.Annotations["summary"]; !ok {
+					fmt.Fprintf(os.Stderr, "%s: alert=%s: missing annotations.summary\n", path, name)
+					fail = true
+				}
+			}
+		}
+	}
+	return len(m.Spec.Groups), countRules(m.Spec.Groups), !fail
 }
 
 func countRules(groups []group) int {

@@ -121,8 +121,8 @@ proto-check: proto-gen
 
 .PHONY: alerts-check
 alerts-check:
-	@echo "Validating Prometheus alert YAML..."
-	$(GO) run ./internal/observability/alertcheck deploy/alerts.yaml
+	@echo "Validating Prometheus alert + recording YAML..."
+	$(GO) run ./internal/observability/alertcheck deploy/alerts.yaml deploy/recording-rules.yaml
 
 .PHONY: eval
 eval:

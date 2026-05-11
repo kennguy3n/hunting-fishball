@@ -140,6 +140,37 @@ phase.
 > observability/operability; shard pre-generation extends
 > Phase 5. See PROGRESS.md for the per-task list.
 >
+> **Round 9** (2026-05-11) layers another 20 tasks
+> that finish the GORM cutover and harden the retrieval +
+> pipeline surfaces: the last five in-memory admin stores
+> (`Notification`, `ABTest`, `ConnectorTemplate`, `Synonym`,
+> `ChunkQuality`) are now Postgres-backed and wired into
+> `cmd/api/main.go`; the RRF merger now collapses
+> cross-backend duplicate chunk IDs before reranking; the
+> batch retrieve endpoint honours `explain:true`; the
+> coordinator gained per-stage timeout env vars
+> (`CONTEXT_ENGINE_FETCH_TIMEOUT`, `_PARSE_TIMEOUT`,
+> `_EMBED_TIMEOUT`, `_STORE_TIMEOUT`) and the retrieval
+> handler gained `CONTEXT_ENGINE_CACHE_WARM_ON_MISS` for
+> async cache writes; the gRPC sidecar pool publishes its
+> circuit-breaker state on Prometheus; Phase 8 gains
+> `deploy/recording-rules.yaml` for retrieval availability /
+> pipeline throughput / cache hit-rate + three new
+> connection-pool health gauges sampled every 30s;
+> `services/graphrag/test_graphrag.py` adds unit tests for
+> the Python GraphRAG entity/edge extractor; an admin
+> error-catalog audit registered 7 new codes
+> (`ERR_CACHE_WARM_FAILED`, `ERR_BUDGET_INVALID`, …); two
+> new e2e tests (`tests/e2e/notification_lifecycle_test.go`
+> and `tests/e2e/pipeline_priority_test.go`) drive the
+> Round-8 features end-to-end; the Round-7/8 Devin Review
+> fixes are catalogued in `tests/regression/round78_manifest.go`;
+> and `docs/openapi.yaml` was extended with the
+> previously-undocumented Round-8 admin endpoints (pinned
+> results, analytics/queries, index health, sync stream,
+> rotate-credentials, webhook router). See PROGRESS.md for
+> the per-task list.
+
 > **Round 8** (2026-05-11) layers another 20 tasks
 > primarily focused on *making the existing surface real*:
 > Stage 4 deduplication, the coordinator priority buffer,

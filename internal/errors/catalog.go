@@ -47,6 +47,19 @@ const (
 	CodePolicyConflict     Code = "ERR_POLICY_CONFLICT"
 	CodeRetentionViolation Code = "ERR_RETENTION_VIOLATION"
 	CodeServiceUnavailable Code = "ERR_SERVICE_UNAVAILABLE"
+
+	// Round-9 Task 12: admin-surface error codes. Each maps to
+	// a previously raw c.JSON(500, ...) site in the Round-6/7/8
+	// admin handlers, giving operators stable codes to alert
+	// on (rather than the generic "internal server error"
+	// envelope).
+	CodeCacheWarmFailed      Code = "ERR_CACHE_WARM_FAILED"
+	CodeBudgetInvalid        Code = "ERR_BUDGET_INVALID"
+	CodeBudgetLookupFailed   Code = "ERR_BUDGET_LOOKUP_FAILED"
+	CodeCacheConfigFailed    Code = "ERR_CACHE_CONFIG_FAILED"
+	CodeSyncHistoryFailed    Code = "ERR_SYNC_HISTORY_FAILED"
+	CodePinnedResultsFailed  Code = "ERR_PINNED_RESULTS_FAILED"
+	CodePipelineHealthFailed Code = "ERR_PIPELINE_HEALTH_FAILED"
 )
 
 // Entry is one entry in the catalogue.
@@ -73,6 +86,15 @@ var DefaultCatalog = map[Code]Entry{
 	CodePolicyConflict:     {http.StatusConflict, "policy draft conflicts with live state", "rebase your draft against the latest snapshot"},
 	CodeRetentionViolation: {http.StatusUnprocessableEntity, "retention policy violated", "shorten the requested window or relax the policy"},
 	CodeServiceUnavailable: {http.StatusServiceUnavailable, "service unavailable", "retry after a short delay"},
+
+	// Round-9 Task 12: admin error mappings.
+	CodeCacheWarmFailed:      {http.StatusInternalServerError, "cache warm failed", "retry the warm job; if it persists, check Redis health"},
+	CodeBudgetInvalid:        {http.StatusBadRequest, "latency budget input invalid", "ensure max_latency_ms is a positive integer"},
+	CodeBudgetLookupFailed:   {http.StatusInternalServerError, "latency budget lookup failed", "check Postgres connectivity"},
+	CodeCacheConfigFailed:    {http.StatusInternalServerError, "cache config update failed", "check Postgres connectivity"},
+	CodeSyncHistoryFailed:    {http.StatusInternalServerError, "sync history query failed", "check Postgres connectivity"},
+	CodePinnedResultsFailed:  {http.StatusInternalServerError, "pinned results update failed", "check Postgres connectivity"},
+	CodePipelineHealthFailed: {http.StatusInternalServerError, "pipeline health snapshot failed", "check ingest service health"},
 }
 
 // Error is the typed application error. Handlers create it via

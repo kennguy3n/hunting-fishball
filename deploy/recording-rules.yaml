@@ -1,0 +1,106 @@
+# Prometheus recording rules for hunting-fishball / context-engine.
+#
+# Round-9 Task 16: pre-computed series for the most operator-
+# common dashboard queries. Recording rules let Grafana panels
+# render in milliseconds instead of re-evaluating range queries
+# every refresh, and they give us a stable series name to alert
+# on (so the alert query and dashboard query never drift).
+#
+# Naming convention (matches the Prometheus best-practices doc):
+#
+#   level:metric:operations
+#
+# where `level` is the aggregation grain (job, instance, tenant,
+# global), `metric` is the underlying metric, and `operations` is
+# a snake_case description of what was applied. We deliberately
+# pre-name the series with the `context_engine_` prefix so they
+# share the same namespace as the source metrics and Grafana
+# auto-completes them.
+#
+# Validation: `make alerts-check` parses this file via the
+# alertcheck binary; recording rules need a `record` + `expr`
+# pair and (by convention here) at least one label.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: context-engine-recording
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: context-engine
+    app.kubernetes.io/component: recording-rules
+spec:
+  groups:
+    # -------------------------------------------------------------
+    # Retrieval availability (SLI for the public retrieve API).
+    #
+    # Computed as 1 - (errors / total) over the 5-minute window so
+    # the SLO dashboard can plot a stable availability line and the
+    # 99.5%-availability alert can trigger off a single series.
+    # -------------------------------------------------------------
+    - name: context-engine.retrieval
+      interval: 30s
+      rules:
+        - record: context_engine_retrieval_availability
+          expr: |
+            1 - (
+              sum(rate(context_engine_retrieval_errors_total[5m]))
+              /
+              clamp_min(sum(rate(context_engine_retrieval_requests_total[5m])), 1)
+            )
+          labels:
+            slo: retrieval-availability
+            window: 5m
+
+        - record: context_engine_retrieval_p95_latency_ms
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(context_engine_retrieval_latency_ms_bucket[5m]))
+            )
+          labels:
+            slo: retrieval-latency
+            window: 5m
+
+    # -------------------------------------------------------------
+    # Pipeline throughput. Operators read this to confirm Kafka
+    # backlogs are draining and to size HPAs against per-minute
+    # rates (which are easier to reason about than per-second).
+    # -------------------------------------------------------------
+    - name: context-engine.pipeline
+      interval: 30s
+      rules:
+        - record: context_engine_pipeline_throughput_per_minute
+          expr: |
+            sum by (stage) (
+              rate(context_engine_pipeline_stage_duration_ms_count[1m])
+            ) * 60
+          labels:
+            window: 1m
+
+        - record: context_engine_pipeline_error_rate_per_minute
+          expr: |
+            sum by (stage) (
+              rate(context_engine_pipeline_stage_errors_total[1m])
+            ) * 60
+          labels:
+            window: 1m
+
+    # -------------------------------------------------------------
+    # Cache hit rate. Drops in this series should correlate with
+    # retrieval P95 spikes; the panel pairs them.
+    # -------------------------------------------------------------
+    - name: context-engine.cache
+      interval: 30s
+      rules:
+        - record: context_engine_cache_hit_rate
+          expr: |
+            sum(rate(context_engine_cache_hits_total[5m]))
+            /
+            clamp_min(
+              sum(rate(context_engine_cache_hits_total[5m]))
+              + sum(rate(context_engine_cache_misses_total[5m])),
+              1
+            )
+          labels:
+            window: 5m

@@ -184,7 +184,62 @@ var (
 			Help: "Retrievals whose latency exceeded the tenant budget. Per-tenant breakdowns live in structured logs (tenant_id field).",
 		},
 	)
+
+	// GRPCCircuitBreakerState exposes the current state of each
+	// gRPC sidecar circuit breaker — Round-9 Task 10. Values:
+	// 0 = closed, 1 = half-open, 2 = open. The `target` label is
+	// the gRPC target string (host:port) so operators can alert
+	// on any specific sidecar entering open state.
+	GRPCCircuitBreakerState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "context_engine_grpc_circuit_breaker_state",
+			Help: "Current state of the gRPC sidecar circuit breaker (0=closed, 1=half-open, 2=open).",
+		},
+		[]string{"target"},
+	)
+
+	// PostgresPoolOpenConnections is the Round-9 Task 17 gauge
+	// reporting the live `db.Stats().OpenConnections` count for the
+	// process-wide Postgres pool. Operators alert on this hitting
+	// the pool's MaxOpen ceiling (which signals connection
+	// exhaustion downstream of a pgbouncer hiccup or a slow query
+	// storm).
+	PostgresPoolOpenConnections = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "context_engine_postgres_pool_open_connections",
+			Help: "Current open connections in the Postgres pool (from db.Stats().OpenConnections).",
+		},
+	)
+
+	// RedisPoolActiveConnections is the Round-9 Task 17 gauge for
+	// in-use Redis client connections, read from go-redis's
+	// PoolStats().TotalConns - IdleConns. Doubles as a quick
+	// signal for cache-warm storms.
+	RedisPoolActiveConnections = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "context_engine_redis_pool_active_connections",
+			Help: "Current active (non-idle) connections in the Redis pool.",
+		},
+	)
+
+	// QdrantPoolIdleConnections is the Round-9 Task 17 gauge for
+	// idle HTTP connections held open by the Qdrant client. Idle
+	// connections falling to zero under load means the transport
+	// is opening fresh sockets for every request and is a hint
+	// the keep-alive tunable needs lifting.
+	QdrantPoolIdleConnections = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "context_engine_qdrant_pool_idle_connections",
+			Help: "Current idle HTTP connections in the Qdrant client transport.",
+		},
+	)
 )
+
+// SetGRPCCircuitBreakerState records the current breaker state for
+// a given gRPC target — Round-9 Task 10.
+func SetGRPCCircuitBreakerState(target string, state int) {
+	GRPCCircuitBreakerState.WithLabelValues(target).Set(float64(state))
+}
 
 func init() {
 	Registry.MustRegister(
@@ -201,7 +256,32 @@ func init() {
 		CredentialsExpiring,
 		IndexAutoReindexesTotal,
 		RetrievalBudgetViolationsTotal,
+		GRPCCircuitBreakerState,
+		PostgresPoolOpenConnections,
+		RedisPoolActiveConnections,
+		QdrantPoolIdleConnections,
 	)
+}
+
+// SetPostgresPoolOpenConnections records the current open
+// connection count for the process-wide Postgres pool —
+// Round-9 Task 17. Callers wire this from a periodic sampler
+// goroutine reading `db.Stats().OpenConnections`.
+func SetPostgresPoolOpenConnections(n int) {
+	PostgresPoolOpenConnections.Set(float64(n))
+}
+
+// SetRedisPoolActiveConnections records the active (non-idle)
+// Redis connection count — Round-9 Task 17.
+func SetRedisPoolActiveConnections(n int) {
+	RedisPoolActiveConnections.Set(float64(n))
+}
+
+// SetQdrantPoolIdleConnections records the idle HTTP connection
+// count held open by the Qdrant client transport —
+// Round-9 Task 17.
+func SetQdrantPoolIdleConnections(n int) {
+	QdrantPoolIdleConnections.Set(float64(n))
 }
 
 // Handler returns the Prometheus HTTP handler bound to the package
@@ -226,6 +306,10 @@ func ResetForTest() {
 	Registry.Unregister(CredentialsExpiring)
 	Registry.Unregister(IndexAutoReindexesTotal)
 	Registry.Unregister(RetrievalBudgetViolationsTotal)
+	Registry.Unregister(GRPCCircuitBreakerState)
+	Registry.Unregister(PostgresPoolOpenConnections)
+	Registry.Unregister(RedisPoolActiveConnections)
+	Registry.Unregister(QdrantPoolIdleConnections)
 	APIRequestsTotal.Reset()
 	APIRequestDurationSeconds.Reset()
 	KafkaConsumerLag.Reset()
@@ -238,6 +322,10 @@ func ResetForTest() {
 	TokenRefreshesTotal.Reset()
 	CredentialsExpiring.Reset()
 	IndexAutoReindexesTotal.Reset()
+	GRPCCircuitBreakerState.Reset()
+	PostgresPoolOpenConnections.Set(0)
+	RedisPoolActiveConnections.Set(0)
+	QdrantPoolIdleConnections.Set(0)
 	Registry.MustRegister(
 		APIRequestsTotal,
 		APIRequestDurationSeconds,
@@ -252,6 +340,10 @@ func ResetForTest() {
 		CredentialsExpiring,
 		IndexAutoReindexesTotal,
 		RetrievalBudgetViolationsTotal,
+		GRPCCircuitBreakerState,
+		PostgresPoolOpenConnections,
+		RedisPoolActiveConnections,
+		QdrantPoolIdleConnections,
 	)
 }
 

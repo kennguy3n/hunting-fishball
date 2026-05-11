@@ -137,6 +137,74 @@ type CoordinatorConfig struct {
 	// RecordAttempt. Used by /v1/admin/pipeline/retry-stats
 	// (Round-6 Task 12 / Round-8 Task 4).
 	RetryAnalytics *RetryAnalytics
+
+	// Round-9 Task 8: per-stage timeouts. Each value, when
+	// non-zero, wraps the stage's fn call in
+	// context.WithTimeout. A zero value means "no timeout" and
+	// preserves the pre-Round-9 behaviour where stages were
+	// only bounded by the upstream ctx and the per-stage retry
+	// loop's MaxAttempts/backoff. The four stage names that
+	// participate are "fetch", "parse", "embed", and "store"
+	// (the "delete" stage shares StoreTimeout because both
+	// route through the same store backend). Operators can wire
+	// these from env vars via LoadStageTimeoutsFromEnv.
+	FetchTimeout time.Duration
+	ParseTimeout time.Duration
+	EmbedTimeout time.Duration
+	StoreTimeout time.Duration
+}
+
+// LoadStageTimeoutsFromEnv reads the four
+// CONTEXT_ENGINE_*_TIMEOUT env vars and applies them onto cfg in
+// place — Round-9 Task 8. The values are parsed as Go duration
+// strings (e.g. "30s", "2m"). Empty or invalid values are silently
+// ignored so a misconfigured env doesn't crash the pipeline; the
+// stage falls back to "no timeout".
+func (c *CoordinatorConfig) LoadStageTimeoutsFromEnv(getenv func(string) string) {
+	if getenv == nil {
+		return
+	}
+	parse := func(name string) time.Duration {
+		raw := getenv(name)
+		if raw == "" {
+			return 0
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < 0 {
+			return 0
+		}
+		return d
+	}
+	if d := parse("CONTEXT_ENGINE_FETCH_TIMEOUT"); d > 0 {
+		c.FetchTimeout = d
+	}
+	if d := parse("CONTEXT_ENGINE_PARSE_TIMEOUT"); d > 0 {
+		c.ParseTimeout = d
+	}
+	if d := parse("CONTEXT_ENGINE_EMBED_TIMEOUT"); d > 0 {
+		c.EmbedTimeout = d
+	}
+	if d := parse("CONTEXT_ENGINE_STORE_TIMEOUT"); d > 0 {
+		c.StoreTimeout = d
+	}
+}
+
+// stageTimeout maps a stage name to the configured per-stage
+// timeout. Returns 0 (no timeout) for unknown stages so the
+// default behaviour is preserved.
+func (c *CoordinatorConfig) stageTimeout(stage string) time.Duration {
+	switch stage {
+	case "fetch":
+		return c.FetchTimeout
+	case "parse":
+		return c.ParseTimeout
+	case "embed":
+		return c.EmbedTimeout
+	case "store", "delete":
+		return c.StoreTimeout
+	default:
+		return 0
+	}
 }
 
 func (c *CoordinatorConfig) defaults() {
@@ -584,10 +652,25 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn
 	}()
 
 	rec := c.cfg.RetryAnalytics
+	stageTO := c.cfg.stageTimeout(stage)
 	var lastErr error
 	backoff := c.cfg.InitialBackoff
 	for attempt := 1; attempt <= c.cfg.MaxAttempts; attempt++ {
-		out, err := fn(ctx)
+		// Round-9 Task 8: apply the per-stage timeout to each
+		// attempt. WithTimeout(parent, 0) is intentionally not
+		// called so a zero-value config preserves prior
+		// behaviour. Each retry attempt gets its OWN deadline
+		// so an early-attempt deadline doesn't cap a healthy
+		// later attempt.
+		callCtx := ctx
+		var cancel context.CancelFunc
+		if stageTO > 0 {
+			callCtx, cancel = context.WithTimeout(ctx, stageTO)
+		}
+		out, err := fn(callCtx)
+		if cancel != nil {
+			cancel()
+		}
 		if err == nil {
 			if rec != nil {
 				_ = rec.RecordAttempt(stage, docKey, RetryOutcomeSuccess, "")

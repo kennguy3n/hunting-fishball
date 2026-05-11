@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/kennguy3n/hunting-fishball/internal/grpcpool"
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // startFakeServer spins up an empty gRPC server on a random port so
@@ -161,4 +162,74 @@ func TestDeadline(t *testing.T) {
 		t.Fatalf("ctx has no deadline")
 	}
 	release(true)
+}
+
+// TestCircuitBreakerMetricGauge — Round-9 Task 10. The Prometheus
+// gauge `context_engine_grpc_circuit_breaker_state{target}` must
+// reflect the live breaker state: 0 closed → 2 open → 1 half-open.
+func TestCircuitBreakerMetricGauge(t *testing.T) {
+	t.Parallel()
+	addr, stop := startFakeServer(t)
+	defer stop()
+
+	p, err := grpcpool.New(grpcpool.Config{
+		Target:    addr,
+		Size:      1,
+		Threshold: 2,
+		OpenFor:   30 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+
+	readGauge := func() float64 {
+		mfs, err := observability.Registry.Gather()
+		if err != nil {
+			t.Fatalf("gather: %v", err)
+		}
+		for _, mf := range mfs {
+			if mf.GetName() != "context_engine_grpc_circuit_breaker_state" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				for _, lp := range m.GetLabel() {
+					if lp.GetName() == "target" && lp.GetValue() == addr {
+						return m.GetGauge().GetValue()
+					}
+				}
+			}
+		}
+		return -1
+	}
+
+	if g := readGauge(); g != 0 {
+		t.Fatalf("initial state: expected 0 (closed); got %v", g)
+	}
+
+	// Trip the breaker by reporting Threshold consecutive failures.
+	for i := 0; i < 2; i++ {
+		_, _, release, err := p.Borrow(context.Background())
+		if err != nil {
+			t.Fatalf("borrow %d: %v", i, err)
+		}
+		release(false)
+	}
+	if g := readGauge(); g != 2 {
+		t.Fatalf("after threshold failures: expected 2 (open); got %v", g)
+	}
+	// Wait past OpenFor so allow() transitions us to half-open.
+	time.Sleep(40 * time.Millisecond)
+	_, _, release, err := p.Borrow(context.Background())
+	if err != nil {
+		t.Fatalf("post-open borrow: %v", err)
+	}
+	if g := readGauge(); g != 1 {
+		t.Fatalf("after OpenFor elapses + borrow: expected 1 (half-open); got %v", g)
+	}
+	// Successful trial → back to closed.
+	release(true)
+	if g := readGauge(); g != 0 {
+		t.Fatalf("after successful trial: expected 0 (closed); got %v", g)
+	}
 }

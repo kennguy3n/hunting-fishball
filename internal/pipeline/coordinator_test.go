@@ -505,3 +505,86 @@ func TestCoordinator_NewCoordinator_Validation(t *testing.T) {
 		})
 	}
 }
+
+// TestCoordinator_StageTimeout_FetchExceedsBudget — Round-9 Task 8.
+// A fetch that exceeds its configured per-stage timeout returns
+// context.DeadlineExceeded from the inner ctx and the coordinator
+// counts the event toward the DLQ after MaxAttempts retries. The
+// stage timeout is local to each attempt: if fetch takes 50ms but
+// timeout is 5ms, the attempt aborts at 5ms, not at 50ms.
+func TestCoordinator_StageTimeout_FetchExceedsBudget(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	cfg := newFastConfig(
+		fakeFetch{fn: func(ctx context.Context, _ IngestEvent) (*Document, error) {
+			// Block until ctx is cancelled or 1s elapses.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(1 * time.Second):
+				return &Document{}, nil
+			}
+		}},
+		fakeParse{fn: func(_ context.Context, _ *Document) ([]Block, error) { return nil, nil }},
+		fakeEmbed{},
+		store,
+	)
+	cfg.FetchTimeout = 10 * time.Millisecond
+	cfg.MaxAttempts = 1 // single attempt → quick failure
+	dlqCount := 0
+	cfg.OnDLQ = func(_ context.Context, _ IngestEvent, _ error) { dlqCount++ }
+
+	coord, err := NewCoordinator(cfg)
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCh := make(chan error, 1)
+	go func() { runCh <- coord.Run(ctx) }()
+	if err := coord.Submit(ctx, IngestEvent{
+		TenantID: "t", SourceID: "s", DocumentID: "d-timeout",
+	}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if int(coord.Metrics.DLQ.Load()) == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-runCh
+	if got := int(coord.Metrics.DLQ.Load()); got != 1 {
+		t.Fatalf("expected 1 DLQ entry after fetch timeout; got %d", got)
+	}
+}
+
+// TestCoordinatorConfig_LoadStageTimeoutsFromEnv parses Go duration
+// strings from the env and applies them to the config. Invalid /
+// missing values fall back to zero.
+func TestCoordinatorConfig_LoadStageTimeoutsFromEnv(t *testing.T) {
+	t.Parallel()
+	env := map[string]string{
+		"CONTEXT_ENGINE_FETCH_TIMEOUT": "30s",
+		"CONTEXT_ENGINE_PARSE_TIMEOUT": "1m",
+		"CONTEXT_ENGINE_EMBED_TIMEOUT": "bad-value",
+		// STORE not set
+	}
+	cfg := &CoordinatorConfig{}
+	cfg.LoadStageTimeoutsFromEnv(func(k string) string { return env[k] })
+	if cfg.FetchTimeout != 30*time.Second {
+		t.Fatalf("FetchTimeout: %v", cfg.FetchTimeout)
+	}
+	if cfg.ParseTimeout != time.Minute {
+		t.Fatalf("ParseTimeout: %v", cfg.ParseTimeout)
+	}
+	if cfg.EmbedTimeout != 0 {
+		t.Fatalf("EmbedTimeout: bad value should fall back to 0; got %v", cfg.EmbedTimeout)
+	}
+	if cfg.StoreTimeout != 0 {
+		t.Fatalf("StoreTimeout: unset should be 0; got %v", cfg.StoreTimeout)
+	}
+}
