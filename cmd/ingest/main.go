@@ -253,6 +253,39 @@ func run() error {
 	// Round-9 Task 8: per-stage timeouts.
 	coordCfg.LoadStageTimeoutsFromEnv(os.Getenv)
 
+	// Round-13 Task 5: optional per-stage circuit breakers.
+	// Gated on CONTEXT_ENGINE_STAGE_BREAKER_ENABLED so existing
+	// deployments inherit the previous no-breaker behaviour.
+	if os.Getenv("CONTEXT_ENGINE_STAGE_BREAKER_ENABLED") == "1" {
+		threshold := stageWorkerEnv("CONTEXT_ENGINE_STAGE_BREAKER_THRESHOLD")
+		if threshold <= 0 {
+			threshold = 5
+		}
+		openFor := 30 * time.Second
+		if raw := os.Getenv("CONTEXT_ENGINE_STAGE_BREAKER_OPEN_FOR"); raw != "" {
+			if d, perr := time.ParseDuration(raw); perr == nil && d > 0 {
+				openFor = d
+			}
+		}
+		breakers := map[string]*pipeline.StageCircuitBreaker{}
+		for _, stage := range []string{"fetch", "parse", "embed", "store"} {
+			b, berr := pipeline.NewStageCircuitBreaker(pipeline.StageCircuitBreakerConfig{
+				Stage:     stage,
+				Threshold: threshold,
+				OpenFor:   openFor,
+			})
+			if berr != nil {
+				return fmt.Errorf("stage breaker %s: %w", stage, berr)
+			}
+			breakers[stage] = b
+		}
+		coordCfg.StageBreakers = breakers
+		slog.Info("ingest: stage circuit breakers enabled",
+			slog.Int("threshold", threshold),
+			slog.Duration("open_for", openFor),
+		)
+	}
+
 	// Round-10 Task 3: sync-history recording. Stage 1 opens a
 	// row on every backfill kickoff; Stage 4 / DLQ bump
 	// processed / failed counters. The admin handler reads the

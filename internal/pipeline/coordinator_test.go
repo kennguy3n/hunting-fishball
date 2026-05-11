@@ -588,3 +588,71 @@ func TestCoordinatorConfig_LoadStageTimeoutsFromEnv(t *testing.T) {
 		t.Fatalf("StoreTimeout: unset should be 0; got %v", cfg.StoreTimeout)
 	}
 }
+
+// TestCoordinator_StageBreaker_ShortCircuits — Round-13 Task 5.
+//
+// When the embed-stage breaker is configured and pre-tripped, the
+// coordinator must route incoming events to the DLQ without
+// invoking the embed function at all.
+func TestCoordinator_StageBreaker_ShortCircuits(t *testing.T) {
+	t.Parallel()
+	var embedCalls atomic.Int32
+	cfg := newFastConfig(
+		fakeFetch{fn: func(_ context.Context, evt IngestEvent) (*Document, error) {
+			return &Document{TenantID: evt.TenantID, DocumentID: evt.DocumentID, Content: []byte("x"), ContentHash: "h"}, nil
+		}},
+		fakeParse{fn: func(_ context.Context, _ *Document) ([]Block, error) {
+			return []Block{{BlockID: "b", Text: "x"}}, nil
+		}},
+		fakeEmbed{fn: func(_ context.Context, _ string, blocks []Block) ([][]float32, string, error) {
+			embedCalls.Add(1)
+			return [][]float32{{1}}, "m", nil
+		}},
+		&fakeStore{},
+	)
+	breaker, err := NewStageCircuitBreaker(StageCircuitBreakerConfig{Stage: "embed", Threshold: 1, OpenFor: time.Minute})
+	if err != nil {
+		t.Fatalf("NewStageCircuitBreaker: %v", err)
+	}
+	// Pre-trip the breaker.
+	breaker.OnFailure()
+	if breaker.State() != StageBreakerOpen {
+		t.Fatalf("pre-trip state=%s", breaker.State())
+	}
+	cfg.StageBreakers = map[string]*StageCircuitBreaker{"embed": breaker}
+
+	var dlqCalls atomic.Int32
+	var dlqErr error
+	var dlqMu sync.Mutex
+	cfg.OnDLQ = func(_ context.Context, _ IngestEvent, err error) {
+		dlqCalls.Add(1)
+		dlqMu.Lock()
+		defer dlqMu.Unlock()
+		if dlqErr == nil {
+			dlqErr = err
+		}
+	}
+	c, _ := NewCoordinator(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	if err := c.Submit(ctx, IngestEvent{Kind: EventDocumentChanged, TenantID: "t", DocumentID: "d"}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	c.CloseInputs()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := embedCalls.Load(); got != 0 {
+		t.Fatalf("embed call count=%d; expected 0 (breaker open)", got)
+	}
+	if got := dlqCalls.Load(); got != 1 {
+		t.Fatalf("dlq calls=%d; expected 1", got)
+	}
+	dlqMu.Lock()
+	defer dlqMu.Unlock()
+	if !errors.Is(dlqErr, ErrStageBreakerOpen) {
+		t.Fatalf("dlq error=%v; expected ErrStageBreakerOpen", dlqErr)
+	}
+}
