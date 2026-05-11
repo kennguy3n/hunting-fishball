@@ -173,14 +173,28 @@ func (p *Pool) Borrow(ctx context.Context) (*grpc.ClientConn, context.Context, f
 }
 
 // State reports the current breaker state. Safe to call concurrently.
+//
+// When the OpenFor window has elapsed, State() lazily transitions
+// the breaker from Open → HalfOpen so an observer polling the
+// breaker (e.g. health-check endpoints) sees the recovered state
+// without waiting for the next allow() call. The publishState()
+// call mirrors the pattern in allow()/report() so the
+// context_engine_grpc_circuit_breaker_state gauge tracks every
+// transition, not just transitions triggered by traffic.
 func (p *Pool) State() State {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	transitioned := false
 	if p.state == StateOpen && time.Since(p.openedAt) >= p.cfg.OpenFor {
 		// Lazily transition Open → HalfOpen on read.
 		p.state = StateHalfOpen
+		transitioned = true
 	}
-	return p.state
+	s := p.state
+	p.mu.Unlock()
+	if transitioned {
+		p.publishState(StateHalfOpen)
+	}
+	return s
 }
 
 // Close closes every pooled connection. Idempotent.

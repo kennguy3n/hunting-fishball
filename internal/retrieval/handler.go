@@ -511,6 +511,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 	if h.cfg.Cache != nil {
 		cached, cerr := h.cfg.Cache.Get(c.Request.Context(), tenantID, channelID, vec, scopeHash)
 		if cerr == nil && cached != nil {
+			observability.ObserveCacheHit()
 			filtered, blockedByPrivacy := filterCachedByPrivacyMode(cached, h.cfg.PolicyFilter, privacyMode)
 			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
@@ -530,6 +531,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 			return
 		}
+		observability.ObserveCacheMiss()
 	}
 
 	// Round-6 Task 4: optional synonym expansion before fan-out.
@@ -792,6 +794,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	if h.cfg.Cache != nil {
 		cached, cerr := h.cfg.Cache.Get(ctx, tenantID, channelID, vec, scopeHash)
 		if cerr == nil && cached != nil {
+			observability.ObserveCacheHit()
 			filtered, blockedByPrivacy := filterCachedByPrivacyMode(cached, h.cfg.PolicyFilter, privacyMode)
 			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
@@ -803,6 +806,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 			h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
 			return resp, nil
 		}
+		observability.ObserveCacheMiss()
 	}
 
 	resp, perr := h.runPipelineFromVec(ctx, tenantID, req, snapshot, vec, topK, privacyMode)

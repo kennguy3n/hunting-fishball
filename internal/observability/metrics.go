@@ -233,6 +233,28 @@ var (
 			Help: "Current idle HTTP connections in the Qdrant client transport.",
 		},
 	)
+
+	// CacheHitsTotal counts /v1/retrieve requests served from the
+	// semantic cache short-circuit (Round-9 Task 16 supporting
+	// metric). The cache_hit_rate recording rule divides this
+	// counter by (hits + misses) to compute a stable SLI.
+	CacheHitsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_retrieval_cache_hits_total",
+			Help: "Retrieval requests served from the semantic cache short-circuit.",
+		},
+	)
+	// CacheMissesTotal counts /v1/retrieve requests that consulted
+	// the cache and fell through to the full fan-out pipeline. The
+	// counter only increments when a cache is actually configured
+	// so deployments running without a cache don't inflate the
+	// miss series.
+	CacheMissesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_retrieval_cache_misses_total",
+			Help: "Retrieval requests that consulted the cache and fell through to the fan-out pipeline.",
+		},
+	)
 )
 
 // SetGRPCCircuitBreakerState records the current breaker state for
@@ -260,6 +282,8 @@ func init() {
 		PostgresPoolOpenConnections,
 		RedisPoolActiveConnections,
 		QdrantPoolIdleConnections,
+		CacheHitsTotal,
+		CacheMissesTotal,
 	)
 }
 
@@ -310,6 +334,8 @@ func ResetForTest() {
 	Registry.Unregister(PostgresPoolOpenConnections)
 	Registry.Unregister(RedisPoolActiveConnections)
 	Registry.Unregister(QdrantPoolIdleConnections)
+	Registry.Unregister(CacheHitsTotal)
+	Registry.Unregister(CacheMissesTotal)
 	APIRequestsTotal.Reset()
 	APIRequestDurationSeconds.Reset()
 	KafkaConsumerLag.Reset()
@@ -326,6 +352,8 @@ func ResetForTest() {
 	PostgresPoolOpenConnections.Set(0)
 	RedisPoolActiveConnections.Set(0)
 	QdrantPoolIdleConnections.Set(0)
+	// Counters can't be Reset() — unregister + re-register above
+	// is enough to drop their accumulated value.
 	Registry.MustRegister(
 		APIRequestsTotal,
 		APIRequestDurationSeconds,
@@ -344,7 +372,23 @@ func ResetForTest() {
 		PostgresPoolOpenConnections,
 		RedisPoolActiveConnections,
 		QdrantPoolIdleConnections,
+		CacheHitsTotal,
+		CacheMissesTotal,
 	)
+}
+
+// ObserveCacheHit increments the retrieval cache hit counter.
+// Wired from the /v1/retrieve cache short-circuit (Round-9
+// Task 16 supporting metric).
+func ObserveCacheHit() {
+	CacheHitsTotal.Inc()
+}
+
+// ObserveCacheMiss increments the retrieval cache miss counter.
+// Only called when a cache is actually configured so deployments
+// without a cache don't inflate the miss series.
+func ObserveCacheMiss() {
+	CacheMissesTotal.Inc()
 }
 
 // ObserveBudgetViolation increments the cluster-wide counter when a

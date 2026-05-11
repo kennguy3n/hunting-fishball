@@ -233,3 +233,69 @@ func TestCircuitBreakerMetricGauge(t *testing.T) {
 		t.Fatalf("after successful trial: expected 0 (closed); got %v", g)
 	}
 }
+
+// TestStateLazyTransitionPublishesGauge — Round-9 Devin Review
+// follow-up. State() lazily transitions Open → HalfOpen when the
+// OpenFor window has elapsed even if no allow() call has happened
+// since. The lazy transition must publish to the Prometheus gauge
+// so observers polling State() (health endpoints, dashboards) see
+// the recovered state without an artificial bump from a Borrow.
+func TestStateLazyTransitionPublishesGauge(t *testing.T) {
+	t.Parallel()
+	addr, stop := startFakeServer(t)
+	defer stop()
+
+	p, err := grpcpool.New(grpcpool.Config{
+		Target:    addr,
+		Size:      1,
+		Threshold: 2,
+		OpenFor:   20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+
+	readGauge := func() float64 {
+		mfs, err := observability.Registry.Gather()
+		if err != nil {
+			t.Fatalf("gather: %v", err)
+		}
+		for _, mf := range mfs {
+			if mf.GetName() != "context_engine_grpc_circuit_breaker_state" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				for _, lp := range m.GetLabel() {
+					if lp.GetName() == "target" && lp.GetValue() == addr {
+						return m.GetGauge().GetValue()
+					}
+				}
+			}
+		}
+		return -1
+	}
+
+	// Trip the breaker.
+	for i := 0; i < 2; i++ {
+		_, _, release, err := p.Borrow(context.Background())
+		if err != nil {
+			t.Fatalf("borrow %d: %v", i, err)
+		}
+		release(false)
+	}
+	if g := readGauge(); g != 2 {
+		t.Fatalf("after threshold failures: expected 2 (open); got %v", g)
+	}
+
+	// Wait past OpenFor without issuing any Borrow / allow() call.
+	// State() alone must transition the breaker AND publish the
+	// gauge.
+	time.Sleep(30 * time.Millisecond)
+	if s := p.State(); s != grpcpool.StateHalfOpen {
+		t.Fatalf("State() after OpenFor: expected half-open, got %v", s)
+	}
+	if g := readGauge(); g != 1 {
+		t.Fatalf("after State() lazy transition: expected gauge=1 (half-open); got %v", g)
+	}
+}
