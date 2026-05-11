@@ -354,6 +354,81 @@ The full set of public + admin endpoints is documented in
   rollback coverage; `make migrate-rollback` applies them in
   reverse order.
 
+**Round 12 additions:**
+
+- Three new Prometheus alerts in `deploy/alerts.yaml`:
+  `GRPCCircuitBreakerOpen` (page, fires when
+  `context_engine_grpc_circuit_breaker_state{target} == 2` for
+  >5m), `PostgresPoolSaturated`, and `RedisPoolSaturated` (both
+  fire when their pool's open connections exceed 80% of the
+  configured maximum for >5m). All three validated by
+  `make alerts-check`.
+- Retention worker emits
+  `context_engine_retention_expired_chunks_total` (counter) and
+  `context_engine_retention_sweep_duration_seconds` (histogram)
+  per sweep; metrics registered in
+  `internal/observability/metrics.go`.
+- The scheduler tick is now wrapped in `SafeTick` —
+  `recover()`-guarded so a panic in any emitter cannot kill the
+  goroutine. Recovered panics + propagated errors bump
+  `context_engine_scheduler_errors_total`; `last_error` /
+  `last_error_at` persist on the `sync_schedules` row.
+- Python sidecars (`services/docling`, `services/embedding`,
+  `services/memory`) register the gRPC health protocol
+  (`grpc_health.v1`). Each ships a pytest covering
+  `Check() == SERVING`.
+- New background worker:
+  `internal/pipeline/dlq_auto_replay.go` periodically scans
+  `dlq_messages` for rows with `replay_count < max_auto_retries`
+  and re-emits them with capped exponential backoff (1m / 5m /
+  30m). Gated on `CONTEXT_ENGINE_DLQ_AUTO_REPLAY=true`. Metric:
+  `context_engine_dlq_auto_replays_total`.
+- New endpoint:
+  `GET /v1/admin/sources/:id/rate-limit-status` returns the
+  adaptive rate limiter's current token state — `current_tokens`,
+  `max_tokens`, `effective_rate`, `halve_count`, `last_429_at`,
+  `is_throttled`. Built on the `RateLimitInspector` interface so
+  tests stay hermetic.
+- Audit log retention: a background sweeper deletes
+  `audit_logs` rows older than
+  `CONTEXT_ENGINE_AUDIT_RETENTION_DAYS` (default 90) in batches
+  of 1000 rows. Metric:
+  `context_engine_audit_rows_expired_total`. Migration
+  `034_audit_retention.sql` adds the `created_at` index.
+- Adaptive rate limiter now exports
+  `context_engine_adaptive_rate_current{connector}` (gauge) and
+  `context_engine_adaptive_rate_halved_total{connector}`
+  (counter).
+- Four new Go-native fuzz targets cover
+  `pipeline.ParsePartitionKey`, `policy.EffectiveMode`,
+  `shard.DeltaDiff`, and `admin.QueryHash`; each fuzz target
+  appears as its own line in the `make fuzz` enumeration.
+- New CI gates: `make eval` (fails if Precision@5 < 0.8 on
+  the golden corpus) and `make migrate-dry-run` (runs the
+  migrate runner with `DryRun=true` against a fresh SQLite
+  database). Both run in the fast lane.
+- New structural tests:
+  `internal/retrieval/cache_invalidation_test.go` (AST-based —
+  every `QdrantClient.Upsert` / `FalkorDBClient.WriteNodes` /
+  `BleveClient.Index` call must be paired with a
+  `cache.Invalidate` call) and
+  `tests/integration/rbac_coverage_test.go` (every route under
+  `/v1/admin/` must have the RBAC middleware in its handler
+  chain).
+- `docs/openapi.yaml` adds 34 typed response schemas
+  (FeedbackResponse, EvalRunReport, SyncSchedule, ModelCatalog,
+  CredentialHealth, ExportJob, Experiment, WarmCacheResponse,
+  BulkSourceResponse, ChunkQualityReport, LatencyBudget,
+  CacheConfig, SyncHistoryList, PinnedResultList,
+  ConnectorTemplateList, Synonyms, NotificationPreferenceList,
+  NotificationDeliveryLog, RateLimitStatus, …) and typed
+  request bodies for `/v1/retrieve/batch`, `/v1/retrieve/stream`,
+  `/v1/admin/sources`, `/v1/admin/policy/simulate`.
+- New tests: `tests/e2e/isolation_smoke_test.go` (Round-12 Task
+  7), `tests/e2e/round12_test.go` (Round-12 surface bundle),
+  and `tests/regression/round911_manifest.go` (PR #20
+  Devin Review fixes catalogue).
+
 **Round 11 additions:**
 
 - The `Makefile` `fuzz` target now enumerates each fuzz target
@@ -632,8 +707,11 @@ Other targets:
 | `make proto-gen`        | Regenerate `*.pb.go` from `proto/**/*.proto`                |
 | `make proto-check`      | Verify generated proto files are up to date                 |
 | `make alerts-check`     | Validate `deploy/alerts.yaml` Prometheus rule manifest      |
-| `make fuzz`             | Run Go native fuzz targets in `internal/retrieval/` (30s)   |
+| `make fuzz`             | Run Go native fuzz targets across `internal/retrieval/`, `internal/admin/`, `internal/pipeline/`, `internal/policy/`, `internal/shard/` (30s per target) |
 | `make migrate-rollback` | Apply `migrations/rollback/*.down.sql` in reverse via `psql` (gated on `CONTEXT_ENGINE_DATABASE_URL`) |
+| `make migrate-dry-run`  | Run `internal/migrate/runner.go` with `DryRun=true` against a fresh SQLite database — catches SQL syntax errors before merge (Round 12 Task 9) |
+| `make test-isolation`   | Run the Round-12 tenant-isolation e2e smoke (`tests/e2e/isolation_smoke_test.go`, build tag `e2e`) |
+| `make eval`             | Run the golden-corpus eval; fails if Precision@5 < 0.8 (Round 12 Task 8) |
 | `make clean`            | Remove `./bin/` and coverage artefacts                      |
 
 ### Python ML microservices (Phase 3)

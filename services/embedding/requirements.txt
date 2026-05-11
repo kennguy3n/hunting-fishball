@@ -1,6 +1,8 @@
 # Phase 3 embedding gRPC microservice runtime deps.
 grpcio==1.80.0
 grpcio-tools==1.80.0
+# Round-12 Task 5: standard grpc.health.v1 servicer.
+grpcio-health-checking==1.80.0
 protobuf>=6.0.0,<8.0.0
 sentence-transformers>=3.0.0,<4
 # torch is pinned by sentence-transformers; we leave it as a transitive

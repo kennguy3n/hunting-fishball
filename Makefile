@@ -137,6 +137,27 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz='^FuzzABTestConfigDecode$$' -fuzztime=30s ./internal/admin/
 	$(GO) test -run='^$$' -fuzz='^FuzzConnectorTemplateDecode$$' -fuzztime=30s ./internal/admin/
 	$(GO) test -run='^$$' -fuzz='^FuzzNotificationPreferenceDecode$$' -fuzztime=30s ./internal/admin/
+	# Round-12 Task 12: four new native fuzz targets.
+	$(GO) test -run='^$$' -fuzz='^FuzzParsePartitionKey$$' -fuzztime=30s ./internal/pipeline/
+	$(GO) test -run='^$$' -fuzz='^FuzzEffectiveMode$$' -fuzztime=30s ./internal/policy/
+	$(GO) test -run='^$$' -fuzz='^FuzzDeltaDiff$$' -fuzztime=30s ./internal/shard/
+	$(GO) test -run='^$$' -fuzz='^FuzzQueryHash$$' -fuzztime=30s ./internal/admin/
+
+# Round-12 Task 7: tenant isolation smoke. Runs the e2e isolation
+# manifest against the live storage plane.
+.PHONY: test-isolation
+test-isolation:
+	@echo "Running tenant isolation smoke e2e..."
+	E2E_ENABLED=1 \
+	$(GO) test -tags=e2e -race -count=1 -timeout 5m -run '^TestIsolationSmoke' ./tests/e2e/...
+
+# Round-12 Task 9: migration dry-run gate. Drives migrate.Runner in
+# DryRun mode against a fresh SQLite database so SQL syntax errors
+# land at PR time, not deploy time.
+.PHONY: migrate-dry-run
+migrate-dry-run:
+	@echo "Running migration dry-run against fresh SQLite database..."
+	$(GO) test -count=1 -timeout 2m -run '^TestMigrate_DryRun$$' ./internal/migrate/...
 
 .PHONY: migrate-rollback
 migrate-rollback:

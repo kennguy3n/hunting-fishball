@@ -251,3 +251,75 @@ spec:
               query plans; the retrieval handler will start falling
               back to defaults if errors follow.
             runbook_url: "https://docs/RUNBOOKS.md#gorm-store-latency-high"
+
+    # -------------------------------------------------------------
+    # Round-12 Task 1+2: gRPC circuit breakers + connection pools
+    # -------------------------------------------------------------
+    - name: context-engine.round12
+      interval: 30s
+      rules:
+        - alert: GRPCCircuitBreakerOpen
+          # Fires when any gRPC sidecar circuit breaker is in the
+          # `open` state (gauge value 2) for more than 5 minutes.
+          # An open breaker means the pool is short-circuiting every
+          # call to the target host so traffic never reaches the
+          # remote — the page wakes the on-call to investigate the
+          # downstream Python sidecar.
+          expr: max by (target) (context_engine_grpc_circuit_breaker_state) == 2
+          for: 5m
+          labels:
+            severity: page
+            service: context-engine
+          annotations:
+            summary: "gRPC circuit breaker open for {{ $labels.target }} > 5m"
+            description: |
+              The circuit breaker for gRPC target
+              {{ $labels.target }} has been in the `open` state
+              (gauge value 2) for over 5 minutes. Every dial against
+              this target is short-circuited; check the sidecar's
+              health endpoint and recent deploys/HPAs.
+            runbook_url: "https://docs/RUNBOOKS.md#grpc-circuit-breaker-open"
+
+        - alert: PostgresPoolSaturated
+          # Fires when the live open-connection gauge passes 80% of
+          # the configured CONTEXT_ENGINE_PG_MAX_OPEN ceiling. The
+          # ceiling is injected as a recording rule constant by
+          # ops/recording-rules.yaml; the threshold below is the
+          # absolute alert level for a default deployment of 100.
+          # Operators with non-default ceilings should override the
+          # threshold via a kustomize patch.
+          expr: context_engine_postgres_pool_open_connections > 80
+          for: 5m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Postgres pool > 80% saturation for 5m"
+            description: |
+              Postgres open connections have stayed above 80% of the
+              configured CONTEXT_ENGINE_PG_MAX_OPEN ceiling for more
+              than 5 minutes. Connection exhaustion is imminent —
+              inspect long-running queries and pgbouncer health.
+            runbook_url: "https://docs/RUNBOOKS.md#postgres-pool-saturated"
+
+        - alert: RedisPoolSaturated
+          # Fires when the Redis active (non-idle) connection gauge
+          # exceeds 80 for 5 minutes — sustained pool saturation on
+          # the default 100-conn ceiling. The semantic cache + rate
+          # limiter share the pool so saturation hurts both the hot
+          # retrieve path and connector backfills.
+          expr: context_engine_redis_pool_active_connections > 80
+          for: 5m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Redis pool > 80% saturation for 5m"
+            description: |
+              Redis active connections have stayed above 80% of the
+              configured pool ceiling for more than 5 minutes. The
+              semantic cache and rate limiter share this pool, so
+              saturation directly slows retrieval and backfill paths.
+              Inspect Redis CPU + slow log; consider a connection
+              pool bump or a cache-key TTL audit.
+            runbook_url: "https://docs/RUNBOOKS.md#redis-pool-saturated"

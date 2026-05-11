@@ -545,6 +545,33 @@ func run() error {
 				slog.Warn("ingest: dlq consumer", slog.String("error", err.Error()))
 			}
 		}()
+
+		// Round-12 Task 6: optional DLQ auto-replay worker. Off by
+		// default; opt-in via CONTEXT_ENGINE_DLQ_AUTO_REPLAY=true so
+		// a noisy connector cannot accidentally double-emit on a
+		// binary upgrade. Reuses the existing ingestProducer so we
+		// do not open another Kafka connection.
+		if os.Getenv("CONTEXT_ENGINE_DLQ_AUTO_REPLAY") == "true" {
+			replayer, rerr := pipeline.NewReplayer(dlqStore, ingestProducer, stageWorkerEnv("CONTEXT_ENGINE_DLQ_MAX_ATTEMPTS"))
+			if rerr != nil {
+				slog.Warn("ingest: dlq auto-replay replayer", slog.String("error", rerr.Error()))
+			} else {
+				worker, werr := pipeline.NewDLQAutoReplayer(pipeline.DLQAutoReplayConfig{
+					Store:    dlqStore,
+					Replayer: replayer,
+					Logger:   slog.Default(),
+				})
+				if werr != nil {
+					slog.Warn("ingest: dlq auto-replay worker", slog.String("error", werr.Error()))
+				} else {
+					go func() {
+						if err := worker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+							slog.Warn("ingest: dlq auto-replay", slog.String("error", err.Error()))
+						}
+					}()
+				}
+			}
+		}
 	}
 
 	// ---- Phase 8 Task 20: HTTP probes + /metrics on a sidecar port.

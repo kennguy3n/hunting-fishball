@@ -287,6 +287,332 @@ components:
         privacy_strip: { type: boolean }
         device_first: { type: boolean }
         server_version: { type: string }
+
+    # ----------------------------------------------------------------
+    # Round-12 Task 10/11: typed response/request schemas covering
+    # the long tail of admin endpoints that previously shipped
+    # 'description: OK' or 'additionalProperties: true' stubs.
+    # Schemas mirror the Go struct field names in internal/.
+    # ----------------------------------------------------------------
+    FeedbackRequest:
+      type: object
+      required: [query_id, chunk_id, relevant]
+      properties:
+        query_id: { type: string }
+        chunk_id: { type: string }
+        relevant: { type: boolean }
+        note:     { type: string }
+    FeedbackResponse:
+      type: object
+      properties:
+        id:         { type: string }
+        created_at: { type: string, format: date-time }
+    EvalRunReport:
+      type: object
+      properties:
+        suite_name:   { type: string }
+        tenant_id:    { type: string }
+        started_at:   { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+        duration:     { type: integer, description: "nanoseconds" }
+        k:            { type: integer }
+        cases:
+          type: array
+          items: { type: object, additionalProperties: true }
+        aggregate:
+          type: object
+          properties:
+            precision_at_k: { type: number, format: float }
+            recall_at_k:    { type: number, format: float }
+            mrr:            { type: number, format: float }
+            ndcg_at_k:      { type: number, format: float }
+    SyncSchedule:
+      type: object
+      properties:
+        tenant_id:        { type: string }
+        source_id:        { type: string }
+        cron:             { type: string }
+        cadence:          { type: string }
+        last_run_at:      { type: string, format: date-time }
+        next_run_at:      { type: string, format: date-time }
+        last_status:      { type: string, enum: [ok, error, never_run] }
+        last_error:       { type: string }
+        last_error_at:    { type: string, format: date-time }
+    ModelEntry:
+      type: object
+      properties:
+        id:           { type: string }
+        family:       { type: string }
+        quantization: { type: string }
+        tier_floor:   { type: string }
+        size_bytes:   { type: integer }
+        hash:         { type: string }
+    ModelCatalog:
+      type: object
+      properties:
+        catalog_version: { type: integer, format: int64 }
+        models:
+          type: array
+          items: { $ref: '#/components/schemas/ModelEntry' }
+        eviction_config: { type: object, additionalProperties: true }
+    CredentialHealth:
+      type: object
+      properties:
+        tenant_id:                { type: string }
+        source_id:                { type: string }
+        credential_valid:         { type: boolean }
+        credential_error:         { type: string }
+        credential_checked_at:    { type: string, format: date-time }
+    ExportJob:
+      type: object
+      properties:
+        id:           { type: string }
+        tenant_id:    { type: string }
+        actor_id:     { type: string }
+        status:       { type: string, enum: [pending, running, completed, failed] }
+        download_url: { type: string }
+        error:        { type: string }
+        created_at:   { type: string, format: date-time }
+        started_at:   { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+    Experiment:
+      type: object
+      properties:
+        tenant_id:              { type: string }
+        experiment_name:        { type: string }
+        status:                 { type: string, enum: [draft, running, paused, ended] }
+        traffic_split_percent:  { type: integer }
+        control_config:         { type: object, additionalProperties: true }
+        variant_config:         { type: object, additionalProperties: true }
+        start_at:               { type: string, format: date-time }
+        end_at:                 { type: string, format: date-time }
+        created_at:             { type: string, format: date-time }
+        updated_at:             { type: string, format: date-time }
+    ExperimentList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Experiment' }
+    ABTestArmResult:
+      type: object
+      properties:
+        arm:                { type: string }
+        count:              { type: integer }
+        avg_latency_ms:     { type: number, format: float }
+        avg_hit_count:      { type: number, format: float }
+        cache_hit_percent:  { type: number, format: float }
+        p50_latency_ms:     { type: number, format: float }
+        p95_latency_ms:     { type: number, format: float }
+    ABTestResultsResponse:
+      type: object
+      properties:
+        experiment: { type: string }
+        arms:
+          type: array
+          items: { $ref: '#/components/schemas/ABTestArmResult' }
+    WarmCacheRequest:
+      type: object
+      required: [queries]
+      properties:
+        queries:
+          type: array
+          items: { type: string }
+        actor_id: { type: string }
+    WarmCacheResponse:
+      type: object
+      properties:
+        queued:    { type: integer }
+        skipped:   { type: integer }
+        accepted:  { type: boolean }
+    BulkSourceRequest:
+      type: object
+      required: [operation, source_ids]
+      properties:
+        operation: { type: string, enum: [connect, purge, reindex] }
+        source_ids:
+          type: array
+          items: { type: string }
+    BulkSourceResponse:
+      type: object
+      properties:
+        accepted_count: { type: integer }
+        rejected_count: { type: integer }
+        details:
+          type: array
+          items: { type: object, additionalProperties: true }
+    SourceBucket:
+      type: object
+      properties:
+        source_id: { type: string }
+        count:     { type: integer }
+        avg_score: { type: number, format: float }
+        duplicate_count: { type: integer }
+    ChunkQualityReport:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        buckets:
+          type: array
+          items: { $ref: '#/components/schemas/SourceBucket' }
+    LatencyBudget:
+      type: object
+      properties:
+        tenant_id:        { type: string }
+        max_latency_ms:   { type: integer }
+        p95_target_ms:    { type: integer }
+        notes:            { type: string }
+        created_at:       { type: string, format: date-time }
+        updated_at:       { type: string, format: date-time }
+    CacheConfig:
+      type: object
+      properties:
+        tenant_id:  { type: string }
+        ttl_ms:     { type: integer }
+        notes:      { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SyncHistoryRow:
+      type: object
+      properties:
+        id:             { type: string }
+        tenant_id:      { type: string }
+        source_id:      { type: string }
+        sync_run_id:    { type: string }
+        status:         { type: string, enum: [running, success, failed, cancelled] }
+        docs_processed: { type: integer }
+        docs_failed:    { type: integer }
+        started_at:     { type: string, format: date-time }
+        ended_at:       { type: string, format: date-time }
+        error_message:  { type: string }
+        duration_ms:    { type: integer, format: int64 }
+    SyncHistoryList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SyncHistoryRow' }
+    PinnedResult:
+      type: object
+      properties:
+        id:            { type: string }
+        tenant_id:     { type: string }
+        query_pattern: { type: string }
+        chunk_id:      { type: string }
+        position:      { type: integer }
+        created_at:    { type: string, format: date-time }
+    PinnedResultList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PinnedResult' }
+    ConnectorTemplate:
+      type: object
+      properties:
+        id:             { type: string }
+        tenant_id:      { type: string }
+        connector_type: { type: string }
+        default_config: { type: object, additionalProperties: true }
+        description:    { type: string }
+        created_at:     { type: string, format: date-time }
+        updated_at:     { type: string, format: date-time }
+    ConnectorTemplateList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ConnectorTemplate' }
+    Synonyms:
+      type: object
+      description: "per-tenant synonyms: maps lhs token -> list of rhs token(s)."
+      additionalProperties:
+        type: array
+        items: { type: string }
+    NotificationPreference:
+      type: object
+      properties:
+        id:         { type: string }
+        tenant_id:  { type: string }
+        event_type: { type: string }
+        channel:    { type: string, enum: [webhook, email] }
+        target:     { type: string }
+        enabled:    { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    NotificationPreferenceList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/NotificationPreference' }
+    NotificationDeliveryLog:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id:            { type: string }
+              tenant_id:     { type: string }
+              event_type:    { type: string }
+              channel:       { type: string, enum: [webhook, email] }
+              target:        { type: string }
+              status:        { type: string, enum: [success, failure, retrying, dead_letter] }
+              attempt:       { type: integer }
+              error_message: { type: string }
+              created_at:    { type: string, format: date-time }
+    RateLimitStatus:
+      type: object
+      properties:
+        tenant_id:      { type: string }
+        source_id:      { type: string }
+        current_tokens: { type: number, format: float }
+        max_tokens:     { type: integer }
+        effective_rate: { type: number, format: float }
+        halve_count:    { type: integer }
+        last_429_at:    { type: string, format: date-time }
+        is_throttled:   { type: boolean }
+    BatchRetrieveRequest:
+      type: object
+      required: [requests]
+      properties:
+        requests:
+          type: array
+          items: { $ref: '#/components/schemas/RetrieveRequest' }
+        diversity: { type: number, format: float }
+    StreamRetrieveRequest:
+      type: object
+      required: [query]
+      properties:
+        query:     { type: string }
+        top_k:     { type: integer }
+        explain:   { type: boolean }
+        namespace: { type: string }
+        privacy_mode: { type: string, enum: [no-ai, local-only, local-api, hybrid, remote] }
+    CreateSourceRequest:
+      type: object
+      required: [tenant_id, name, connector_type]
+      properties:
+        tenant_id:      { type: string }
+        name:           { type: string }
+        connector_type: { type: string }
+        config:         { type: object, additionalProperties: true }
+        rate_limit:
+          type: object
+          properties:
+            capacity:          { type: integer }
+            refill_per_second: { type: number, format: float }
+    PolicySimulateRequest:
+      type: object
+      required: [tenant_id, draft]
+      properties:
+        tenant_id: { type: string }
+        draft:     { type: object, additionalProperties: true }
+        sample_queries:
+          type: array
+          items: { type: string }
 paths:
   /healthz:
     get:
@@ -326,7 +652,9 @@ paths:
       parameters:
         - $ref: '#/components/parameters/TenantHeader'
       responses:
-        '200': { description: OK }
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/SyncSchedule' } } } } } }
   /v1/retrieve:
     post:
       summary: Run a single retrieval (vector + BM25 + graph + memory fan-out).
@@ -345,6 +673,29 @@ paths:
         '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         '401': { description: Missing tenant }
         '503': { description: Policy resolver unavailable }
+  /v1/admin/rate-limit-status:
+    get:
+      summary: Round-12 Task 16 alias — see /v1/admin/sources/{id}/rate-limit-status.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: query
+          name: source_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RateLimitStatus' } } } }
+  /v1/admin/sources/{id}/rate-limit-status:
+    get:
+      summary: Inspect adaptive rate-limiter state for a source.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RateLimitStatus' } } } }
+        '401': { description: Missing tenant }
   /v1/retrieve/batch:
     post:
       summary: Run multiple retrieves concurrently in one request.
@@ -354,7 +705,12 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/BatchRequest' }
+            # BatchRequest is the historical envelope; BatchRetrieveRequest
+            # mirrors internal/retrieval.BatchRetrieveRequest.
+            schema:
+              oneOf:
+                - { $ref: '#/components/schemas/BatchRequest' }
+                - { $ref: '#/components/schemas/BatchRetrieveRequest' }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BatchResponse' } } } }
         '400': { description: Bad request }
@@ -409,7 +765,7 @@ paths:
     get:
       summary: SLM model catalog (Bonsai-1.7B builds, eviction config).
       responses:
-        '200': { description: OK }
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ModelCatalog' } } } }
   /v1/audit-logs:
     get:
       summary: Audit log list (legacy path; identical to /v1/admin/audit).
@@ -510,7 +866,12 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/ConnectRequest' }
+            # ConnectRequest is the historical envelope; CreateSourceRequest
+            # is the typed alias mirroring internal/admin.CreateSourceRequest.
+            schema:
+              oneOf:
+                - { $ref: '#/components/schemas/ConnectRequest' }
+                - { $ref: '#/components/schemas/CreateSourceRequest' }
       responses:
         '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
     get:
@@ -678,7 +1039,9 @@ paths:
     post:
       summary: Simulate a policy change against the current corpus.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PolicySimulateRequest' } } }
       responses: { '200': { description: OK } }
   /v1/admin/policy/simulate/diff:
     post:
@@ -736,8 +1099,11 @@ paths:
     post:
       summary: Record a positive/negative feedback signal for a retrieval result.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '202': { description: Accepted } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/FeedbackRequest' } } }
+      responses:
+        '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/FeedbackResponse' } } } }
   /v1/admin/policy/history:
     get:
       summary: List historical policy versions.
@@ -781,7 +1147,9 @@ paths:
     post:
       summary: Stream retrieval results as Server-Sent Events.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StreamRetrieveRequest' } } }
       responses: { '200': { description: SSE stream } }
   /v1/admin/sources/{id}/schema:
     get:
@@ -817,36 +1185,49 @@ paths:
     get:
       summary: List per-tenant query synonyms.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Synonyms' } } } }
     post:
       summary: Add a new query synonym mapping.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '201': { description: Created } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Synonyms' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Synonyms' } } } }
   /v1/admin/retrieval/experiments:
     get:
       summary: List active retrieval A/B experiments.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ExperimentList' } } } }
     post:
       summary: Create a new retrieval A/B experiment.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '201': { description: Created } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Experiment' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Experiment' } } } }
   /v1/admin/notifications/subscriptions:
     get:
       summary: List webhook/email notification subscriptions.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationPreferenceList' } } } }
     post:
       summary: Create a webhook/email notification subscription.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '201': { description: Created } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NotificationPreference' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationPreference' } } } }
   /v1/admin/connector-templates:
     get:
       summary: List shared connector configuration templates.
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectorTemplateList' } } } }
   /v1/admin/isolation/check:
     get:
       summary: Run cross-tenant isolation invariants check.
@@ -894,7 +1275,8 @@ paths:
     get:
       summary: Inspect persisted webhook/email delivery attempts.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationDeliveryLog' } } } }
   /v1/admin/retrieval/experiments/{name}/results:
     get:
       summary: Aggregate per-arm metrics for an experiment.
@@ -904,7 +1286,8 @@ paths:
           name: name
           required: true
           schema: { type: string }
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ABTestResultsResponse' } } } }
   /v1/admin/sources/{id}/credential-health:
     get:
       summary: Inspect last credential-validation outcome for a source.
@@ -914,34 +1297,46 @@ paths:
           name: id
           required: true
           schema: { type: string }
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CredentialHealth' } } } }
   /v1/admin/retrieval/warm-cache:
     post:
       summary: Pre-warm the semantic cache with a set of queries.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '202': { description: Accepted } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/WarmCacheRequest' } } }
+      responses:
+        '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/WarmCacheResponse' } } } }
   /v1/admin/sources/bulk:
     post:
       summary: Bulk source operations (connect / purge / reindex).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '202': { description: Accepted } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BulkSourceRequest' } } }
+      responses:
+        '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/BulkSourceResponse' } } } }
   /v1/admin/latency-budget:
     get:
       summary: Get the per-tenant retrieval latency budget.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LatencyBudget' } } } }
     put:
       summary: Set or update the per-tenant retrieval latency budget.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '200': { description: OK } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LatencyBudget' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LatencyBudget' } } } }
   /v1/admin/chunks/quality:
     get:
       summary: Chunk-quality report (low-information, near-duplicate, empty).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ChunkQualityReport' } } } }
   /v1/admin/audit/export:
     post:
       summary: Export audit log as CSV/JSONL.
@@ -952,27 +1347,36 @@ paths:
     get:
       summary: Get the per-tenant semantic-cache TTL.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CacheConfig' } } } }
     put:
       summary: Set or update the per-tenant semantic-cache TTL.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '200': { description: OK } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CacheConfig' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CacheConfig' } } } }
   /v1/admin/sync-history:
     get:
       summary: List sync runs (success/failure, counts, durations).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SyncHistoryList' } } } }
   /v1/admin/pinned-results:
     get:
       summary: List operator-pinned retrieval results.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PinnedResultList' } } } }
     post:
       summary: Pin a chunk at a specific position for a query pattern.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '201': { description: Created } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PinnedResult' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/PinnedResult' } } } }
   /v1/admin/pipeline/health:
     get:
       summary: Pipeline health dashboard (queue depth, retries, latency).
@@ -1109,16 +1513,16 @@ paths:
     get:
       summary: List notification preferences (Round-7 alias).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationPreferenceList' } } } }
     post:
       summary: Create a notification preference (Round-7 alias).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { type: object, additionalProperties: true }
-      responses: { '201': { description: Created } }
+        content: { application/json: { schema: { $ref: '#/components/schemas/NotificationPreference' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/NotificationPreference' } } } }
   /v1/admin/notifications/{id}:
     delete:
       summary: Delete a notification preference.
@@ -1139,7 +1543,8 @@ paths:
           name: id
           required: true
           schema: { type: string }
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectorTemplate' } } } }
     delete:
       summary: Delete a connector template.
       parameters:
@@ -1159,7 +1564,8 @@ paths:
           name: name
           required: true
           schema: { type: string }
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Experiment' } } } }
     delete:
       summary: Delete a retrieval A/B experiment.
       parameters:
@@ -1174,7 +1580,8 @@ paths:
     get:
       summary: Per-chunk quality scoring report (Round-10 Task 4 hook).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ChunkQualityReport' } } } }
 
   /v1/admin/sources/{id}/sync-history:
     get:
@@ -1185,7 +1592,8 @@ paths:
           name: id
           required: true
           schema: { type: string }
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SyncHistoryList' } } } }
 
   /v1/admin/tenants/{id}/cache-config:
     get:
@@ -1196,7 +1604,8 @@ paths:
           name: id
           required: true
           schema: { type: string }
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CacheConfig' } } } }
     put:
       summary: Set per-tenant semantic-cache TTL (Round-7 alias).
       parameters:
@@ -1207,10 +1616,9 @@ paths:
           schema: { type: string }
       requestBody:
         required: true
-        content:
-          application/json:
-            schema: { type: object, additionalProperties: true }
-      responses: { '200': { description: OK } }
+        content: { application/json: { schema: { $ref: '#/components/schemas/CacheConfig' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CacheConfig' } } } }
 
   /v1/admin/tenants/{id}/latency-budget:
     get:
@@ -1221,7 +1629,8 @@ paths:
           name: id
           required: true
           schema: { type: string }
-      responses: { '200': { description: OK } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LatencyBudget' } } } }
     put:
       summary: Set per-tenant retrieval latency budget (Round-7 alias).
       parameters:

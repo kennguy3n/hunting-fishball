@@ -136,6 +136,26 @@ jobs:
       - name: rollback parity tests
         run: go test -race -count=1 ./migrations/rollback/...
 
+  fast-migrate-dry-run:
+    # Round-12 Task 9: drive the migration runner in DryRun mode
+    # against an ephemeral SQLite database so SQL syntax errors in
+    # new migrations surface at PR time, not deploy time.
+    name: Fast migrate-dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: migrate-dry-run
+        run: make migrate-dry-run
+
   fast-proto-check:
     name: Fast — proto-check (no codegen drift)
     # Round-10 Task 17: pin the proto-gen output as a fast-lane
@@ -189,7 +209,7 @@ jobs:
   fast-required:
     name: Required CI (fast lane)
     runs-on: ubuntu-latest
-    needs: [fast-go, fast-eval, fast-alerts, fast-rollback-parity, fast-proto-check, fast-python]
+    needs: [fast-go, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
     if: always()
     steps:
       - name: Verify fast-lane jobs passed
@@ -201,6 +221,7 @@ jobs:
             "${{ needs.fast-eval.result }}" \
             "${{ needs.fast-alerts.result }}" \
             "${{ needs.fast-rollback-parity.result }}" \
+            "${{ needs.fast-migrate-dry-run.result }}" \
             "${{ needs.fast-proto-check.result }}" \
             "${{ needs.fast-python.result }}"; do
             if [ "$r" != "success" ]; then
@@ -208,7 +229,7 @@ jobs:
             fi
           done
           if [ "$fail" = "1" ]; then
-            echo "::error::fast-go=${{ needs.fast-go.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
+            echo "::error::fast-go=${{ needs.fast-go.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
             exit 1
           fi
           echo "fast lane green"
@@ -297,6 +318,17 @@ jobs:
           CONTEXT_ENGINE_DATABASE_URL: "host=localhost user=hf password=hf dbname=hunting_fishball port=5432 sslmode=disable"
           CONTEXT_ENGINE_QDRANT_URL: "http://localhost:6333"
         run: go test -tags=e2e -race -count=1 -timeout 5m ./tests/e2e/...
+
+      # Round-12 Task 7: tenant isolation smoke runs against the
+      # live storage plane brought up above. Kept as a discrete
+      # step so a failure here surfaces as "isolation regression"
+      # rather than getting buried in the generic e2e suite.
+      - name: Tenant isolation smoke
+        env:
+          E2E_ENABLED: "1"
+          CONTEXT_ENGINE_DATABASE_URL: "host=localhost user=hf password=hf dbname=hunting_fishball port=5432 sslmode=disable"
+          CONTEXT_ENGINE_QDRANT_URL: "http://localhost:6333"
+        run: make test-isolation
 
       - name: Tear down storage plane
         if: always()

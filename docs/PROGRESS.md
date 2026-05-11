@@ -435,6 +435,121 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-11: **Round 12: Next 20 tasks — observability alerts,
+  resilience hardening, CI gates, OpenAPI completeness, fuzz
+  expansion, docs audit**.
+  - **Task 1**: `deploy/alerts.yaml` declares
+    `GRPCCircuitBreakerOpen` (fires when
+    `context_engine_grpc_circuit_breaker_state{target} == 2` for
+    >5m, severity `page`). Test in `deploy/alerts_test.go`.
+  - **Task 2**: `PostgresPoolSaturated` and `RedisPoolSaturated`
+    alerts in `deploy/alerts.yaml` watch pool utilisation
+    relative to the configured max; tests assert presence and
+    thresholds.
+  - **Task 3**: `internal/pipeline/retention_worker.go` records
+    `context_engine_retention_expired_chunks_total` (counter) and
+    `context_engine_retention_sweep_duration_seconds` (histogram)
+    on every sweep. Registered + `ResetForTest`-covered in
+    `internal/observability/metrics.go`. Tests in
+    `internal/pipeline/retention_worker_metrics_test.go`.
+  - **Task 4**: `internal/admin/scheduler.go` wraps the tick in a
+    `recover()` (`SafeTick`) so a panic in an emit path cannot
+    kill the scheduler goroutine. `context_engine_scheduler_errors_total`
+    counts recovered panics + propagated errors; `last_error` /
+    `last_error_at` persisted on the `sync_schedules` row.
+    Tests in `internal/admin/scheduler_resilience_test.go`.
+  - **Task 5**: Python sidecars (`services/docling`,
+    `services/embedding`, `services/memory`) register the
+    gRPC health protocol (`grpc_health.v1`). Each service has a
+    pytest covering `Check() == SERVING`. Documented in
+    `docs/ARCHITECTURE.md` §2.3.
+  - **Task 6**: `internal/pipeline/dlq_auto_replay.go` scans
+    `dlq_messages` for rows with `replay_count < max_auto_retries`
+    and `next_replay_at <= now()`; re-emits via the existing
+    Replayer with capped backoff (1m / 5m / 30m). Gated on
+    `CONTEXT_ENGINE_DLQ_AUTO_REPLAY=true`. Metric:
+    `context_engine_dlq_auto_replays_total`. Test in
+    `internal/pipeline/dlq_auto_replay_test.go`.
+  - **Task 7**: `tests/e2e/isolation_smoke_test.go` ingests one
+    document per tenant for two tenants and asserts
+    `POST /v1/admin/isolation-check` returns a clean report.
+    `make test-isolation` target wires this into CI's full lane.
+  - **Task 8**: `make eval` runs the golden-corpus eval and fails
+    if Precision@5 < 0.8. Added to CI fast lane.
+  - **Task 9**: `make migrate-dry-run` runs the migrate runner
+    with `DryRun=true` against a fresh SQLite database. Wired
+    into CI fast lane.
+  - **Task 10**: `docs/openapi.yaml` adds 34 typed response
+    schemas covering retrieval feedback, eval results, sync
+    schedule, models catalog, credential health, export jobs,
+    A/B experiments, warm-cache, bulk sources, chunk quality,
+    latency budget, cache config, sync history, pinned results,
+    connector templates, synonyms, notification preferences.
+    24 endpoint responses converted from
+    `additionalProperties: true` / `description: OK` stubs to
+    typed schema refs.
+  - **Task 11**: Typed `requestBody` schemas for the core
+    endpoints — `BatchRetrieveRequest`, `StreamRetrieveRequest`,
+    `CreateSourceRequest`, `PolicySimulateRequest` — mirror the
+    Go handler's `ShouldBindJSON` targets and replace untyped
+    bodies in `/v1/retrieve/batch`, `/v1/retrieve/stream`,
+    `/v1/admin/sources`, `/v1/admin/policy/simulate`.
+  - **Task 12**: New Go-native fuzz targets:
+    `internal/pipeline/consumer_fuzz_test.go::FuzzParsePartitionKey`,
+    `internal/policy/privacy_mode_fuzz_test.go::FuzzEffectiveMode`,
+    `internal/shard/delta_fuzz_test.go::FuzzDeltaDiff`,
+    `internal/admin/query_analytics_fuzz_test.go::FuzzQueryHash`.
+    `Makefile` `fuzz` target lists each target individually.
+  - **Task 13**: `internal/connector/adaptive_rate.go` sets the
+    `context_engine_adaptive_rate_current{connector}` gauge on
+    every rate change and increments
+    `context_engine_adaptive_rate_halved_total{connector}` on
+    every halve. Test in
+    `internal/connector/adaptive_rate_metrics_test.go`.
+  - **Task 14**: `internal/retrieval/cache_invalidation_test.go`
+    uses Go AST analysis to verify every Stage-4 write
+    (`QdrantClient.Upsert`, `FalkorDBClient.WriteNodes`,
+    `BleveClient.Index`) inside `internal/pipeline/` is paired
+    with a `cache.Invalidate` call in the same function or its
+    immediate caller. Catches new write paths that ship without
+    a cache invalidation companion.
+  - **Task 15**: `tests/integration/rbac_coverage_test.go`
+    (build tag `integration`) enumerates every route under the
+    `/v1/admin/` group and asserts each has the RBAC middleware
+    in its handler chain. Catches new admin handlers that ship
+    without role gating.
+  - **Task 16**: `internal/admin/rate_limit_status_handler.go`
+    exposes `GET /v1/admin/sources/:id/rate-limit-status`
+    returning `current_tokens`, `max_tokens`, `effective_rate`,
+    `halve_count`, `last_429_at`, `is_throttled`. Built on the
+    `RateLimitInspector` interface for test hermeticity. Tests
+    use miniredis. Documented in `docs/openapi.yaml`.
+  - **Task 17**: `internal/admin/audit_retention.go` background
+    sweeper deletes audit_logs rows older than
+    `CONTEXT_ENGINE_AUDIT_RETENTION_DAYS` (default 90) in
+    batches of 1000 rows. Metric
+    `context_engine_audit_rows_expired_total`. Migration
+    `migrations/034_audit_retention.sql` adds an index on
+    `audit_logs.created_at` if missing.
+  - **Task 18**: `tests/regression/round911_manifest.go` +
+    `_test.go` catalogue the six Round-11 Devin Review fixes
+    (batch topK fallback, cache-warm analytics tagging, stream
+    explain auth, backend_timings schema alignment, hook panic
+    recovery, QueryAnalyticsSource constants). Meta-tests assert
+    every named regression test exists in the tree.
+  - **Task 19**: `tests/e2e/round12_test.go` (build tag `e2e`)
+    smoke-tests the Round-12 surface as a single bundle:
+    DLQ auto-replay, rate-limit status, audit retention,
+    isolation across two tenants, scheduler panic recovery, and
+    Round-12 alert rule presence.
+  - **Task 20**: PROGRESS / README / ARCHITECTURE / PHASES
+    audit — Round 12 changelog (this entry), README "Round 12
+    additions" block, ARCHITECTURE "Tech choices added in
+    Round 12" section, PHASES Round 12 status note,
+    `test-isolation` and `migrate-dry-run` added to the Make
+    targets table, connector count + migration count
+    cross-checked (12 connectors, migrations through 034).
+
 - 2026-05-11: **Round 11: Next 20 tasks — fuzz fix, e2e depth,
   hook observability, batch diversity, graceful degradation, docs
   audit**.

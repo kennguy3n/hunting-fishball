@@ -390,6 +390,94 @@ var (
 		},
 		[]string{"store"},
 	)
+
+	// RetentionExpiredChunksTotal — Round-12 Task 3. Counts chunks
+	// expired (and deleted) by the retention worker. The counter
+	// only increments when the cross-tier deleter returns success,
+	// so failed deletes don't double-bill operators on a sweep that
+	// repeatedly retries. No tenant_id label per the cardinality
+	// policy at the top of this file; the slog.Info line emitted at
+	// sweep boundaries carries the per-tenant counts.
+	RetentionExpiredChunksTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_retention_expired_chunks_total",
+			Help: "Chunks expired and deleted by the retention worker across all tenants.",
+		},
+	)
+
+	// RetentionSweepDurationSeconds — Round-12 Task 3. Histogram of
+	// the wall-clock duration of a single Sweep call. Operators alert
+	// when p95 exceeds the configured interval (default 1h) because
+	// that signals the sweep can't keep up with the ingest rate.
+	RetentionSweepDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "context_engine_retention_sweep_duration_seconds",
+			Help:    "Wall-clock duration of a single retention sweep across all tenants.",
+			Buckets: []float64{0.1, 0.5, 1, 5, 10, 30, 60, 300, 600, 1800, 3600},
+		},
+	)
+
+	// SchedulerErrorsTotal — Round-12 Task 4. Counter incremented on
+	// every recovered panic or returned error from the scheduler
+	// tick. Operators alert on a non-zero rate so a silently flapping
+	// scheduler can't blackhole sync events for hours. The counter
+	// has no labels; per-schedule failures are written to the
+	// sync_schedules row (last_error / last_error_at) for triage.
+	SchedulerErrorsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_scheduler_errors_total",
+			Help: "Scheduler tick failures (panics + returned errors). Per-schedule details live on sync_schedules.last_error.",
+		},
+	)
+
+	// DLQAutoReplaysTotal — Round-12 Task 6. Counts entries the DLQ
+	// auto-replay worker re-emitted to Kafka with capped exponential
+	// backoff. The `outcome` label is a bounded enumeration:
+	// emitted / skipped / failed.
+	DLQAutoReplaysTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_dlq_auto_replays_total",
+			Help: "DLQ entries the auto-replay worker re-emitted to Kafka, labelled by outcome.",
+		},
+		[]string{"outcome"},
+	)
+
+	// AdaptiveRateCurrent — Round-12 Task 13. Gauge of the live
+	// effective rate (tokens/sec) for each connector's adaptive
+	// limiter. The `connector` label is a bounded enumeration (one
+	// per registered connector type — currently 12: googledrive,
+	// slack, notion, jira, confluence, sharepoint, dropbox, box,
+	// onedrive, github, gitlab, teams).
+	AdaptiveRateCurrent = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "context_engine_adaptive_rate_current",
+			Help: "Current effective adaptive rate (tokens/sec) per connector.",
+		},
+		[]string{"connector"},
+	)
+
+	// AdaptiveRateHalvedTotal — Round-12 Task 13. Counter of every
+	// halve event (called from AdaptiveRateLimiter.Throttled). A
+	// runaway value pages operators because it means an upstream
+	// connector is sustaining a 429 storm.
+	AdaptiveRateHalvedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_adaptive_rate_halved_total",
+			Help: "Adaptive rate halve events per connector.",
+		},
+		[]string{"connector"},
+	)
+
+	// AuditRowsExpiredTotal — Round-12 Task 17. Counts audit_logs
+	// rows deleted by the periodic retention sweeper. No labels per
+	// the cardinality policy; per-tenant breakdowns live in the
+	// slog.Info emitted at sweep completion.
+	AuditRowsExpiredTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_audit_rows_expired_total",
+			Help: "audit_logs rows deleted by the retention sweeper.",
+		},
+	)
 )
 
 // SetGRPCCircuitBreakerState records the current breaker state for
@@ -427,6 +515,13 @@ func init() {
 		CacheHitRate,
 		CredentialInvalidSources,
 		GORMQueryDuration,
+		RetentionExpiredChunksTotal,
+		RetentionSweepDurationSeconds,
+		SchedulerErrorsTotal,
+		DLQAutoReplaysTotal,
+		AdaptiveRateCurrent,
+		AdaptiveRateHalvedTotal,
+		AuditRowsExpiredTotal,
 	)
 }
 
@@ -487,6 +582,13 @@ func ResetForTest() {
 	Registry.Unregister(CacheHitRate)
 	Registry.Unregister(CredentialInvalidSources)
 	Registry.Unregister(GORMQueryDuration)
+	Registry.Unregister(RetentionExpiredChunksTotal)
+	Registry.Unregister(RetentionSweepDurationSeconds)
+	Registry.Unregister(SchedulerErrorsTotal)
+	Registry.Unregister(DLQAutoReplaysTotal)
+	Registry.Unregister(AdaptiveRateCurrent)
+	Registry.Unregister(AdaptiveRateHalvedTotal)
+	Registry.Unregister(AuditRowsExpiredTotal)
 	APIRequestsTotal.Reset()
 	APIRequestDurationSeconds.Reset()
 	KafkaConsumerLag.Reset()
@@ -510,6 +612,16 @@ func ResetForTest() {
 	PostgresPoolOpenConnections.Set(0)
 	RedisPoolActiveConnections.Set(0)
 	QdrantPoolIdleConnections.Set(0)
+	RetentionSweepDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "context_engine_retention_sweep_duration_seconds",
+			Help:    "Wall-clock duration of a single retention sweep across all tenants.",
+			Buckets: []float64{0.1, 0.5, 1, 5, 10, 30, 60, 300, 600, 1800, 3600},
+		},
+	)
+	DLQAutoReplaysTotal.Reset()
+	AdaptiveRateCurrent.Reset()
+	AdaptiveRateHalvedTotal.Reset()
 	// Counters can't be Reset() — unregister + re-register above
 	// is enough to drop their accumulated value.
 	Registry.MustRegister(
@@ -540,6 +652,13 @@ func ResetForTest() {
 		CacheHitRate,
 		CredentialInvalidSources,
 		GORMQueryDuration,
+		RetentionExpiredChunksTotal,
+		RetentionSweepDurationSeconds,
+		SchedulerErrorsTotal,
+		DLQAutoReplaysTotal,
+		AdaptiveRateCurrent,
+		AdaptiveRateHalvedTotal,
+		AuditRowsExpiredTotal,
 	)
 }
 

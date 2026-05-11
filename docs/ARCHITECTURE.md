@@ -147,6 +147,13 @@ The Go orchestrator owns *all* state and *all* tenancy enforcement. The
 Python services see only the data the Go orchestrator chose to send and
 the tenant-scoped headers.
 
+**Health checks (Round 12 Task 5).** Each Python sidecar registers the
+gRPC health protocol (`grpc_health.v1.Health`) at boot. Operators can
+probe each service uniformly with `grpc_health_probe -addr=:<port>`,
+matching the surface the Go process exposes via `/healthz` / `/readyz`.
+This unlocks Kubernetes' built-in `grpc` readiness probe on the Python
+pods, replacing the previous TCP-only probe.
+
 ### 2.4 Storage plane
 
 | Store | Purpose | Tenancy |
@@ -2107,3 +2114,107 @@ time.
   hook external monitoring uses to distinguish "up-but-slow"
   from "up-and-healthy" — a backend that returns 200 in
   300ms while p95 is normally 5ms is degraded, not healthy.
+
+### Tech choices added in Round 12
+
+- **DLQ auto-replay pattern.** Round 12 Task 6 introduces
+  `internal/pipeline/dlq_auto_replay.go`, a background worker
+  that periodically scans `dlq_messages` for rows with
+  `replay_count < max_auto_retries` and `next_replay_at <=
+  now()`. Eligible rows are re-emitted via the same
+  `Replayer` the admin handler uses, with a capped
+  exponential backoff (1m / 5m / 30m). The worker is gated on
+  `CONTEXT_ENGINE_DLQ_AUTO_REPLAY=true` so it stays off in
+  environments where operators want to keep manual control
+  over the DLQ. Metric
+  `context_engine_dlq_auto_replays_total{result=success|failure}`
+  tracks throughput; every replay is also written back to
+  the row's `replay_count` + `next_replay_at` so the worker
+  honours the same idempotency invariants the manual handler
+  enforces.
+
+- **gRPC health checks on Python sidecars.** Each of the
+  three Python services (`services/docling`,
+  `services/embedding`, `services/memory`) now registers a
+  `grpc_health.v1.Health` servicer at boot. Operators get a
+  uniform `grpc_health_probe -addr=:50051` against every
+  Phase-3 worker, identical to the surface the Go process
+  exposes via `/healthz` and `/readyz`. The health protocol
+  also unlocks Kubernetes' built-in `grpc` readiness probe
+  on the Python pods, replacing the previous TCP-only
+  probe.
+
+- **Audit log retention sweeper.** Round 12 Task 17 adds
+  `internal/admin/audit_retention.go`, a background goroutine
+  that deletes `audit_logs` rows older than
+  `CONTEXT_ENGINE_AUDIT_RETENTION_DAYS` (default 90) in
+  batches of 1000 rows per `DELETE`. The batched delete
+  loop keeps each transaction short so the sweeper cannot
+  hold long-running locks on a hot append-only table.
+  Migration `034_audit_retention.sql` adds an index on
+  `audit_logs.created_at` to keep the `WHERE` clause cheap
+  even on Postgres deployments with deep history. The
+  cutoff is computed at the top of each sweep, so a
+  long-running sweep does not drift the cutoff forward
+  mid-loop. Metric: `context_engine_audit_rows_expired_total`.
+
+- **Adaptive rate-limiter observability.** Round 12 Task 13
+  adds two metrics to
+  `internal/connector/adaptive_rate.go`: a gauge
+  `context_engine_adaptive_rate_current{connector}` that
+  tracks the current effective rate, and a counter
+  `context_engine_adaptive_rate_halved_total{connector}`
+  that increments on every adaptive halve. Together they
+  make the adaptive controller observable from Grafana:
+  a halve burst paired with a flat gauge is a stuck
+  rate-limit; a halve burst followed by gauge climb-back
+  is a normal recovery curve.
+
+- **RBAC coverage as a structural test.** Round 12 Task 15
+  adds `tests/integration/rbac_coverage_test.go`, which
+  walks the gin router's registered routes and asserts that
+  every route under `/v1/admin/` includes the RBAC
+  middleware (`internal/admin/rbac.go`) in its handler
+  chain. This is a contract test, not a runtime test —
+  it catches new admin handlers that ship without role
+  gating at the moment a new handler registers, rather
+  than when an attacker discovers the gap.
+
+- **Cache invalidation as a structural test.** Round 12 Task
+  14 adds `internal/retrieval/cache_invalidation_test.go`,
+  which uses Go's AST package to verify every call to
+  `QdrantClient.Upsert`, `FalkorDBClient.WriteNodes`, and
+  `BleveClient.Index` inside `internal/pipeline/` is
+  accompanied by a `cache.Invalidate` call in the same
+  function or its immediate caller. Like the RBAC coverage
+  test, this is a contract test that catches new Stage-4
+  write paths that ship without a cache invalidation
+  companion — the kind of correctness regression that is
+  trivially easy to miss in code review and very expensive
+  to find in production.
+
+- **Scheduler panic recovery.** Round 12 Task 4 promotes the
+  scheduler's panic-recovery wrapper to `SafeTick` and
+  shifts the production loop to use it: the periodic ticker
+  now calls `SafeTick` exclusively, so a panic in any
+  emitter (e.g. a Kafka producer dropping a connection
+  mid-emit) is converted to a logged error + metric bump
+  instead of taking down the scheduler goroutine. Returned
+  errors and recovered panics both increment
+  `context_engine_scheduler_errors_total`. The `last_error`
+  / `last_error_at` columns on the affected
+  `sync_schedules` row persist the most recent failure for
+  operator triage. A clean tick clears those columns so the
+  row reflects current health.
+
+- **Rate-limit status endpoint.** Round 12 Task 16 introduces
+  `GET /v1/admin/sources/:id/rate-limit-status` backed by a
+  `RateLimitInspector` interface in `internal/admin/`. The
+  handler is built on a narrow interface, not the concrete
+  `*RateLimiter`, so the e2e and unit tests can verify the
+  HTTP contract without a Redis dependency. Operators get a
+  six-field snapshot (`current_tokens`, `max_tokens`,
+  `effective_rate`, `halve_count`, `last_429_at`,
+  `is_throttled`) that distinguishes "rate-limited by us"
+  from "rate-limited upstream" in seconds rather than
+  log-diving.
