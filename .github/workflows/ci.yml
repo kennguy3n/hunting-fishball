@@ -474,6 +474,19 @@ jobs:
       - name: capacity test
         run: make capacity-test
 
+  # Round-13 Task 20: dialect-aware migration dry-run.
+  full-migrate-dry-run-pg:
+    name: Full — migrate-dry-run-pg
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    steps:
+      - uses: actions/checkout@v4
+      - name: migrate-dry-run-pg
+        run: make migrate-dry-run-pg
+
   nightly-fuzz:
     name: Nightly — fuzz targets
     runs-on: ubuntu-latest
