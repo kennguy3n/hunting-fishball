@@ -9,6 +9,7 @@ package admin
 
 import (
 	"context"
+	"sync"
 
 	"gorm.io/gorm"
 
@@ -16,11 +17,7 @@ import (
 )
 
 // auditCreator is the narrow contract NotifyingAuditWriter wraps.
-// *audit.Repository and tests' fake recorders both satisfy it. The
-// CreateInTx method is optional; when present, NotifyingAuditWriter
-// preserves transactional-outbox semantics by deferring the
-// notification dispatch until after the caller's transaction has
-// committed (Async=true) or by firing immediately (Async=false).
+// *audit.Repository and tests' fake recorders both satisfy it.
 type auditCreator interface {
 	Create(ctx context.Context, log *audit.AuditLog) error
 }
@@ -32,12 +29,18 @@ type auditTxCreator interface {
 	CreateInTx(ctx context.Context, tx *gorm.DB, log *audit.AuditLog) error
 }
 
-// NotifyingAuditWriter persists an audit event via Inner then fires
-// the NotificationDispatcher for the (TenantID, Action) pair. The
-// dispatch runs synchronously inside Create when Async is false, or
-// in a fresh background goroutine when Async is true. Failures from
-// Dispatch are never returned to the caller — the audit write is the
-// source of truth and must not be coupled to subscriber health.
+// NotifyingAuditWriter persists an audit event via Inner then arranges
+// for the NotificationDispatcher to fire for the (TenantID, Action)
+// pair. The non-transactional Create path fires immediately. The
+// transactional CreateInTx path buffers the event and only fires
+// once the caller invokes Flush after the surrounding tx has
+// committed (see the phantom-notification note on CreateInTx below).
+//
+// The dispatch runs synchronously inside Create/Flush when Async is
+// false, or in a fresh background goroutine when Async is true.
+// Failures from Dispatch are never returned to the caller — the
+// audit write is the source of truth and must not be coupled to
+// subscriber health.
 type NotifyingAuditWriter struct {
 	Inner      auditCreator
 	Dispatcher *NotificationDispatcher
@@ -47,10 +50,24 @@ type NotifyingAuditWriter struct {
 	// context.Background. Tests inject their own to cancel pending
 	// dispatches deterministically.
 	BackgroundCtx context.Context
+
+	// pendingByTx buffers audit logs persisted inside a caller-
+	// managed transaction so the notification only fires once the
+	// tx has committed. The map is keyed by the *gorm.DB tx handle
+	// the caller passed to CreateInTx; the pointer is only used as
+	// a per-tx identifier, never to issue further DB ops. Drained
+	// by Flush on success or Discard on rollback.
+	mu          sync.Mutex
+	pendingByTx map[*gorm.DB][]*audit.AuditLog
 }
 
 // Create implements AuditWriter. The audit row is always persisted
 // first; the dispatch is fired afterwards and its outcome ignored.
+//
+// Unlike CreateInTx there is no surrounding caller-managed tx to
+// commit, so firing the dispatcher here can never produce a
+// phantom-notification — by the time we call fire the row is
+// already in the database.
 func (n *NotifyingAuditWriter) Create(ctx context.Context, log *audit.AuditLog) error {
 	if n == nil || n.Inner == nil {
 		return audit.ErrAuditLogNotFound // defensive — should never happen in production
@@ -63,12 +80,19 @@ func (n *NotifyingAuditWriter) Create(ctx context.Context, log *audit.AuditLog) 
 }
 
 // CreateInTx satisfies policy.AuditWriter (the transactional-outbox
-// entry point). The dispatcher is only fired when the inner repo
-// successfully persists the row; production paths run this inside a
-// caller-managed tx so the audit row commits atomically with the
-// business write. Dispatch fires after CreateInTx returns — in
-// Async mode the goroutine fires once the surrounding tx has been
-// committed and the caller has returned.
+// entry point). The audit row is inserted inside the caller's tx
+// and the notification is BUFFERED, not fired. The caller must
+// invoke Flush(ctx, tx) after the surrounding tx.Transaction(...)
+// returns nil — and Discard(tx) on rollback — so the notification
+// only reaches subscribers if the audit row actually committed.
+//
+// Without this buffering a phantom-notification slips out whenever
+// a later step inside the same tx callback fails: the audit row
+// rolls back along with the rest of the work, but the webhook /
+// email has already been POSTed to external subscribers, who then
+// see an event for a state change that never happened. Async mode
+// did not save us — Go's scheduler is allowed to run the dispatch
+// goroutine immediately, well before the tx commits.
 func (n *NotifyingAuditWriter) CreateInTx(ctx context.Context, tx *gorm.DB, log *audit.AuditLog) error {
 	if n == nil || n.Inner == nil {
 		return audit.ErrAuditLogNotFound
@@ -81,8 +105,53 @@ func (n *NotifyingAuditWriter) CreateInTx(ctx context.Context, tx *gorm.DB, log 
 	if err := inner.CreateInTx(ctx, tx, log); err != nil {
 		return err
 	}
-	n.fire(ctx, log)
+	if log == nil || n.Dispatcher == nil {
+		// No dispatcher wired or no log to dispatch — nothing to
+		// buffer; the inner write is the only side effect.
+		return nil
+	}
+	n.mu.Lock()
+	if n.pendingByTx == nil {
+		n.pendingByTx = make(map[*gorm.DB][]*audit.AuditLog)
+	}
+	n.pendingByTx[tx] = append(n.pendingByTx[tx], log)
+	n.mu.Unlock()
 	return nil
+}
+
+// Flush dispatches every audit log that CreateInTx buffered against
+// the supplied tx handle and clears the buffer. Callers MUST invoke
+// Flush after the surrounding tx.Transaction returns nil so the
+// notification only fires after the row has committed.
+//
+// Calling Flush with an unknown tx (or after Discard) is a no-op.
+// Flush is also a no-op when the writer is nil so the policy
+// promoter can call it unconditionally.
+func (n *NotifyingAuditWriter) Flush(ctx context.Context, tx *gorm.DB) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	rows := n.pendingByTx[tx]
+	delete(n.pendingByTx, tx)
+	n.mu.Unlock()
+	for _, log := range rows {
+		n.fire(ctx, log)
+	}
+}
+
+// Discard drops every audit log that CreateInTx buffered against
+// the supplied tx handle without firing any notification. Callers
+// MUST invoke Discard whenever the surrounding tx.Transaction
+// returns a non-nil error so a rolled-back audit row never reaches
+// external subscribers.
+func (n *NotifyingAuditWriter) Discard(tx *gorm.DB) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	delete(n.pendingByTx, tx)
+	n.mu.Unlock()
 }
 
 // fire dispatches the notification for the freshly-persisted log.
