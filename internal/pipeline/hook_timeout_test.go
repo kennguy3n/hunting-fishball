@@ -18,13 +18,15 @@ import (
 	"time"
 )
 
-// TestRunWithHookTimeout_PanicInFnDoesNotCrashAndIncrementsCounter
+// TestRunWithHookTimeout_PanicInFnDoesNotCrashAndIncrementsPanicCounter
 // asserts that a panicking recorder does NOT take the process
 // down, that runWithHookTimeout converts the panic into a
-// returned error, and that the hook-timeout counter increments
-// (it is the single panic+timeout label the wrapper exposes; the
-// recover path reuses it so operators can alert on both).
-func TestRunWithHookTimeout_PanicInFnDoesNotCrashAndIncrementsCounter(t *testing.T) {
+// returned error, and that the dedicated
+// context_engine_hook_panics_total{hook} counter increments —
+// distinct from the timeout counter so operators can alert on a
+// crashing GORM driver (panic) separately from a slow one
+// (timeout). The timeout counter must stay at 0 on this path.
+func TestRunWithHookTimeout_PanicInFnDoesNotCrashAndIncrementsPanicCounter(t *testing.T) {
 	observability_ResetForTest(t)
 	t.Setenv("CONTEXT_ENGINE_HOOK_TIMEOUT", "5s")
 	ResetHookTimeoutForTest()
@@ -38,8 +40,11 @@ func TestRunWithHookTimeout_PanicInFnDoesNotCrashAndIncrementsCounter(t *testing
 	if err == nil {
 		t.Fatalf("runWithHookTimeout: got nil error, want panic-recovery error")
 	}
-	if got := hookTimeoutCount("chunk_quality_record"); got < 1 {
-		t.Fatalf("hook_timeouts_total{hook=chunk_quality_record}=%d want >=1 after recovered panic", got)
+	if got := hookPanicCount("chunk_quality_record"); got < 1 {
+		t.Fatalf("hook_panics_total{hook=chunk_quality_record}=%d want >=1 after recovered panic", got)
+	}
+	if got := hookTimeoutCount("chunk_quality_record"); got != 0 {
+		t.Fatalf("hook_timeouts_total{hook=chunk_quality_record}=%d want 0 on panic path (must not conflate with hook_panics_total)", got)
 	}
 }
 
@@ -62,6 +67,9 @@ func TestRunWithHookTimeout_HappyPathReturnsFnError(t *testing.T) {
 	if c := hookTimeoutCount("chunk_quality_record"); c != 0 {
 		t.Fatalf("hook_timeouts_total{hook=chunk_quality_record}=%d want 0 for clean-error path", c)
 	}
+	if c := hookPanicCount("chunk_quality_record"); c != 0 {
+		t.Fatalf("hook_panics_total{hook=chunk_quality_record}=%d want 0 for clean-error path", c)
+	}
 }
 
 // TestRunWithHookTimeout_TimeoutFiresOnSlowFn confirms the
@@ -82,6 +90,9 @@ func TestRunWithHookTimeout_TimeoutFiresOnSlowFn(t *testing.T) {
 	}
 	if got := hookTimeoutCount("sync_history_start"); got < 1 {
 		t.Fatalf("hook_timeouts_total{hook=sync_history_start}=%d want >=1", got)
+	}
+	if got := hookPanicCount("sync_history_start"); got != 0 {
+		t.Fatalf("hook_panics_total{hook=sync_history_start}=%d want 0 on timeout path (must not conflate with hook_timeouts_total)", got)
 	}
 	// Sanity: the wrapper must have returned well before any
 	// reasonable per-test deadline. With a 10ms hook timeout

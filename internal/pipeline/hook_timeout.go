@@ -86,6 +86,12 @@ func ResetHookTimeoutForTest() {
 // returned error rather than killing the whole ingest process.
 // Sibling wrapper internal/retrieval/graceful_degradation.go uses
 // the same pattern; both must stay in sync.
+//
+// The recover path increments a distinct
+// observability.HookPanicsTotal counter — conflating "slow store"
+// (HookTimeoutsTotal) and "crashing store" (HookPanicsTotal) under
+// the same label would prevent operators from alerting on a
+// nil-pointer deref in pgx separately from a sick Postgres.
 func runWithHookTimeout(ctx context.Context, hook string, fn func(context.Context) error) error {
 	cctx, cancel := context.WithTimeout(ctx, HookTimeout())
 	defer cancel()
@@ -94,7 +100,7 @@ func runWithHookTimeout(ctx context.Context, hook string, fn func(context.Contex
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				observability.ObserveHookTimeout(hook)
+				observability.ObserveHookPanic(hook)
 				slog.Warn("pipeline: hook panicked", "hook", hook, "panic", fmt.Sprint(r))
 				done <- fmt.Errorf("hook %s panicked: %v", hook, r)
 			}

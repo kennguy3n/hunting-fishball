@@ -311,6 +311,24 @@ var (
 		[]string{"hook"},
 	)
 
+	// HookPanicsTotal counts coordinator-side Stage-4 hook calls
+	// that panicked inside the runWithHookTimeout-spawned goroutine
+	// (Round-11 Devin Review Phase-3 follow-up). Distinct from
+	// HookTimeoutsTotal so operators can alert separately on a slow
+	// store (timeout) versus a crashing store (panic — usually a
+	// nil-pointer deref in the GORM driver). The `hook` label uses
+	// the same bounded enumeration as HookTimeoutsTotal:
+	// sync_history_start / sync_history_finish / chunk_quality_record.
+	// The panic itself is converted to a returned error so the
+	// ingest process keeps running.
+	HookPanicsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_hook_panics_total",
+			Help: "Stage-4 coordinator hook calls that panicked inside the spawned goroutine. Distinct from hook_timeouts_total so operators can alert on slow vs crashing stores separately.",
+		},
+		[]string{"hook"},
+	)
+
 	// GORMStoreLookupErrorsTotal counts retrieval-handler GORM store
 	// lookup failures observed on the hot path (Round-11 Task 18). The
 	// retrieval handler degrades to defaults when its LatencyBudget /
@@ -403,6 +421,7 @@ func init() {
 		CacheMissesTotal,
 		ChunkQualityErrorsTotal,
 		HookTimeoutsTotal,
+		HookPanicsTotal,
 		GORMStoreLookupErrorsTotal,
 		ChunkQualityScoreAvg,
 		CacheHitRate,
@@ -462,6 +481,7 @@ func ResetForTest() {
 	Registry.Unregister(CacheMissesTotal)
 	Registry.Unregister(ChunkQualityErrorsTotal)
 	Registry.Unregister(HookTimeoutsTotal)
+	Registry.Unregister(HookPanicsTotal)
 	Registry.Unregister(GORMStoreLookupErrorsTotal)
 	Registry.Unregister(ChunkQualityScoreAvg)
 	Registry.Unregister(CacheHitRate)
@@ -481,6 +501,7 @@ func ResetForTest() {
 	IndexAutoReindexesTotal.Reset()
 	GRPCCircuitBreakerState.Reset()
 	HookTimeoutsTotal.Reset()
+	HookPanicsTotal.Reset()
 	GORMStoreLookupErrorsTotal.Reset()
 	ChunkQualityScoreAvg.Set(0)
 	CacheHitRate.Set(0)
@@ -513,6 +534,7 @@ func ResetForTest() {
 		CacheMissesTotal,
 		ChunkQualityErrorsTotal,
 		HookTimeoutsTotal,
+		HookPanicsTotal,
 		GORMStoreLookupErrorsTotal,
 		ChunkQualityScoreAvg,
 		CacheHitRate,
@@ -569,6 +591,15 @@ func ObserveChunkQualityError(tenantID, chunkID string, err error) {
 // sync_history_finish / chunk_quality_record.
 func ObserveHookTimeout(hook string) {
 	HookTimeoutsTotal.WithLabelValues(hook).Inc()
+}
+
+// ObserveHookPanic increments the per-hook panic counter —
+// Round-11 Devin Review Phase-3 follow-up. Called by
+// runWithHookTimeout's recover defer so operators can alert on a
+// crashing GORM driver separately from a slow one. `hook` is the
+// same bounded enumeration as ObserveHookTimeout.
+func ObserveHookPanic(hook string) {
+	HookPanicsTotal.WithLabelValues(hook).Inc()
 }
 
 // ObserveGORMStoreLookupError increments the per-store lookup

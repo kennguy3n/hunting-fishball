@@ -30,3 +30,12 @@ func chunkQualityErrorCount() int {
 func hookTimeoutCount(label string) int {
 	return int(testutil.ToFloat64(observability.HookTimeoutsTotal.WithLabelValues(label)))
 }
+
+// hookPanicCount returns the live value of
+// context_engine_hook_panics_total{hook=label} — used by the
+// Round-11 Devin Review Phase-3 follow-up tests to assert the
+// runWithHookTimeout recover branch increments the dedicated
+// panic counter (distinct from the timeout counter).
+func hookPanicCount(label string) int {
+	return int(testutil.ToFloat64(observability.HookPanicsTotal.WithLabelValues(label)))
+}
