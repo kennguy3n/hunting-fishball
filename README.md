@@ -354,6 +354,57 @@ The full set of public + admin endpoints is documented in
   rollback coverage; `make migrate-rollback` applies them in
   reverse order.
 
+**Round 10 additions:**
+
+- The retrieval handler now reads the tenant's
+  `max_latency_ms` from the GORM `LatencyBudgetStore` via the new
+  `LatencyBudgetLookup` port whenever the request omits
+  `limits.max_latency_ms`. The handler enforces the resolved
+  budget as a `context.WithTimeout` deadline.
+- The Redis semantic cache (`internal/storage/redis_cache.go`)
+  now reads per-tenant TTL through the GORM `CacheConfigStore`
+  via the new `CacheTTLLookup` port. `Set` falls back to the
+  global default only when no row exists.
+- The pipeline coordinator records sync history on every
+  backfill kickoff (`SyncHistoryRecorder` port → GORM
+  `SyncHistoryStore`). Backfills produce rows in
+  `sync_history` with start/end/status/docs_processed/docs_failed.
+- The coordinator runs `pipeline.ChunkScorer` as a Stage-4
+  pre-write hook (gated by
+  `CONTEXT_ENGINE_CHUNK_SCORING_ENABLED`); scored chunks persist
+  through `internal/admin/chunk_quality_gorm.go`.
+- Periodic credential-health (`CONTEXT_ENGINE_CREDENTIAL_CHECK_INTERVAL`)
+  and token-refresh (`CONTEXT_ENGINE_TOKEN_REFRESH_INTERVAL`) workers
+  run in `cmd/api/main.go`; periodic retention
+  (`CONTEXT_ENGINE_RETENTION_ENABLED`) and cron-scheduler
+  (`CONTEXT_ENGINE_SCHEDULER_ENABLED`) workers run in
+  `cmd/ingest/main.go`. All four register on the lifecycle
+  shutdown runner.
+- Retrieval handler grew `SetQueryExpander`, wiring the
+  production `SynonymExpander` (backed by the GORM
+  `SynonymStoreGORM`) into the request hot path. The full chain
+  is pinned by `tests/integration/query_expansion_test.go`.
+- New e2e tests: `tests/e2e/round9_test.go` pins the five
+  Round-9 GORM admin surfaces with tenant isolation;
+  `tests/e2e/round9_pipeline_test.go` pins the per-stage parse
+  timeout and the cache-warm-on-miss behaviours.
+- `internal/admin/handler_fuzz_test.go` ships fuzz targets for
+  `ABTestConfig`, `ConnectorTemplate`, and
+  `NotificationPreference` JSON unmarshalling. `make fuzz`
+  now covers `./internal/admin/...` in addition to
+  `./internal/retrieval/...`.
+- `docs/openapi_test.go` `requiredPaths` now covers every
+  route registered in `cmd/api/main.go`; missing entries were
+  added to `docs/openapi.yaml`.
+- `docs/runbooks/runbook_test.go` pins every registered
+  connector against a matching `docs/runbooks/<name>.md` and
+  asserts the four required sections (credential rotation,
+  quota / rate-limit, outage detection, error codes).
+- CI gains a `fast-proto-check` job (`make proto-check`) in the
+  fast lane, `full-connector-smoke` / `full-bench-e2e` /
+  `full-capacity-test` jobs in the full lane, and a nightly
+  `nightly-fuzz` job that runs `make fuzz`.
+
 **Round 9 additions:**
 
 - Final five admin GORM stores landed — `NotificationStore`,

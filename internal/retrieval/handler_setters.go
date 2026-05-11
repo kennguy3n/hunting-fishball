@@ -104,6 +104,14 @@ func (h *Handler) SetPinLookup(fn PinLookup) {
 	h.cfg.PinLookup = fn
 }
 
+// SetQueryExpander swaps in (or replaces) the per-tenant query
+// expander (Round-10 Task 9). The expander runs ahead of the
+// BM25 / memory fan-out so the expanded form is what hits the
+// backend search adapters.
+func (h *Handler) SetQueryExpander(qe QueryExpander) {
+	h.cfg.QueryExpander = qe
+}
+
 // recordQueryAnalytics emits one analytics event per retrieve
 // response. The handler invokes this on every success path
 // (cache hit, full fan-out). nil recorder is a no-op so tests

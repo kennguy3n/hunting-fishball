@@ -1,0 +1,87 @@
+// Package runbooks_test pins connector runbook completeness at
+// CI time. Round-10 Task 16: every connector registered in the
+// process-global connector registry must have a matching
+// `docs/runbooks/<name>.md` covering credential rotation,
+// quota / rate-limit handling, outage detection, and the known
+// error-code surface.
+//
+// The test blank-imports every connector package the production
+// binary blank-imports, then walks the registry. Doing so keeps
+// the test honest if a new connector is added: forgetting either
+// the runbook or the section makes this test fail.
+package runbooks_test
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/kennguy3n/hunting-fishball/internal/connector"
+
+	// Blank-imports mirror cmd/api/main.go so the registry is
+	// populated before ListSourceConnectors runs.
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/notion"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+)
+
+// runbookFilename maps a registry name to its expected runbook
+// filename. The registry uses `google_drive` (underscore) while
+// the runbook is `googledrive.md`. Strip underscores/hyphens.
+func runbookFilename(name string) string {
+	out := strings.ReplaceAll(name, "_", "")
+	out = strings.ReplaceAll(out, "-", "")
+	return out + ".md"
+}
+
+// requiredSections are the substrings every runbook must
+// contain. The fuzzy match accepts " Credential rotation",
+// "Credential rotation incidents", etc.
+var requiredSections = []string{
+	"Credential rotation",
+	"Quota / rate-limit",
+	"Outage detection",
+	"error codes",
+}
+
+// TestConnectorRunbooks_ExistAndCoverRequiredSections walks the
+// connector registry. For each registered connector the test
+// asserts (a) the runbook file exists and (b) every section in
+// requiredSections appears at least once in the body.
+func TestConnectorRunbooks_ExistAndCoverRequiredSections(t *testing.T) {
+	t.Parallel()
+	names := connector.ListSourceConnectors()
+	if len(names) < 12 {
+		t.Fatalf("expected at least 12 connectors registered; got %d (%v)", len(names), names)
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(".", runbookFilename(name))
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("runbook %s missing: %v", path, err)
+			}
+			src := string(body)
+			missing := []string{}
+			for _, sec := range requiredSections {
+				if !strings.Contains(src, sec) {
+					missing = append(missing, sec)
+				}
+			}
+			if len(missing) > 0 {
+				t.Fatalf("runbook %s missing required sections: %v", path, missing)
+			}
+		})
+	}
+}

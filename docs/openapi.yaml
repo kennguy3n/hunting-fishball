@@ -979,3 +979,232 @@ paths:
           application/json:
             schema: { type: object, additionalProperties: true }
       responses: { '202': { description: Accepted } }
+
+  # ----------------------------------------------------------------
+  # Round-10 Task 15: openapi-spec audit. The remaining handlers
+  # registered by cmd/api but previously undocumented are pinned
+  # here so the docs/openapi_test.go gate fails fast on future
+  # drift. Schemas stay minimal — a typed follow-up can promote
+  # them once each handler's response struct stabilises.
+  # ----------------------------------------------------------------
+  /v1/admin/notifications:
+    get:
+      summary: List notification preferences (Round-7 alias).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Create a notification preference (Round-7 alias).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses: { '201': { description: Created } }
+  /v1/admin/notifications/{id}:
+    delete:
+      summary: Delete a notification preference.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '204': { description: Deleted } }
+
+  /v1/admin/connector-templates/{id}:
+    get:
+      summary: Get a single connector template.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+    delete:
+      summary: Delete a connector template.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '204': { description: Deleted } }
+
+  /v1/admin/retrieval/experiments/{name}:
+    get:
+      summary: Get a retrieval A/B experiment by name.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+    delete:
+      summary: Delete a retrieval A/B experiment.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses: { '204': { description: Deleted } }
+
+  /v1/admin/chunks/quality-report:
+    get:
+      summary: Per-chunk quality scoring report (Round-10 Task 4 hook).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+
+  /v1/admin/sources/{id}/sync-history:
+    get:
+      summary: List sync runs for a single source.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+
+  /v1/admin/tenants/{id}/cache-config:
+    get:
+      summary: Per-tenant semantic-cache TTL (Round-7 alias).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+    put:
+      summary: Set per-tenant semantic-cache TTL (Round-7 alias).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses: { '200': { description: OK } }
+
+  /v1/admin/tenants/{id}/latency-budget:
+    get:
+      summary: Per-tenant retrieval latency budget (Round-7 alias).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+    put:
+      summary: Set per-tenant retrieval latency budget (Round-7 alias).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses: { '200': { description: OK } }
+
+  /v1/admin/tenants/{id}/usage:
+    get:
+      summary: Tenant resource usage (chunks, bytes, retrievals, ingests).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+
+  /v1/admin/tenants/{tenant_id}/export/{job_id}:
+    get:
+      summary: Inspect a tenant export job.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: tenant_id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+
+  /v1/admin/sources/{id}/schema:
+    get:
+      summary: Source schema introspection (columns, types, sample row).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+
+  /v1/admin/sources/preview:
+    post:
+      summary: Preview a connector configuration before committing.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses: { '200': { description: OK } }
+
+  /v1/admin/sources/{id}/embedding:
+    get:
+      summary: Inspect the active embedding model + dimensions for a source.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+    put:
+      summary: Update the embedding configuration for a source.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses: { '200': { description: OK } }
+
+  /v1/admin/isolation-check:
+    get:
+      summary: Cross-tenant isolation invariants (Round-7 alias).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+
+  /v1/admin/chunks/{chunk_id}:
+    get:
+      summary: Inspect a single chunk's metadata.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: chunk_id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }

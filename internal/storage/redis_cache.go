@@ -59,6 +59,14 @@ type CachedResult struct {
 	ChunkIDs []string    `json:"chunk_ids,omitempty"`
 }
 
+// TenantTTLLookup returns the configured cache TTL for tenantID,
+// or `fallback` when no override exists. Round-10 Task 2 wires
+// this port into the cache itself so any caller (retrieval, cache
+// warmer, batch handler, future surfaces) automatically gets the
+// tenant's configured TTL without having to coordinate the
+// lookup at the call site.
+type TenantTTLLookup func(ctx context.Context, tenantID string, fallback time.Duration) time.Duration
+
 // SemanticCacheConfig configures the semantic cache.
 type SemanticCacheConfig struct {
 	// Client is the Redis client. Required.
@@ -71,6 +79,12 @@ type SemanticCacheConfig struct {
 	// DefaultTTL is the fallback TTL when Set is called with ttl=0.
 	// Defaults to 5 minutes.
 	DefaultTTL time.Duration
+
+	// TenantTTL is the optional per-tenant TTL lookup. When set,
+	// the cache consults it on every Set with the call-site ttl as
+	// the fallback (ttl=0 collapses to DefaultTTL first). Round-10
+	// Task 2.
+	TenantTTL TenantTTLLookup
 }
 
 // SemanticCache is the Redis-backed semantic cache.
@@ -88,6 +102,30 @@ func NewSemanticCache(cfg SemanticCacheConfig) (*SemanticCache, error) {
 	}
 
 	return &SemanticCache{cfg: cfg}, nil
+}
+
+// SetTenantTTLLookup swaps the per-tenant TTL lookup in place.
+// Round-10 Task 2 wiring hook: cmd/api builds the cache before
+// the admin GORM store is ready, so the lookup is attached after
+// construction.
+func (s *SemanticCache) SetTenantTTLLookup(fn TenantTTLLookup) {
+	s.cfg.TenantTTL = fn
+}
+
+// resolveTTL collapses the call-site ttl, the configured default,
+// and the per-tenant override into the final PEXPIRE the cache
+// writes. Order is: (a) call-site ttl, (b) DefaultTTL, (c) the
+// per-tenant lookup. Callers that supply a non-zero ttl still go
+// through the lookup so an admin's tenant-pinned override always
+// wins.
+func (s *SemanticCache) resolveTTL(ctx context.Context, tenantID string, ttl time.Duration) time.Duration {
+	if ttl == 0 {
+		ttl = s.cfg.DefaultTTL
+	}
+	if s.cfg.TenantTTL != nil {
+		return s.cfg.TenantTTL(ctx, tenantID, ttl)
+	}
+	return ttl
 }
 
 // CacheKey returns the canonical Redis key for a cache lookup. Exposed
@@ -168,9 +206,7 @@ func (s *SemanticCache) Set(ctx context.Context, tenantID, channelID string, que
 	if err != nil {
 		return fmt.Errorf("semantic-cache: marshal: %w", err)
 	}
-	if ttl == 0 {
-		ttl = s.cfg.DefaultTTL
-	}
+	ttl = s.resolveTTL(ctx, tenantID, ttl)
 
 	pipe := s.cfg.Client.Pipeline()
 	pipe.Set(ctx, key, payload, ttl)

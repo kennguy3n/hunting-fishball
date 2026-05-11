@@ -60,6 +60,27 @@ var requiredPaths = []string{
 	"/v1/admin/sources/{id}/sync/stream",
 	"/v1/webhooks/{connector}/{source_id}",
 	"/v1/admin/dlq/replay",
+
+	// Round-10 Task 15: complete the spec audit. These were
+	// registered by handlers and reachable from gin but never
+	// pinned by the test. Once added here, openapi.yaml must
+	// keep them in step.
+	"/v1/admin/notifications",
+	"/v1/admin/notifications/{id}",
+	"/v1/admin/connector-templates/{id}",
+	"/v1/admin/retrieval/experiments/{name}",
+	"/v1/admin/retrieval/experiments/{name}/results",
+	"/v1/admin/chunks/quality-report",
+	"/v1/admin/sources/{id}/sync-history",
+	"/v1/admin/tenants/{id}/cache-config",
+	"/v1/admin/tenants/{id}/latency-budget",
+	"/v1/admin/tenants/{id}/usage",
+	"/v1/admin/tenants/{tenant_id}/export/{job_id}",
+	"/v1/admin/sources/{id}/schema",
+	"/v1/admin/sources/preview",
+	"/v1/admin/sources/{id}/embedding",
+	"/v1/admin/isolation-check",
+	"/v1/admin/chunks/{chunk_id}",
 }
 
 // TestOpenAPI_RequiredPathsDocumented confirms every path on

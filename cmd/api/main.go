@@ -271,6 +271,12 @@ func run() error {
 		handlerCfg.BM25 = &retrieval.TantivyAdapter{Client: bm}
 	}
 	var sharedRedis *redis.Client
+	// sharedSemanticCache is the concrete *storage.SemanticCache
+	// retained at construction time so Round-10 Task 2's
+	// SetTenantTTLLookup hook can be attached after the admin GORM
+	// store is built. handlerCfg.Cache stores the same value
+	// through the retrieval.Cache interface.
+	var sharedSemanticCache *storage.SemanticCache
 	if redisURL := os.Getenv("CONTEXT_ENGINE_REDIS_URL"); redisURL != "" {
 		opts, perr := redis.ParseURL(redisURL)
 		if perr != nil {
@@ -283,13 +289,15 @@ func run() error {
 		}
 		rc := redis.NewClient(opts)
 		sharedRedis = rc
-		handlerCfg.Cache, err = storage.NewSemanticCache(storage.SemanticCacheConfig{
+		semCache, scErr := storage.NewSemanticCache(storage.SemanticCacheConfig{
 			Client:    rc,
 			KeyPrefix: "hf:",
 		})
-		if err != nil {
-			return fmt.Errorf("semantic cache: %w", err)
+		if scErr != nil {
+			return fmt.Errorf("semantic cache: %w", scErr)
 		}
+		handlerCfg.Cache = semCache
+		sharedSemanticCache = semCache
 		if os.Getenv("CONTEXT_ENGINE_FALKOR_ENABLED") == "1" {
 			falkor, ferr := storage.NewFalkorDBClient(storage.FalkorDBConfig{
 				Client: storage.FalkorDBFromRedis(rc),
@@ -689,6 +697,10 @@ func run() error {
 	if synHandler, herr := admin.NewSynonymsHandler(synStore, notifyingAudit); herr == nil {
 		synHandler.Register(api)
 	}
+	// Round-10 Task 9: wire the SynonymExpander so retrieve
+	// requests fan out through the tenant's expanded query. The
+	// 4-token append cap matches the in-memory expander default.
+	retrievalHandler.SetQueryExpander(retrieval.NewSynonymExpander(synStore, 4))
 
 	// Round-7 Task 4: retrieval query analytics. The retrieval
 	// handler exposes a function-shaped hook to keep the import
@@ -811,6 +823,15 @@ func run() error {
 	retrievalHandler.SetCacheTTLLookup(func(ctx context.Context, tenantID string, fallback time.Duration) time.Duration {
 		return cacheTTLStore.TTLFor(ctx, tenantID, fallback)
 	})
+	// Round-10 Task 2: wire the same lookup directly into the
+	// semantic cache so any caller (cache warmer, batch handler,
+	// future surfaces) picks up the tenant-pinned PEXPIRE without
+	// duplicating the call-site lookup.
+	if sharedSemanticCache != nil {
+		sharedSemanticCache.SetTenantTTLLookup(func(ctx context.Context, tenantID string, fallback time.Duration) time.Duration {
+			return cacheTTLStore.TTLFor(ctx, tenantID, fallback)
+		})
+	}
 
 	// Round-7 Task 16 / Round-8 Task 8: sync history.
 	syncHistoryStore, err := admin.NewSyncHistoryGORM(db)
@@ -924,6 +945,45 @@ func run() error {
 	})
 	go poolSampler.Start(keepAliveCtx)
 
+	// Round-10 Task 6: background OAuth token refresh worker.
+	// Scans every active source on `CONTEXT_ENGINE_TOKEN_REFRESH_INTERVAL`
+	// (default 15m) and refreshes any credential whose expiry is
+	// inside admin.RefreshWindow. Off when no admin DB is wired or
+	// when the env var is set to "0" / "off". Errors per-source are
+	// logged via the worker's own observability path.
+	tokenRefreshDone := make(chan struct{})
+	tokenRefreshCtx, tokenRefreshCancel := context.WithCancel(context.Background())
+	defer tokenRefreshCancel()
+	if v := strings.TrimSpace(os.Getenv("CONTEXT_ENGINE_TOKEN_REFRESH_INTERVAL")); v != "0" && v != "off" {
+		interval := 15 * time.Minute
+		if v != "" {
+			if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+				interval = d
+			}
+		}
+		tokenWorker, twErr := admin.NewTokenRefreshWorker(admin.TokenRefreshWorkerConfig{
+			Lister:    sourceRepo,
+			Updater:   sourceRepo,
+			Refresher: admin.NewOAuth2RefreshClient(nil),
+			Audit:     notifyingAudit,
+			Interval:  interval,
+		})
+		if twErr != nil {
+			slog.Warn("api: token-refresh worker disabled", slog.String("error", twErr.Error()))
+			close(tokenRefreshDone)
+		} else {
+			go func() {
+				defer close(tokenRefreshDone)
+				if err := tokenWorker.Run(tokenRefreshCtx); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Warn("api: token-refresh worker exited", slog.String("error", err.Error()))
+				}
+			}()
+			slog.Info("api: token-refresh worker started", slog.Duration("interval", interval))
+		}
+	} else {
+		close(tokenRefreshDone)
+	}
+
 	srv := &http.Server{Addr: listenAddr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
@@ -948,6 +1008,19 @@ func run() error {
 	}
 	sd := lifecycle.New(timeout, slog.Default())
 	sd.Add("http-server", func(ctx context.Context) error { return srv.Shutdown(ctx) })
+	// Round-10 Task 6: token-refresh worker shutdown — cancel its
+	// context and wait for the goroutine to drain so its in-flight
+	// HTTP exchange to the OAuth issuer completes before redis /
+	// postgres connections drop.
+	sd.Add("token-refresh-worker", func(ctx context.Context) error {
+		tokenRefreshCancel()
+		select {
+		case <-tokenRefreshDone:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
 	if sharedRedis != nil {
 		sd.Add("redis", func(_ context.Context) error { return sharedRedis.Close() })
 	}

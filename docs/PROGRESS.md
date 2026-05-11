@@ -435,6 +435,101 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-11: **Round 10: Next 20 tasks — wiring + e2e for the
+  Round-7..9 stores, fuzz expansion, OpenAPI / runbook gates, CI
+  lane audit, and doc refresh**.
+  - **Task 1**: `internal/admin/latency_budget.go` is now wired
+    into the retrieval handler through `LatencyBudgetLookup`. The
+    handler resolves the tenant's `max_latency_ms` from the GORM
+    store and seeds the per-request deadline when the caller
+    omits `limits.max_latency_ms`. Test in
+    `internal/retrieval/round10_handler_test.go`.
+  - **Task 2**: `internal/admin/cache_config.go` is wired into
+    `internal/storage/redis_cache.go` via `CacheTTLLookup`. `Set`
+    consults the per-tenant TTL row and falls back to the global
+    default when no row exists. Test in
+    `internal/storage/redis_cache_tenantttl_test.go`.
+  - **Task 3**: `pipeline.Coordinator` now records sync history
+    on every backfill kickoff (`SyncHistoryRecorder` port), and
+    `cmd/ingest/main.go` wires it through the GORM
+    `SyncHistoryStore`. Tests in
+    `internal/pipeline/round10_hooks_test.go` and
+    `internal/pipeline/sync_history_hook.go`.
+  - **Task 4**: `pipeline.ChunkScorer` runs as a Stage-4
+    pre-write hook (gated by
+    `CONTEXT_ENGINE_CHUNK_SCORING_ENABLED`); scored chunks land
+    in `internal/admin/chunk_quality_gorm.go`. Tests in
+    `internal/pipeline/chunk_quality_hook.go` +
+    `round10_hooks_test.go`. `cmd/ingest/main.go` owns the
+    wiring.
+  - **Task 5**: `internal/admin/credential_health.go` runs as a
+    periodic goroutine in `cmd/api/main.go`; interval is
+    `CONTEXT_ENGINE_CREDENTIAL_CHECK_INTERVAL` (default 1h) and
+    the worker is registered on the lifecycle shutdown runner.
+  - **Task 6**: `internal/admin/token_refresh.go` ships as a
+    periodic goroutine in `cmd/api/main.go`; interval is
+    `CONTEXT_ENGINE_TOKEN_REFRESH_INTERVAL` (default 15m) and is
+    likewise on the lifecycle runner.
+  - **Task 7**: `internal/admin/retention_worker.go` is wired
+    into `cmd/ingest/main.go` behind
+    `CONTEXT_ENGINE_RETENTION_ENABLED` (or the legacy
+    `CONTEXT_ENGINE_RETENTION_INTERVAL`) and sweeps expired
+    chunks per tenant.
+  - **Task 8**: `internal/admin/scheduler.go` is wired into
+    `cmd/ingest/main.go` behind
+    `CONTEXT_ENGINE_SCHEDULER_ENABLED` (default on); the
+    scheduler emits Kafka ingest events on cron and shuts down
+    via the lifecycle runner.
+  - **Task 9**: end-to-end integration test
+    `tests/integration/query_expansion_test.go` (build tag
+    `integration`) seeds synonyms via the GORM store and asserts
+    the BM25 backend receives the expanded query. Handler wiring
+    via the new `SetQueryExpander` setter in
+    `internal/retrieval/handler_setters.go`.
+  - **Task 10**: adaptive rate-limit coverage audit: the existing
+    `internal/connector/adaptive_rate_test.go` already pins the
+    halve-on-429 / climb-on-success / floor-clamp behaviour; no
+    additional production code change.
+  - **Task 11**: `tests/e2e/round9_test.go` (build tag `e2e`)
+    exercises the five Round-9 GORM-backed admin surfaces
+    (notifications, A/B tests, connector templates, synonyms,
+    chunk quality) and pins tenant isolation on each.
+  - **Task 12**: `tests/e2e/round9_pipeline_test.go` (build tag
+    `e2e`) drives `CONTEXT_ENGINE_PARSE_TIMEOUT=1ms` against a
+    slow parse stage and asserts the timeout fires per-retry; a
+    second subtest pins the `CacheWarmOnMiss=true` path —
+    response returns before the cache `Set` finishes.
+  - **Task 13**: `migrations/032_synonyms.sql` +
+    `migrations/rollback/032_synonyms.down.sql` confirmed to
+    exist; rollback parity gated by
+    `migrations/rollback/rollback_test.go`.
+  - **Task 14**: `internal/admin/handler_fuzz_test.go` adds
+    fuzz targets for `ABTestConfig`, `ConnectorTemplate`, and
+    `NotificationPreference` JSON unmarshalling. `make fuzz`
+    now covers `./internal/admin/...` in addition to
+    `./internal/retrieval/...`.
+  - **Task 15**: `docs/openapi_test.go` `requiredPaths` now
+    covers every route registered in `cmd/api/main.go`. Missing
+    entries (notifications, connector-template
+    get/delete, experiment get/delete, chunks quality-report,
+    sources sync-history, tenants cache-config / latency-budget
+    / usage, sources schema / preview / embedding,
+    isolation-check, chunks/{chunk_id}) were added to
+    `docs/openapi.yaml` and pinned by the test.
+  - **Task 16**: `docs/runbooks/runbook_test.go` walks the
+    connector registry, asserts each connector has a matching
+    `<name>.md`, and pins the four required sections
+    (credential rotation, quota / rate-limit, outage detection,
+    error codes) per file.
+  - **Task 17**: `.github/workflows/ci.yml` audit. Added
+    `fast-proto-check` job (runs `make proto-check`); aggregated
+    into `Required CI (fast lane)`. Full lane gains
+    `full-connector-smoke`, `full-bench-e2e`,
+    `full-capacity-test`; nightly cron now runs `make fuzz`.
+  - **Tasks 18–20**: PROGRESS.md, PHASES.md, ARCHITECTURE.md,
+    and README.md refreshed with the Round-10 deltas and the
+    new wiring patterns.
+
 - 2026-05-11: **Round 9: Next 20 tasks — finish GORM cutover, pipeline hardening, regression manifest, recording rules, pool health, openapi/doc audit**.
   - **Tasks 1–5 (GORM store migrations)**: the last five in-memory
     fakes in `cmd/api/main.go` are now GORM-backed.
