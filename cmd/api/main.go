@@ -259,6 +259,16 @@ func run() error {
 		PolicyResolver:     liveResolver,
 		ShardVersionLookup: shard.VersionLookup{Repo: shardRepo},
 	}
+	// Round-13 Task 8: slow-query threshold. Defaults to 1000ms.
+	// Setting it to 0 (or any non-numeric value) disables the
+	// slow-query flag + log.
+	slowMS := 1000
+	if raw := os.Getenv("CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS"); raw != "" {
+		if v, perr := strconv.Atoi(raw); perr == nil && v >= 0 {
+			slowMS = v
+		}
+	}
+	handlerCfg.SlowQueryThresholdMS = slowMS
 
 	// Phase 3: BM25, graph, semantic cache, Mem0. Each backend is
 	// optional — when its env var is empty the handler skips it and
@@ -749,11 +759,14 @@ func run() error {
 			BackendTimings: e.BackendTimings,
 			ExperimentName: e.ExperimentName, ExperimentArm: e.ExperimentArm,
 			Source: e.Source,
+			Slow:   e.Slow,
 		})
 	})
 	if qaHandler, qerr := admin.NewQueryAnalyticsHandler(queryAnalyticsStore); qerr == nil {
 		qaHandler.Register(api)
 	}
+	// Round-13 Task 8: slow-query admin endpoint.
+	admin.NewSlowQueryHandler(queryAnalyticsStore).Register(api)
 
 	// Round-7 Task 7 / Round-8 Task 11: credential health worker +
 	// endpoint. The GORM-backed store reads the credential_* columns

@@ -160,6 +160,14 @@ type HandlerConfig struct {
 	// role. Round-5 Task 12.
 	ExplainEnvEnabled bool
 
+	// SlowQueryThresholdMS — Round-13 Task 8. When non-zero, any
+	// retrieval whose latency meets or exceeds this threshold is
+	// flagged with Slow=true on the persisted analytics row and
+	// emits a structured warn log line. Zero disables the
+	// feature. The production wiring reads
+	// CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS (default 1000).
+	SlowQueryThresholdMS int
+
 	// LatencyBudget is the optional per-tenant latency budget
 	// lookup (Round-8 Task 9). When set, the handler bounds the
 	// fan-out deadline with the returned budget.

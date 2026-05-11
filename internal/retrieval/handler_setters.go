@@ -45,6 +45,10 @@ type QueryAnalyticsEvent struct {
 	// QueryAnalyticsSource{User, CacheWarm, Batch}. Empty defaults
 	// to "user" downstream.
 	Source string
+	// Slow — Round-13 Task 8. Set by the retrieval handler when
+	// LatencyMS exceeded the configured slow-query threshold so
+	// the persisted row carries the `slow:true` flag.
+	Slow bool
 }
 
 // Source enum mirrored from internal/admin so callers can pass
@@ -146,15 +150,29 @@ func (h *Handler) recordQueryAnalytics(
 	if source == "" {
 		source = QueryAnalyticsSourceUser
 	}
+	latencyMS := int(time.Since(start).Milliseconds())
+	// Round-13 Task 8: flag the row when it crossed the
+	// per-deployment slow-query threshold so operators can list
+	// it from /v1/admin/analytics/queries/slow without scanning
+	// every row. Also emit a structured warn log so operators
+	// see the slow event in real-time alongside the per-backend
+	// timings.
+	slow := false
+	threshold := h.cfg.SlowQueryThresholdMS
+	if threshold > 0 && latencyMS >= threshold {
+		slow = true
+		LogSlowQuery(ctx, tenantID, queryText, latencyMS, backendTimings)
+	}
 	evt := QueryAnalyticsEvent{
 		TenantID:       tenantID,
 		QueryText:      queryText,
 		TopK:           topK,
 		HitCount:       hits,
 		CacheHit:       cacheHit,
-		LatencyMS:      int(time.Since(start).Milliseconds()),
+		LatencyMS:      latencyMS,
 		BackendTimings: backendTimings,
 		Source:         source,
+		Slow:           slow,
 	}
 	if route != nil {
 		evt.ExperimentName = route.ExperimentName
