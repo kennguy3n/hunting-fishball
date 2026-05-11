@@ -467,6 +467,40 @@ func run() error {
 	}
 	admin.NewIndexHealthHandler(indexCheckers...).Register(api)
 
+	// Round-13 Task 1: structured health-check aggregator.
+	// GET /v1/admin/health/summary fans every backing probe out
+	// in parallel and returns a verdict (healthy/degraded/unhealthy)
+	// with per-component latency. Probes reuse the same closures
+	// the per-backend health endpoint runs so the two surfaces
+	// can't drift.
+	summaryProbes := []admin.SummaryProbe{
+		admin.SummaryProbeFunc{ProbeName: "postgres", Fn: func(ctx context.Context) (admin.SummaryStatus, error) {
+			sqlDB, err := db.DB()
+			if err != nil {
+				return admin.SummaryStatusUnhealthy, err
+			}
+			if err := sqlDB.PingContext(ctx); err != nil {
+				return admin.SummaryStatusUnhealthy, err
+			}
+			return admin.SummaryStatusHealthy, nil
+		}},
+		admin.SummaryProbeFunc{ProbeName: "qdrant", Fn: func(ctx context.Context) (admin.SummaryStatus, error) {
+			if err := qdrant.Ping(ctx); err != nil {
+				return admin.SummaryStatusUnhealthy, err
+			}
+			return admin.SummaryStatusHealthy, nil
+		}},
+	}
+	if sharedRedis != nil {
+		summaryProbes = append(summaryProbes, admin.SummaryProbeFunc{ProbeName: "redis", Fn: func(ctx context.Context) (admin.SummaryStatus, error) {
+			if err := sharedRedis.Ping(ctx).Err(); err != nil {
+				return admin.SummaryStatusUnhealthy, err
+			}
+			return admin.SummaryStatusHealthy, nil
+		}})
+	}
+	admin.NewHealthSummaryHandler(summaryProbes...).Register(api)
+
 	// Round-4 Task 18: server-sent-events feed for live sync progress.
 	// Mounts GET /v1/admin/sources/:id/sync/stream and pushes
 	// discovered / processed / failed / completed events as the
