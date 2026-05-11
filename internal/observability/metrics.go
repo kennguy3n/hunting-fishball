@@ -168,6 +168,18 @@ var (
 		},
 		[]string{"backend", "result"},
 	)
+
+	// RetrievalBudgetViolationsTotal counts retrievals whose end-to-
+	// end latency exceeded the tenant's configured budget (Round-7
+	// Task 11). Operators alert on a per-tenant rate so a single
+	// noisy tenant doesn't drag down the cluster-wide SLO.
+	RetrievalBudgetViolationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_retrieval_budget_violations_total",
+			Help: "Retrievals whose latency exceeded the tenant budget.",
+		},
+		[]string{"tenant_id"},
+	)
 )
 
 func init() {
@@ -184,6 +196,7 @@ func init() {
 		TokenRefreshesTotal,
 		CredentialsExpiring,
 		IndexAutoReindexesTotal,
+		RetrievalBudgetViolationsTotal,
 	)
 }
 
@@ -208,6 +221,7 @@ func ResetForTest() {
 	Registry.Unregister(TokenRefreshesTotal)
 	Registry.Unregister(CredentialsExpiring)
 	Registry.Unregister(IndexAutoReindexesTotal)
+	Registry.Unregister(RetrievalBudgetViolationsTotal)
 	APIRequestsTotal.Reset()
 	APIRequestDurationSeconds.Reset()
 	KafkaConsumerLag.Reset()
@@ -220,6 +234,7 @@ func ResetForTest() {
 	TokenRefreshesTotal.Reset()
 	CredentialsExpiring.Reset()
 	IndexAutoReindexesTotal.Reset()
+	RetrievalBudgetViolationsTotal.Reset()
 	Registry.MustRegister(
 		APIRequestsTotal,
 		APIRequestDurationSeconds,
@@ -233,7 +248,18 @@ func ResetForTest() {
 		TokenRefreshesTotal,
 		CredentialsExpiring,
 		IndexAutoReindexesTotal,
+		RetrievalBudgetViolationsTotal,
 	)
+}
+
+// ObserveBudgetViolation increments the per-tenant counter when a
+// retrieval response misses its latency budget. tenant_id is the
+// ULID; the helper is no-op when tenantID is empty.
+func ObserveBudgetViolation(tenantID string) {
+	if tenantID == "" {
+		return
+	}
+	RetrievalBudgetViolationsTotal.WithLabelValues(tenantID).Inc()
 }
 
 // ObserveStageDuration records the per-stage duration for the

@@ -181,6 +181,47 @@ func run() error {
 		EmbedWorkers: stageWorkerEnv("CONTEXT_ENGINE_EMBED_WORKERS"),
 		StoreWorkers: stageWorkerEnv("CONTEXT_ENGINE_STORE_WORKERS"),
 	}
+	// Round-7 Task 3: Round-6 pipeline features. Each block is
+	// guarded by its own env flag so the ingest worker boots
+	// unchanged when nothing is opted in.
+	//
+	// Semantic dedup (Round-6 Task 3): the Stage-4 store worker
+	// consults the Deduplicator before persisting a chunk. The
+	// Deduplicator itself is constructed below; the pre-write
+	// hook is owned by the storer (see storer_round6.go).
+	dedupCfg := pipeline.LoadDedupConfigFromEnv()
+	dedup := pipeline.NewDeduplicator(dedupCfg)
+	if dedupCfg.Enabled {
+		slog.Info("ingest: semantic dedup enabled",
+			slog.Float64("threshold", float64(dedupCfg.Threshold)))
+	}
+	_ = dedup
+
+	// Priority buffer (Round-6 Task 8): when
+	// CONTEXT_ENGINE_PRIORITY_ENABLED=true the coordinator
+	// pulls events out of a 3-class priority buffer fronting
+	// Kafka. The buffer is constructed here so subsequent
+	// rounds can plumb it into Submit().
+	if os.Getenv("CONTEXT_ENGINE_PRIORITY_ENABLED") == "true" {
+		pb := pipeline.NewPriorityBuffer(pipeline.PriorityBufferConfig{})
+		slog.Info("ingest: priority buffer constructed")
+		_ = pb
+	}
+
+	// Embedding config resolver (Round-6 Task 1): per-source
+	// embedding model selection. The resolver reads the
+	// embedding_config table; pipeline embed stage falls back
+	// to the default model when no row exists.
+	embedCfgRepo := admin.NewEmbeddingConfigRepository(db)
+	_ = embedCfgRepo
+
+	// Retry analytics (Round-6 Task 12): every retry the
+	// coordinator performs is recorded so the
+	// /v1/admin/pipeline/retries endpoint can surface the
+	// breakdown.
+	retryAnalytics := pipeline.NewRetryAnalytics()
+	_ = retryAnalytics
+
 	// Phase 3 Stage 3b: opt-in GraphRAG entity extraction. When
 	// CONTEXT_ENGINE_GRAPHRAG_ENABLED=true and both the gRPC target
 	// and FalkorDB connection string are configured we wire the

@@ -113,6 +113,12 @@ type HandlerConfig struct {
 	// ab_test.go.
 	ABTests ABTestRouter
 
+	// QueryAnalytics is the optional Round-7 Task 4 analytics
+	// recorder. When set the handler calls Record after every
+	// successful Retrieve. The interface lives in
+	// handler_setters.go.
+	QueryAnalytics QueryAnalyticsRecorder
+
 	// DefaultTopK is the default top_k when the request doesn't set
 	// one. Defaults to 10.
 	DefaultTopK int

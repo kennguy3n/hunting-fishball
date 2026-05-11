@@ -153,9 +153,10 @@ func (s *InMemoryNotificationStore) Delete(tenantID, id string) error {
 // NotificationDispatcher is invoked by the audit pipeline. It
 // looks up subscribers and delivers the event payload.
 type NotificationDispatcher struct {
-	store    NotificationStore
-	delivery NotificationDelivery
-	logger   func(string, ...any)
+	store       NotificationStore
+	delivery    NotificationDelivery
+	logger      func(string, ...any)
+	deliveryLog NotificationDeliveryLog
 }
 
 // NotificationDelivery is the network port (webhook POST, email
@@ -165,11 +166,39 @@ type NotificationDelivery interface {
 }
 
 // WebhookDelivery posts payload to target via HTTP POST.
+//
+// Round-7 Task 5 layers an exponential-backoff retry policy on
+// top of the original net/http POST. Callers control the retry
+// schedule via Backoff; on the final failure the (last) error is
+// returned so the dispatcher can dead-letter the delivery and
+// the notification_delivery_log records the response.
 type WebhookDelivery struct {
 	Client *http.Client
+	// Backoff is the sequence of sleep durations applied between
+	// retries. The slice length implicitly caps total attempts to
+	// `len(Backoff)+1`. Defaults to 1s/5s/15s (3 retries +
+	// initial attempt = 4 total) when nil.
+	Backoff []time.Duration
+	// Sleep is the test seam used between retries. Defaults to
+	// time.Sleep.
+	Sleep func(time.Duration)
+	// LastStatusCode is set after each Send so the dispatcher's
+	// delivery log can record the response code on failure.
+	LastStatusCode int
+	// LastAttempts is set after each Send so the dispatcher can
+	// record how many attempts the delivery consumed.
+	LastAttempts int
 }
 
+// defaultWebhookBackoff matches the Round-7 spec: 1s/5s/15s.
+var defaultWebhookBackoff = []time.Duration{time.Second, 5 * time.Second, 15 * time.Second}
+
 // Send implements NotificationDelivery.
+//
+// On any 4xx/5xx response or transport error the delivery retries
+// with exponential backoff (see Backoff). The final error
+// includes the last observed status code so the dispatcher can
+// dead-letter the row.
 func (w *WebhookDelivery) Send(ctx context.Context, target string, channel NotificationChannel, payload []byte) error {
 	if channel != NotificationChannelWebhook {
 		return errors.New("webhook delivery only supports webhook channel")
@@ -178,20 +207,55 @@ func (w *WebhookDelivery) Send(ctx context.Context, target string, channel Notif
 	if cl == nil {
 		cl = http.DefaultClient
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
-	if err != nil {
-		return err
+	backoff := w.Backoff
+	if backoff == nil {
+		backoff = defaultWebhookBackoff
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := cl.Do(req)
-	if err != nil {
-		return err
+	sleep := w.Sleep
+	if sleep == nil {
+		sleep = time.Sleep
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("webhook %s returned %d", target, resp.StatusCode)
+	maxAttempts := len(backoff) + 1
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		w.LastAttempts = attempt
+		w.LastStatusCode = 0
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := cl.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			w.LastStatusCode = resp.StatusCode
+			_ = resp.Body.Close()
+			if resp.StatusCode < 400 {
+				return nil
+			}
+			lastErr = fmt.Errorf("webhook %s returned %d", target, resp.StatusCode)
+		}
+		if attempt >= maxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		sleep(backoff[attempt-1])
 	}
-	return nil
+	return lastErr
+}
+
+// SetDeliveryLog wires the per-attempt log. Optional — when nil
+// the dispatcher still delivers events but the
+// /v1/admin/notifications/delivery-log endpoint will be empty.
+func (d *NotificationDispatcher) SetDeliveryLog(log NotificationDeliveryLog) {
+	if d != nil {
+		d.deliveryLog = log
+	}
 }
 
 // NewNotificationDispatcher validates and constructs the
@@ -212,7 +276,8 @@ func NewNotificationDispatcher(store NotificationStore, delivery NotificationDel
 
 // Dispatch fans the event payload out to all subscribers for
 // (tenantID, eventType). Errors per delivery are logged but never
-// abort the audit pipeline.
+// abort the audit pipeline. When a delivery log is wired each
+// attempt sequence records its terminal status.
 func (d *NotificationDispatcher) Dispatch(ctx context.Context, tenantID, eventType string, payload any) error {
 	subs, err := d.store.ListByEvent(tenantID, eventType)
 	if err != nil {
@@ -227,13 +292,43 @@ func (d *NotificationDispatcher) Dispatch(ctx context.Context, tenantID, eventTy
 	if err != nil {
 		return err
 	}
+	payloadMap := JSONMap{"event_type": eventType}
+	if m, ok := payload.(map[string]any); ok {
+		for k, v := range m {
+			payloadMap[k] = v
+		}
+	}
 	var firstErr error
 	for _, p := range subs {
-		if err := d.delivery.Send(ctx, p.Target, p.Channel, body); err != nil {
-			d.logger("notification dispatch failed", "id", p.ID, "err", err)
+		derr := d.delivery.Send(ctx, p.Target, p.Channel, body)
+		status := NotificationDeliveryStatusDelivered
+		var responseCode, attempts int
+		var errMsg string
+		if wh, ok := d.delivery.(*WebhookDelivery); ok {
+			responseCode = wh.LastStatusCode
+			attempts = wh.LastAttempts
+		}
+		if derr != nil {
+			status = NotificationDeliveryStatusFailed
+			errMsg = derr.Error()
+			d.logger("notification dispatch failed", "id", p.ID, "err", derr)
 			if firstErr == nil {
-				firstErr = err
+				firstErr = derr
 			}
+		}
+		if d.deliveryLog != nil {
+			_ = d.deliveryLog.Append(ctx, &NotificationDeliveryAttempt{
+				TenantID:     tenantID,
+				PreferenceID: p.ID,
+				EventType:    eventType,
+				Channel:      p.Channel,
+				Target:       p.Target,
+				Payload:      payloadMap,
+				Status:       status,
+				Attempt:      attempts,
+				ResponseCode: responseCode,
+				ErrorMessage: errMsg,
+			})
 		}
 	}
 	return firstErr
