@@ -396,6 +396,10 @@ func run() error {
 
 	api := r.Group("/", apiMiddlewares...)
 	audit.NewHandler(auditRepo).Register(api)
+	// Round-13 Task 12: audit integrity endpoint.
+	if integ, ierr := audit.NewIntegrityHandler(auditRepo); ierr == nil {
+		integ.Register(api)
+	}
 	retrievalHandler.Register(api)
 
 	// Admin source-management surface (Phase 2). The handler mounts
