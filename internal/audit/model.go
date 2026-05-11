@@ -89,6 +89,8 @@ const (
 	ActionNotificationDelivered   Action = "admin.notification_delivered"
 	ActionNotificationFailed      Action = "admin.notification_failed"
 	ActionAuditExported           Action = "audit.exported"
+	// Round-13 Task 10: api-key rotation lifecycle event.
+	ActionAPIKeyRotated Action = "api_key.rotated"
 )
 
 // AuditLog is a single audit event. The table is append-only — there is

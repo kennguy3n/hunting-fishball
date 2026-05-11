@@ -767,6 +767,18 @@ func run() error {
 	}
 	// Round-13 Task 8: slow-query admin endpoint.
 	admin.NewSlowQueryHandler(queryAnalyticsStore).Register(api)
+	// Round-13 Task 9: per-tenant cache-stats admin endpoint.
+	admin.NewCacheStatsHandler(queryAnalyticsStore).Register(api)
+	// Round-13 Task 10: API key rotation endpoint.
+	apiKeyStore := admin.NewAPIKeyStoreGORM(db)
+	if err := apiKeyStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("api_keys automigrate: %w", err)
+	}
+	if rotHandler, rerr := admin.NewAPIKeyRotationHandler(admin.APIKeyRotationHandlerConfig{
+		Store: apiKeyStore, Audit: notifyingAudit,
+	}); rerr == nil {
+		rotHandler.Register(api)
+	}
 
 	// Round-7 Task 7 / Round-8 Task 11: credential health worker +
 	// endpoint. The GORM-backed store reads the credential_* columns
