@@ -738,6 +738,125 @@ func TestGinHandler_CacheHit_RecordsBackendTimings(t *testing.T) {
 	}
 }
 
+// TestGinHandler_CacheMiss_RecordsBackendTimings is the gin
+// cache-MISS twin of TestGinHandler_CacheHit_RecordsBackendTimings.
+// handler.go:674 used to pass `backendTimingsMillis(backendTimings)`
+// for the recorder's backend_timings argument, where
+// `backendTimings` is the live `map[string]time.Duration` populated
+// during fan-out from whichever backends actually fired. Result:
+// a deployment that configures only `VectorStore` (no BM25, no
+// Graph, no Memory) wrote `{"vector": 12}`, while the other three
+// recordQueryAnalytics call sites (gin cache-hit, cache-aware
+// cache-hit, cache-aware cache-miss) all use
+// `timingsToMap(resp.Timings)` which always emits the four
+// canonical Source* keys (`vector`/`bm25`/`graph`/`memory`).
+// Same `query_analytics.backend_timings` JSONB column, two
+// different shapes depending on the path — dashboards joining on
+// `backend_timings->>'bm25'` would get `NULL` for gin cache-miss
+// rows and `'0'` for everywhere else.
+//
+// This test pins the gin cache-miss path to the same canonical
+// schema by routing a request through the gin engine with a
+// Vector-only handler config (no BM25/Graph/Memory wired) and
+// asserting the analytics row carries all four Source* keys with
+// zeros for the unconfigured backends. Pairs with the helper-level
+// TestBackendTimingsSchemaParity and the three per-path tests
+// (cache-aware cache-hit, cache-aware cache-miss, gin cache-hit)
+// to pin every call site against future drift.
+func TestGinHandler_CacheMiss_RecordsBackendTimings(t *testing.T) {
+	t.Parallel()
+
+	// fakeCache with no preset getValue → Get returns nil → gin
+	// handler falls through to the cache-miss recordQueryAnalytics
+	// call at handler.go:688.
+	cache := &fakeCache{}
+	h, err := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore: &fakeVectorStore{
+			hits: []storage.QdrantHit{{ID: "vec-1", Score: 0.9, Payload: map[string]any{"title": "from-vector"}}},
+		},
+		Embedder: &fakeEmbedder{vec: []float32{1, 2}},
+		Cache:    cache,
+		// Deliberately no BM25Search / GraphSearch / MemorySearch:
+		// this is the precise deployment shape that exposed the
+		// schema drift — only Vector configured, so the live
+		// `backendTimings` map fan-out builds will only have the
+		// "vector" key, while resp.Timings still has all 4 fields
+		// (zeroed for the unconfigured backends).
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	var (
+		mu       sync.Mutex
+		captured []retrieval.QueryAnalyticsEvent
+	)
+	h.SetQueryAnalyticsRecorder(func(_ context.Context, evt retrieval.QueryAnalyticsEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		captured = append(captured, evt)
+	})
+
+	r := newRouter(t, h, "tenant-miss")
+	body, _ := json.Marshal(retrieval.RetrieveRequest{Query: "hi"})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/v1/retrieve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body: %s", w.Code, w.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 analytics event from gin cache-miss; got %d", len(captured))
+	}
+	evt := captured[0]
+	if evt.CacheHit {
+		t.Fatalf("expected cache_hit=false on gin cache-miss; got %+v", evt)
+	}
+	if evt.BackendTimings == nil {
+		t.Fatalf("regression: BackendTimings is nil on the gin cache-miss path. " +
+			"handler.go:674 used to pass backendTimingsMillis(backendTimings), " +
+			"which returns nil when no backend fired (or only emits keys for " +
+			"backends that did) — re-introducing the cross-path schema drift " +
+			"between gin cache-miss and the three timingsToMap call sites.")
+	}
+	// All four canonical Source* keys must be present even though
+	// only Vector was configured — this is the entire point of
+	// passing `timingsToMap(resp.Timings)` instead of
+	// `backendTimingsMillis(backendTimings)` on this path.
+	for _, key := range []string{"vector", "bm25", "graph", "memory"} {
+		if _, ok := evt.BackendTimings[key]; !ok {
+			t.Errorf("BackendTimings missing %q key on gin cache-miss path; got %v. "+
+				"This is the regression: backendTimingsMillis(backendTimings) "+
+				"only emits keys for backends that actually fired, while the "+
+				"other 3 call sites use timingsToMap(resp.Timings) which "+
+				"always emits all four canonical keys.",
+				key, mapKeys(evt.BackendTimings))
+		}
+	}
+	// Unconfigured backends MUST emit 0 (not be absent). Dashboards
+	// joining on `backend_timings->>'<backend>'` depend on this:
+	// NULL would silently drop the row from aggregations, but 0
+	// gives a numeric value that aggregates correctly.
+	for _, key := range []string{"bm25", "graph", "memory"} {
+		if v, ok := evt.BackendTimings[key]; ok && v != 0 {
+			t.Errorf("BackendTimings[%q] = %d on gin cache-miss with only Vector configured; want 0 (unconfigured backends should pad with 0, not carry stale values)", key, v)
+		}
+	}
+	// Stale pre-fix key shape (RetrieveTimings JSON tags) must
+	// never reappear — the cross-path schema parity test
+	// (TestBackendTimingsSchemaParity) pins this at the helper
+	// level, this pins it at the call-site level.
+	for _, key := range []string{"vector_ms", "bm25_ms", "merge_ms", "rerank_ms"} {
+		if _, ok := evt.BackendTimings[key]; ok {
+			t.Errorf("BackendTimings has stale key %q on gin cache-miss path (pre-fix RetrieveTimings JSON tag); want only the Source* canonical keys to match backendTimingsMillis", key)
+		}
+	}
+}
+
 func mapKeys(m map[string]int64) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

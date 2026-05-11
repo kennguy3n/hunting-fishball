@@ -671,7 +671,21 @@ func (h *Handler) retrieve(c *gin.Context) {
 	}
 
 	h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
-	h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, false, reqStart, backendTimingsMillis(backendTimings), route, req.Source)
+	// Round-11 Devin Review fix: project resp.Timings into the
+	// recorder's keyed map so the gin cache-miss row carries the
+	// same backend_timings schema as the other three call sites
+	// (gin cache-hit line 555, RetrieveWithSnapshotCached cache-hit
+	// / cache-miss). Using backendTimingsMillis(backendTimings)
+	// here would emit only keys for backends that actually fired
+	// during fan-out, so a deployment that configures only Vector
+	// would write {"vector": 12} while the other paths write
+	// {"vector":0,"bm25":0,"graph":0,"memory":0} — same JSONB
+	// column, two different shapes. resp.Timings carries the same
+	// per-backend numbers via runPipelineFromVec, and
+	// timingsToMap pads zeros for unconfigured backends so the
+	// key set is stable. See TestGinHandler_CacheMiss_RecordsBackendTimings
+	// for the regression guard.
+	h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, false, reqStart, timingsToMap(resp.Timings), route, req.Source)
 	c.JSON(http.StatusOK, resp)
 }
 
