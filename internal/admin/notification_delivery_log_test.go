@@ -26,14 +26,15 @@ func TestWebhookDelivery_RetriesThenSucceeds(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	wh := &admin.WebhookDelivery{Sleep: func(time.Duration) {}, Backoff: []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}}
-	if err := wh.Send(context.Background(), srv.URL, admin.NotificationChannelWebhook, []byte(`{}`)); err != nil {
+	res, err := wh.Send(context.Background(), srv.URL, admin.NotificationChannelWebhook, []byte(`{}`))
+	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if wh.LastAttempts != 3 {
-		t.Fatalf("expected 3 attempts; got %d", wh.LastAttempts)
+	if res.Attempts != 3 {
+		t.Fatalf("expected 3 attempts; got %d", res.Attempts)
 	}
-	if wh.LastStatusCode != http.StatusOK {
-		t.Fatalf("expected 200; got %d", wh.LastStatusCode)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200; got %d", res.StatusCode)
 	}
 }
 
@@ -45,15 +46,15 @@ func TestWebhookDelivery_DeadLettersAfterMaxRetries(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	wh := &admin.WebhookDelivery{Sleep: func(time.Duration) {}, Backoff: []time.Duration{time.Millisecond, time.Millisecond}}
-	err := wh.Send(context.Background(), srv.URL, admin.NotificationChannelWebhook, []byte(`{}`))
+	res, err := wh.Send(context.Background(), srv.URL, admin.NotificationChannelWebhook, []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error after max retries")
 	}
-	if wh.LastAttempts != 3 {
-		t.Fatalf("expected 3 attempts; got %d", wh.LastAttempts)
+	if res.Attempts != 3 {
+		t.Fatalf("expected 3 attempts; got %d", res.Attempts)
 	}
-	if wh.LastStatusCode != http.StatusInternalServerError {
-		t.Fatalf("expected 500; got %d", wh.LastStatusCode)
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500; got %d", res.StatusCode)
 	}
 }
 

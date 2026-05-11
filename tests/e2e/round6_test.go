@@ -161,9 +161,9 @@ func TestRound6_NotificationDispatchSmoke(t *testing.T) {
 
 type fakeDispatchDelivery struct{ called int }
 
-func (f *fakeDispatchDelivery) Send(_ context.Context, _ string, _ admin.NotificationChannel, _ []byte) error {
+func (f *fakeDispatchDelivery) Send(_ context.Context, _ string, _ admin.NotificationChannel, _ []byte) (admin.DeliveryResult, error) {
 	f.called++
-	return nil
+	return admin.DeliveryResult{StatusCode: 200, Attempts: 1}, nil
 }
 
 func TestRound6_APIVersionHeader(t *testing.T) {

@@ -25,8 +25,14 @@ type Pin struct {
 // the position overlaps. Pinned chunks that are also present in
 // the hit list at a different position are kept only at the pin
 // position to avoid duplication.
+//
+// An empty hit list is intentionally NOT a short-circuit: pinning
+// is most valuable in cold-start scenarios (empty corpora, no-match
+// queries) where the dynamic backends return zero hits. The
+// synthetic RetrieveHit branch below handles pins that aren't in
+// `known` without requiring the hit list to be populated.
 func ApplyPins(hits []RetrieveHit, pins []Pin) []RetrieveHit {
-	if len(pins) == 0 || len(hits) == 0 {
+	if len(pins) == 0 {
 		return hits
 	}
 	known := map[string]RetrieveHit{}

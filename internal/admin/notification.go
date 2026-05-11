@@ -159,10 +159,29 @@ type NotificationDispatcher struct {
 	deliveryLog NotificationDeliveryLog
 }
 
+// DeliveryResult carries per-call metadata about a notification
+// delivery attempt sequence. It replaces the previous pattern of
+// storing attempt/status on the WebhookDelivery struct, which
+// races under concurrent Dispatch invocations (the dispatcher is
+// invoked from the audit pipeline where multiple subscriptions ×
+// multiple events fan out goroutines that all share one
+// *WebhookDelivery instance).
+type DeliveryResult struct {
+	// StatusCode is the HTTP status from the final attempt (or
+	// 0 when the transport itself failed). For non-webhook
+	// channels this is left zero.
+	StatusCode int
+	// Attempts is the number of attempts the delivery consumed,
+	// including the initial try. Always >= 1 when Send returned.
+	Attempts int
+}
+
 // NotificationDelivery is the network port (webhook POST, email
-// send). The default WebhookDelivery uses net/http.
+// send). The default WebhookDelivery uses net/http. Implementations
+// MUST be safe to call concurrently: per-call state lives in the
+// returned DeliveryResult, never on the receiver.
 type NotificationDelivery interface {
-	Send(ctx context.Context, target string, channel NotificationChannel, payload []byte) error
+	Send(ctx context.Context, target string, channel NotificationChannel, payload []byte) (DeliveryResult, error)
 }
 
 // WebhookDelivery posts payload to target via HTTP POST.
@@ -172,6 +191,10 @@ type NotificationDelivery interface {
 // schedule via Backoff; on the final failure the (last) error is
 // returned so the dispatcher can dead-letter the delivery and
 // the notification_delivery_log records the response.
+//
+// WebhookDelivery is safe for concurrent use by multiple
+// goroutines: all per-call state is returned as a DeliveryResult
+// rather than stored on the receiver.
 type WebhookDelivery struct {
 	Client *http.Client
 	// Backoff is the sequence of sleep durations applied between
@@ -182,12 +205,6 @@ type WebhookDelivery struct {
 	// Sleep is the test seam used between retries. Defaults to
 	// time.Sleep.
 	Sleep func(time.Duration)
-	// LastStatusCode is set after each Send so the dispatcher's
-	// delivery log can record the response code on failure.
-	LastStatusCode int
-	// LastAttempts is set after each Send so the dispatcher can
-	// record how many attempts the delivery consumed.
-	LastAttempts int
 }
 
 // defaultWebhookBackoff matches the Round-7 spec: 1s/5s/15s.
@@ -199,9 +216,15 @@ var defaultWebhookBackoff = []time.Duration{time.Second, 5 * time.Second, 15 * t
 // with exponential backoff (see Backoff). The final error
 // includes the last observed status code so the dispatcher can
 // dead-letter the row.
-func (w *WebhookDelivery) Send(ctx context.Context, target string, channel NotificationChannel, payload []byte) error {
+//
+// Per-call state (attempts, terminal status code) is returned in
+// the DeliveryResult so the receiver itself stays free of mutable
+// fields and is safe for concurrent reuse across many Dispatch
+// goroutines.
+func (w *WebhookDelivery) Send(ctx context.Context, target string, channel NotificationChannel, payload []byte) (DeliveryResult, error) {
+	var res DeliveryResult
 	if channel != NotificationChannelWebhook {
-		return errors.New("webhook delivery only supports webhook channel")
+		return res, errors.New("webhook delivery only supports webhook channel")
 	}
 	cl := w.Client
 	if cl == nil {
@@ -218,21 +241,21 @@ func (w *WebhookDelivery) Send(ctx context.Context, target string, channel Notif
 	maxAttempts := len(backoff) + 1
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		w.LastAttempts = attempt
-		w.LastStatusCode = 0
+		res.Attempts = attempt
+		res.StatusCode = 0
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
 		if err != nil {
-			return err
+			return res, err
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := cl.Do(req)
 		if err != nil {
 			lastErr = err
 		} else {
-			w.LastStatusCode = resp.StatusCode
+			res.StatusCode = resp.StatusCode
 			_ = resp.Body.Close()
 			if resp.StatusCode < 400 {
-				return nil
+				return res, nil
 			}
 			lastErr = fmt.Errorf("webhook %s returned %d", target, resp.StatusCode)
 		}
@@ -241,12 +264,12 @@ func (w *WebhookDelivery) Send(ctx context.Context, target string, channel Notif
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return res, ctx.Err()
 		default:
 		}
 		sleep(backoff[attempt-1])
 	}
-	return lastErr
+	return res, lastErr
 }
 
 // SetDeliveryLog wires the per-attempt log. Optional — when nil
@@ -300,14 +323,9 @@ func (d *NotificationDispatcher) Dispatch(ctx context.Context, tenantID, eventTy
 	}
 	var firstErr error
 	for _, p := range subs {
-		derr := d.delivery.Send(ctx, p.Target, p.Channel, body)
+		result, derr := d.delivery.Send(ctx, p.Target, p.Channel, body)
 		status := NotificationDeliveryStatusDelivered
-		var responseCode, attempts int
 		var errMsg string
-		if wh, ok := d.delivery.(*WebhookDelivery); ok {
-			responseCode = wh.LastStatusCode
-			attempts = wh.LastAttempts
-		}
 		if derr != nil {
 			status = NotificationDeliveryStatusFailed
 			errMsg = derr.Error()
@@ -325,8 +343,8 @@ func (d *NotificationDispatcher) Dispatch(ctx context.Context, tenantID, eventTy
 				Target:       p.Target,
 				Payload:      payloadMap,
 				Status:       status,
-				Attempt:      attempts,
-				ResponseCode: responseCode,
+				Attempt:      result.Attempts,
+				ResponseCode: result.StatusCode,
 				ErrorMessage: errMsg,
 			})
 		}
