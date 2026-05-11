@@ -102,6 +102,40 @@ jobs:
       - name: Eval gate
         run: make eval
 
+  fast-alerts:
+    name: Fast alerts.yaml check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: alerts-check
+        run: make alerts-check
+
+  fast-rollback-parity:
+    name: Fast migration/rollback parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: rollback parity tests
+        run: go test -race -count=1 ./migrations/rollback/...
+
   fast-python:
     name: Fast Python services unit tests
     runs-on: ubuntu-latest
@@ -129,20 +163,25 @@ jobs:
   fast-required:
     name: Required CI (fast lane)
     runs-on: ubuntu-latest
-    needs: [fast-go, fast-eval, fast-python]
+    needs: [fast-go, fast-eval, fast-alerts, fast-rollback-parity, fast-python]
     if: always()
     steps:
       - name: Verify fast-lane jobs passed
         run: |
           set -e
           fail=0
-          for r in "${{ needs.fast-go.result }}" "${{ needs.fast-eval.result }}" "${{ needs.fast-python.result }}"; do
+          for r in \
+            "${{ needs.fast-go.result }}" \
+            "${{ needs.fast-eval.result }}" \
+            "${{ needs.fast-alerts.result }}" \
+            "${{ needs.fast-rollback-parity.result }}" \
+            "${{ needs.fast-python.result }}"; do
             if [ "$r" != "success" ]; then
               fail=1
             fi
           done
           if [ "$fail" = "1" ]; then
-            echo "::error::fast-go=${{ needs.fast-go.result }} fast-eval=${{ needs.fast-eval.result }} fast-python=${{ needs.fast-python.result }}"
+            echo "::error::fast-go=${{ needs.fast-go.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-python=${{ needs.fast-python.result }}"
             exit 1
           fi
           echo "fast lane green"

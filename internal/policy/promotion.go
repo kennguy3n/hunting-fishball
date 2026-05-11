@@ -27,6 +27,40 @@ type AuditWriter interface {
 	CreateInTx(ctx context.Context, tx *gorm.DB, log *audit.AuditLog) error
 }
 
+// auditNotificationFlusher is the optional extension implemented by
+// audit writers that buffer notifications produced during a tx and
+// only fire them after the surrounding tx commits. The promoter
+// invokes Flush after a successful tx.Transaction and Discard after
+// a rollback so a webhook never reaches subscribers for a promotion
+// that never happened (the phantom-notification bug). Plain
+// *audit.Repository does not implement this — only the
+// admin.NotifyingAuditWriter does — and the promoter skips the
+// calls when the assertion fails so existing tests / wiring keep
+// working unchanged.
+type auditNotificationFlusher interface {
+	Flush(ctx context.Context, tx *gorm.DB)
+	Discard(tx *gorm.DB)
+}
+
+// flushAuditNotifications invokes Flush on a successful tx commit
+// or Discard on rollback, but only if the configured Audit writer
+// implements the buffering protocol. Centralised so PromoteDraft
+// and RejectDraft cannot drift apart.
+func (p *Promoter) flushAuditNotifications(ctx context.Context, tx *gorm.DB, txErr error) {
+	if tx == nil {
+		return
+	}
+	fl, ok := p.cfg.Audit.(auditNotificationFlusher)
+	if !ok {
+		return
+	}
+	if txErr == nil {
+		fl.Flush(ctx, tx)
+		return
+	}
+	fl.Discard(tx)
+}
+
 // LiveStore is the narrow contract the promotion workflow needs to
 // apply a draft snapshot to the live policy tables. The
 // implementation in cmd/api/main.go is GORM-backed; tests inject a
@@ -115,7 +149,9 @@ func (p *Promoter) PromoteDraft(ctx context.Context, tenantID, draftID, actorID 
 	}
 
 	var promoted *Draft
+	var capturedTx *gorm.DB
 	err = p.cfg.Drafts.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		capturedTx = tx
 		if err := p.cfg.LiveStore.ApplySnapshot(ctx, tx, d.TenantID, d.ChannelID, d.Payload.Snapshot); err != nil {
 			return fmt.Errorf("policy: apply snapshot: %w", err)
 		}
@@ -169,6 +205,10 @@ func (p *Promoter) PromoteDraft(ctx context.Context, tenantID, draftID, actorID 
 		}
 		return nil
 	})
+	// flush AFTER Transaction returns so notifications only reach
+	// subscribers for a promotion that actually committed; discard
+	// on rollback so a phantom notification cannot escape.
+	p.flushAuditNotifications(ctx, capturedTx, err)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +228,9 @@ func (p *Promoter) RejectDraft(ctx context.Context, tenantID, draftID, actorID, 
 	}
 
 	var rejected *Draft
+	var capturedTx *gorm.DB
 	err := p.cfg.Drafts.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		capturedTx = tx
 		updated, err := p.cfg.Drafts.MarkRejected(ctx, tx, tenantID, draftID, actorID, reason)
 		if err != nil {
 			return err
@@ -228,6 +270,10 @@ func (p *Promoter) RejectDraft(ctx context.Context, tenantID, draftID, actorID, 
 		}
 		return nil
 	})
+	// Same flush-after-commit / discard-on-rollback discipline as
+	// PromoteDraft so a rejection notification cannot fire for a
+	// rejection that rolled back.
+	p.flushAuditNotifications(ctx, capturedTx, err)
 	if err != nil {
 		return nil, err
 	}

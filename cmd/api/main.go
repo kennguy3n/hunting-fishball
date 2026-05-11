@@ -147,6 +147,62 @@ func run() error {
 
 	auditRepo := audit.NewRepository(db)
 
+	// Round-8 Task 5: notification dispatcher wiring. Build the
+	// dispatcher + delivery log here so every handler that takes
+	// an AuditWriter can be wrapped in a NotifyingAuditWriter,
+	// which fans configured webhook/email subscribers out on every
+	// audit Create. Failures inside Dispatch are swallowed so they
+	// can never block the audit write.
+	notifStore := admin.NewInMemoryNotificationStore()
+	notifDelivery := &admin.WebhookDelivery{Client: http.DefaultClient}
+	notifDispatcher, err := admin.NewNotificationDispatcher(notifStore, notifDelivery)
+	if err != nil {
+		return fmt.Errorf("notification dispatcher: %w", err)
+	}
+	notifDeliveryLog := admin.NewNotificationDeliveryLogGORM(db)
+	if err := notifDeliveryLog.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("notif_delivery_log migrate: %w", err)
+	}
+	notifDispatcher.SetDeliveryLog(notifDeliveryLog)
+	notifyingAudit := &admin.NotifyingAuditWriter{Inner: auditRepo, Dispatcher: notifDispatcher, Async: true}
+
+	// Round-8 Task 17 finisher: start the NotificationRetryWorker
+	// in a background goroutine. Without this the dispatcher writes
+	// next_retry_at on retryable failures but nothing scans the log
+	// to re-attempt delivery, so failed webhooks would simply rot.
+	// The interval is configurable via the documented
+	// CONTEXT_ENGINE_NOTIFICATION_RETRY_INTERVAL env var; default 1m.
+	notifRetryWorker, err := admin.NewNotificationRetryWorker(admin.NotificationRetryWorkerConfig{
+		Store:    notifDeliveryLog,
+		Delivery: notifDelivery,
+		Logger: func(msg string, kv ...any) {
+			slog.Warn("notification_retry", slog.String("msg", msg), slog.Any("kv", kv))
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("notification retry worker: %w", err)
+	}
+	notifRetryInterval := time.Minute
+	if v := os.Getenv("CONTEXT_ENGINE_NOTIFICATION_RETRY_INTERVAL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			notifRetryInterval = d
+		}
+	}
+	notifRetryCtx, notifRetryCancel := context.WithCancel(context.Background())
+	defer notifRetryCancel()
+	go func() {
+		t := time.NewTicker(notifRetryInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-notifRetryCtx.Done():
+				return
+			case <-t.C:
+				notifRetryWorker.Tick(notifRetryCtx)
+			}
+		}
+	}()
+
 	qdrantPool := 32
 	if v, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_QDRANT_POOL_SIZE")); v > 0 {
 		qdrantPool = v
@@ -306,7 +362,7 @@ func run() error {
 	healthRepo := admin.NewHealthRepository(db, admin.DefaultThresholds)
 	adminHandler, err := admin.NewHandler(admin.HandlerConfig{
 		Repo:   sourceRepo,
-		Audit:  auditRepo,
+		Audit:  notifyingAudit,
 		Health: healthRepo,
 	})
 	if err != nil {
@@ -331,7 +387,7 @@ func run() error {
 	// for CredentialGracePeriod so in-flight requests drain.
 	(&admin.CredentialRotator{
 		Repo:      sourceRepo,
-		Audit:     auditRepo,
+		Audit:     notifyingAudit,
 		Validator: admin.NewRegistryValidator(),
 	}).Register(api)
 
@@ -423,7 +479,7 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("reindex orchestrator: %w", err)
 		}
-		reindexHandler, err := admin.NewReindexHandler(admin.ReindexHandlerConfig{Runner: orch, Audit: auditRepo})
+		reindexHandler, err := admin.NewReindexHandler(admin.ReindexHandlerConfig{Runner: orch, Audit: notifyingAudit})
 		if err != nil {
 			return fmt.Errorf("reindex handler: %w", err)
 		}
@@ -439,7 +495,7 @@ func run() error {
 	tenantStatusRepo := admin.NewTenantStatusRepoGORM(db)
 	tenantDeleter, err := admin.NewTenantDeleter(admin.TenantDeleterConfig{
 		Status: tenantStatusRepo,
-		Audit:  auditRepo,
+		Audit:  notifyingAudit,
 	})
 	if err != nil {
 		return fmt.Errorf("tenant deleter: %w", err)
@@ -467,7 +523,7 @@ func run() error {
 	promoter, err := policy.NewPromoter(policy.PromotionConfig{
 		Drafts:    draftRepo,
 		LiveStore: liveStore,
-		Audit:     auditRepo,
+		Audit:     notifyingAudit,
 	})
 	if err != nil {
 		return fmt.Errorf("policy promoter: %w", err)
@@ -483,7 +539,7 @@ func run() error {
 		Drafts:    draftRepo,
 		Promotion: promoter,
 		Simulator: simulator,
-		Audit:     auditRepo,
+		Audit:     notifyingAudit,
 	})
 	if err != nil {
 		return fmt.Errorf("simulator handler: %w", err)
@@ -543,7 +599,7 @@ func run() error {
 	// dependencies while still exposing the full surface for
 	// integration tests.
 	abtestStore := admin.NewInMemoryABTestStore()
-	if abtestHandler, aerr := admin.NewABTestHandler(abtestStore, auditRepo); aerr == nil {
+	if abtestHandler, aerr := admin.NewABTestHandler(abtestStore, notifyingAudit); aerr == nil {
 		abtestHandler.Register(api)
 	}
 	abtestRouter := admin.NewABTestRouter(abtestStore)
@@ -554,7 +610,14 @@ func run() error {
 	// to, otherwise GET /v1/admin/retrieval/experiments/:name/results
 	// always returns zero arms. Hoist the store construction here so
 	// the aggregator and the recorder share one instance.
-	queryAnalyticsStore := admin.NewInMemoryQueryAnalyticsStore()
+	//
+	// Round-8 Task 6: GORM-backed. The store auto-migrates so the
+	// query_analytics table is created even if the SQL migration
+	// hasn't been replayed against the target database.
+	queryAnalyticsStore := admin.NewQueryAnalyticsStoreGORM(db)
+	if err := queryAnalyticsStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("query_analytics migrate: %w", err)
+	}
 
 	if abtestResults, aerr := admin.NewABTestResultsAggregator(queryAnalyticsStore); aerr == nil {
 		if arHandler, herr := admin.NewABTestResultsHandler(abtestResults); herr == nil {
@@ -563,25 +626,19 @@ func run() error {
 	}
 
 	if tmplStore := admin.NewInMemoryConnectorTemplateStore(); tmplStore != nil {
-		if tmplHandler, terr := admin.NewConnectorTemplateHandler(tmplStore, auditRepo); terr == nil {
+		if tmplHandler, terr := admin.NewConnectorTemplateHandler(tmplStore, notifyingAudit); terr == nil {
 			tmplHandler.Register(api)
 		}
 	}
 
-	notifStore := admin.NewInMemoryNotificationStore()
-	if notifHandler, nerr := admin.NewNotificationHandler(notifStore, auditRepo); nerr == nil {
+	if notifHandler, nerr := admin.NewNotificationHandler(notifStore, notifyingAudit); nerr == nil {
 		notifHandler.Register(api)
 	}
-	notifDelivery := &admin.WebhookDelivery{Client: http.DefaultClient}
-	notifDispatcher, _ := admin.NewNotificationDispatcher(notifStore, notifDelivery)
-	notifDeliveryLog := admin.NewInMemoryNotificationDeliveryLog()
-	notifDispatcher.SetDeliveryLog(notifDeliveryLog)
 	if dlogHandler, derr := admin.NewNotificationDeliveryLogHandler(notifDeliveryLog); derr == nil {
 		dlogHandler.Register(api)
 	}
-	_ = notifDispatcher
 
-	if ecHandler, eerr := admin.NewEmbeddingConfigHandler(admin.NewEmbeddingConfigRepository(db), auditRepo); eerr == nil {
+	if ecHandler, eerr := admin.NewEmbeddingConfigHandler(admin.NewEmbeddingConfigRepository(db), notifyingAudit); eerr == nil {
 		ecHandler.Register(api)
 	}
 
@@ -589,7 +646,7 @@ func run() error {
 		rsHandler.Register(api)
 	}
 
-	if synHandler, serr := admin.NewSynonymsHandler(retrieval.NewInMemorySynonymStore(), auditRepo); serr == nil {
+	if synHandler, serr := admin.NewSynonymsHandler(retrieval.NewInMemorySynonymStore(), notifyingAudit); serr == nil {
 		synHandler.Register(api)
 	}
 
@@ -611,8 +668,15 @@ func run() error {
 		qaHandler.Register(api)
 	}
 
-	// Round-7 Task 7: credential health worker + endpoint.
-	credHealth := admin.NewInMemoryCredentialHealthStore()
+	// Round-7 Task 7 / Round-8 Task 11: credential health worker +
+	// endpoint. The GORM-backed store reads the credential_* columns
+	// migrations/026_credential_valid.sql adds to source_health, so
+	// the periodic worker in cmd/ingest and the read endpoint here
+	// share one row per source.
+	credHealth, err := admin.NewCredentialHealthGORM(db)
+	if err != nil {
+		return fmt.Errorf("credential_health: %w", err)
+	}
 	if chHandler, cerr := admin.NewCredentialHealthHandler(credHealth); cerr == nil {
 		chHandler.Register(api)
 	}
@@ -643,19 +707,37 @@ func run() error {
 		}
 		return out
 	})
-	if cwHandler, werr := admin.NewCacheWarmHandler(admin.CacheWarmHandlerConfig{Warmer: cacheWarmExec, Analytics: queryAnalyticsStore, AutoTopN: 10, Audit: auditRepo}); werr == nil {
+	if cwHandler, werr := admin.NewCacheWarmHandler(admin.CacheWarmHandlerConfig{Warmer: cacheWarmExec, Analytics: queryAnalyticsStore, AutoTopN: 10, Audit: notifyingAudit}); werr == nil {
 		cwHandler.Register(api)
 	}
 
 	// Round-7 Task 10: bulk source operations.
-	if bulkHandler, berr := admin.NewBulkSourceHandler(sourceRepo, auditRepo); berr == nil {
+	if bulkHandler, berr := admin.NewBulkSourceHandler(sourceRepo, notifyingAudit); berr == nil {
 		bulkHandler.Register(api)
 	}
 
-	// Round-7 Task 11: per-tenant latency budget.
-	if lbHandler, lerr := admin.NewLatencyBudgetHandler(admin.NewInMemoryLatencyBudgetStore(), auditRepo); lerr == nil {
+	// Round-7 Task 11 / Round-8 Task 9: per-tenant latency budget.
+	latencyBudgetStore, err := admin.NewLatencyBudgetGORM(db)
+	if err != nil {
+		return fmt.Errorf("latency_budget: %w", err)
+	}
+	if err := db.AutoMigrate(&admin.LatencyBudget{}); err != nil {
+		return fmt.Errorf("latency_budget migrate: %w", err)
+	}
+	if lbHandler, lerr := admin.NewLatencyBudgetHandler(latencyBudgetStore, notifyingAudit); lerr == nil {
 		lbHandler.Register(api)
 	}
+	// Round-8 Task 9: the retrieval handler consults the per-tenant
+	// latency budget on every request through the LatencyBudgetLookup
+	// hook, which mirrors the SetQueryAnalyticsRecorder pattern so the
+	// admin → retrieval import stays one-way.
+	retrievalHandler.SetLatencyBudgetLookup(func(ctx context.Context, tenantID string) (time.Duration, bool) {
+		b, err := latencyBudgetStore.Get(ctx, tenantID)
+		if err != nil || b == nil || b.MaxLatencyMS <= 0 {
+			return 0, false
+		}
+		return time.Duration(b.MaxLatencyMS) * time.Millisecond, true
+	})
 
 	// Round-7 Task 12: chunk quality report.
 	if cqHandler, cerr := admin.NewChunkQualityHandler(admin.NewInMemoryChunkQualityStore()); cerr == nil {
@@ -663,24 +745,61 @@ func run() error {
 	}
 
 	// Round-7 Task 14: audit export.
-	if aeHandler, aerr := admin.NewAuditExportHandler(auditRepo, auditRepo); aerr == nil {
+	if aeHandler, aerr := admin.NewAuditExportHandler(auditRepo, notifyingAudit); aerr == nil {
 		aeHandler.Register(api)
 	}
 
-	// Round-7 Task 15: per-tenant cache TTL.
-	if ccHandler, cerr := admin.NewCacheConfigHandler(admin.NewInMemoryCacheTTLStore(), auditRepo); cerr == nil {
+	// Round-7 Task 15 / Round-8 Task 10: per-tenant cache TTL.
+	cacheTTLStore, err := admin.NewCacheTTLGORM(db)
+	if err != nil {
+		return fmt.Errorf("cache_ttl: %w", err)
+	}
+	if err := db.AutoMigrate(&admin.CacheConfig{}); err != nil {
+		return fmt.Errorf("cache_config migrate: %w", err)
+	}
+	if ccHandler, cerr := admin.NewCacheConfigHandler(cacheTTLStore, notifyingAudit); cerr == nil {
 		ccHandler.Register(api)
 	}
+	retrievalHandler.SetCacheTTLLookup(func(ctx context.Context, tenantID string, fallback time.Duration) time.Duration {
+		return cacheTTLStore.TTLFor(ctx, tenantID, fallback)
+	})
 
-	// Round-7 Task 16: sync history.
-	if shHandler, serr := admin.NewSyncHistoryHandler(admin.NewInMemorySyncHistoryRecorder()); serr == nil {
+	// Round-7 Task 16 / Round-8 Task 8: sync history.
+	syncHistoryStore, err := admin.NewSyncHistoryGORM(db)
+	if err != nil {
+		return fmt.Errorf("sync_history: %w", err)
+	}
+	if err := db.AutoMigrate(&admin.SyncHistoryRow{}); err != nil {
+		return fmt.Errorf("sync_history migrate: %w", err)
+	}
+	if shHandler, serr := admin.NewSyncHistoryHandler(syncHistoryStore); serr == nil {
 		shHandler.Register(api)
 	}
 
-	// Round-7 Task 17: pinned retrieval results.
-	if prHandler, perr := admin.NewPinnedResultsHandler(admin.NewInMemoryPinnedResultStore(nil), auditRepo); perr == nil {
+	// Round-7 Task 17 / Round-8 Task 7: pinned retrieval results.
+	pinnedStore, err := admin.NewPinnedResultStoreGORM(db)
+	if err != nil {
+		return fmt.Errorf("pinned_results: %w", err)
+	}
+	if err := pinnedStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("pinned_results migrate: %w", err)
+	}
+	if prHandler, perr := admin.NewPinnedResultsHandler(pinnedStore, notifyingAudit); perr == nil {
 		prHandler.Register(api)
 	}
+	// Round-8 Task 16: pin lookup hook so retrieval can call into
+	// the GORM-backed store after policy filtering and before MMR.
+	retrievalHandler.SetPinLookup(func(ctx context.Context, tenantID, query string) []retrieval.PinnedHit {
+		rows, err := pinnedStore.Lookup(ctx, tenantID, query)
+		if err != nil || len(rows) == 0 {
+			return nil
+		}
+		out := make([]retrieval.PinnedHit, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, retrieval.PinnedHit{ChunkID: r.ChunkID, Position: r.Position})
+		}
+		return out
+	})
 
 	// Round-7 Task 18: pipeline health dashboard.
 	if phAgg, perr := admin.NewPipelineHealthAggregator(observability.Registry); perr == nil {

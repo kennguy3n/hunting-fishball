@@ -140,6 +140,28 @@ phase.
 > observability/operability; shard pre-generation extends
 > Phase 5. See PROGRESS.md for the per-task list.
 >
+> **Round 8** (2026-05-11) layers another 20 tasks
+> primarily focused on *making the existing surface real*:
+> Stage 4 deduplication, the coordinator priority buffer,
+> Stage 3 per-source embedding overrides, and retry analytics
+> are now wired into the ingest binary (Phase 1 hardening);
+> the notification dispatcher fires on every audit event with
+> a persisted delivery log + retry-with-DLQ worker (Phase 8
+> hardening); all six Round-7 in-memory admin stores
+> (`QueryAnalytics`, `PinnedResults`, `SyncHistory`,
+> `LatencyBudget`, `CacheConfig`, `CredentialHealth`) are now
+> Postgres-backed and wired into `cmd/api/main.go`; the
+> retrieval handler grew `SetLatencyBudgetLookup`,
+> `SetCacheTTLLookup`, and `SetPinLookup` so per-tenant
+> operator controls reach the hot path (Phase 3); a periodic
+> credential-health worker now runs in `cmd/ingest/main.go`;
+> `docs/openapi.yaml` was extended with the Round 5/6/7
+> endpoint set; CI gains `make alerts-check` and rollback
+> parity in the fast lane; and the new
+> `docs/runbooks/operational.md` collates the Round 6/7/8
+> ops procedures in one place. See PROGRESS.md for the
+> per-task list.
+
 > **Round 7** (2026-05-11) layers another 20 features —
 > primarily operational hardening: query analytics + A/B
 > results + retrieval pinning + cache warming + per-tenant

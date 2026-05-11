@@ -589,3 +589,277 @@ paths:
           schema: { type: string }
       responses:
         '202': { description: Accepted }
+
+  # --------------------------------------------------------------
+  # Round 5 — preview, explain, feedback, GDPR export, provenance,
+  # global analytics, policy history.
+  # --------------------------------------------------------------
+  /v1/admin/sources/{id}/preview:
+    post:
+      summary: Preview connector output before connecting.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: OK } }
+  /v1/admin/dlq/batch-replay:
+    post:
+      summary: Replay a batch of dead-letter messages.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '202': { description: Accepted } }
+  /v1/retrieve/explain:
+    post:
+      summary: Retrieve with per-hit explain blocks.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: OK } }
+  /v1/retrieve/feedback:
+    post:
+      summary: Record a positive/negative feedback signal for a retrieval result.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '202': { description: Accepted } }
+  /v1/admin/policy/history:
+    get:
+      summary: List historical policy versions.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/policy/rollback:
+    post:
+      summary: Roll back policy to a prior version.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '202': { description: Accepted } }
+  /v1/admin/gdpr/export:
+    post:
+      summary: Trigger a GDPR data export for the tenant or a specific user.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '202': { description: Accepted } }
+  /v1/admin/chunks/{chunk_id}/provenance:
+    get:
+      summary: Show chunk provenance (source, ingestion run, transform chain).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: chunk_id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+  /v1/admin/analytics/global:
+    get:
+      summary: Global retrieval analytics dashboard payload.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+
+  # --------------------------------------------------------------
+  # Round 6 — diversity, streaming, schema discovery, embedding config,
+  # synonyms, A/B experiments, notifications, connector templates,
+  # isolation check, tenant export, dry-run reindex, retry stats,
+  # backpressure.
+  # --------------------------------------------------------------
+  /v1/retrieve/stream:
+    post:
+      summary: Stream retrieval results as Server-Sent Events.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: SSE stream } }
+  /v1/admin/sources/{id}/schema:
+    get:
+      summary: Inspect the discovered schema for a connected source.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+  /v1/admin/sources/{id}/embedding-config:
+    get:
+      summary: Get the per-source embedding model override.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+    put:
+      summary: Set or update the per-source embedding model override.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: OK } }
+  /v1/admin/synonyms:
+    get:
+      summary: List per-tenant query synonyms.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Add a new query synonym mapping.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '201': { description: Created } }
+  /v1/admin/retrieval/experiments:
+    get:
+      summary: List active retrieval A/B experiments.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Create a new retrieval A/B experiment.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '201': { description: Created } }
+  /v1/admin/notifications/subscriptions:
+    get:
+      summary: List webhook/email notification subscriptions.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Create a webhook/email notification subscription.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '201': { description: Created } }
+  /v1/admin/connector-templates:
+    get:
+      summary: List shared connector configuration templates.
+      responses: { '200': { description: OK } }
+  /v1/admin/isolation/check:
+    get:
+      summary: Run cross-tenant isolation invariants check.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/tenants/{tenant_id}/export:
+    post:
+      summary: Export full tenant snapshot (data + policy + audit).
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: tenant_id
+          required: true
+          schema: { type: string }
+      responses: { '202': { description: Accepted } }
+  /v1/admin/reindex/dry-run:
+    post:
+      summary: Dry-run a reindex to preview the affected scope.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: OK } }
+  /v1/admin/pipeline/retry-stats:
+    get:
+      summary: Return ingestion retry analytics.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/pipeline/backpressure:
+    get:
+      summary: Report ingest priority-buffer occupancy and drain rate.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+
+  # --------------------------------------------------------------
+  # Round 7 — query analytics, delivery log, A/B results, credential
+  # health, cache warm, bulk sources, latency budget, chunk quality,
+  # audit export, cache config, sync history, pinned results,
+  # pipeline health.
+  # --------------------------------------------------------------
+  /v1/admin/retrieval/analytics:
+    get:
+      summary: List per-tenant retrieval query analytics rows.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/notifications/delivery-log:
+    get:
+      summary: Inspect persisted webhook/email delivery attempts.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/retrieval/experiments/{name}/results:
+    get:
+      summary: Aggregate per-arm metrics for an experiment.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+  /v1/admin/sources/{id}/credential-health:
+    get:
+      summary: Inspect last credential-validation outcome for a source.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '200': { description: OK } }
+  /v1/admin/retrieval/warm-cache:
+    post:
+      summary: Pre-warm the semantic cache with a set of queries.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '202': { description: Accepted } }
+  /v1/admin/sources/bulk:
+    post:
+      summary: Bulk source operations (connect / purge / reindex).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '202': { description: Accepted } }
+  /v1/admin/latency-budget:
+    get:
+      summary: Get the per-tenant retrieval latency budget.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+    put:
+      summary: Set or update the per-tenant retrieval latency budget.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: OK } }
+  /v1/admin/chunks/quality:
+    get:
+      summary: Chunk-quality report (low-information, near-duplicate, empty).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/audit/export:
+    post:
+      summary: Export audit log as CSV/JSONL.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '202': { description: Accepted } }
+  /v1/admin/cache-config:
+    get:
+      summary: Get the per-tenant semantic-cache TTL.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+    put:
+      summary: Set or update the per-tenant semantic-cache TTL.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: OK } }
+  /v1/admin/sync-history:
+    get:
+      summary: List sync runs (success/failure, counts, durations).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/pinned-results:
+    get:
+      summary: List operator-pinned retrieval results.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Pin a chunk at a specific position for a query pattern.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '201': { description: Created } }
+  /v1/admin/pipeline/health:
+    get:
+      summary: Pipeline health dashboard (queue depth, retries, latency).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }

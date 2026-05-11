@@ -29,6 +29,14 @@ type EmbedStage interface {
 	EmbedBlocks(ctx context.Context, tenantID string, blocks []Block) ([][]float32, string, error)
 }
 
+// EmbedStageBySource is the optional per-source variant of EmbedStage.
+// When the configured Embed implementation also satisfies this
+// interface, the coordinator routes through it so the embed worker
+// can pick a per-source model (Round-6 Task 1 / Round-8 Task 3).
+type EmbedStageBySource interface {
+	EmbedBlocksForSource(ctx context.Context, tenantID, sourceID string, blocks []Block) ([][]float32, string, error)
+}
+
 // StoreStage is the abstract Stage 4 contract.
 type StoreStage interface {
 	Store(ctx context.Context, doc *Document, blocks []Block, embeddings [][]float32, modelID string) error
@@ -111,6 +119,24 @@ type CoordinatorConfig struct {
 	// graph-side outages cannot block ingestion. See
 	// docs/ARCHITECTURE.md §3.3 "Pipeline coordinator".
 	GraphRAG GraphRAGStage
+
+	// PriorityBuffer, when non-nil, fronts Stage 1: Submit pushes
+	// events into the buffer, and Run launches a drain goroutine
+	// that pops from the buffer in priority order (high > normal
+	// > low, with anti-starvation) and feeds Stage 1 (Round-6 Task
+	// 8 / Round-8 Task 2). Disabled when nil.
+	PriorityBuffer *PriorityBuffer
+
+	// PriorityClassifier assigns a Priority to each Submitted
+	// event. Only consulted when PriorityBuffer is non-nil.
+	// Defaults to DefaultPriorityClassifier{}.
+	PriorityClassifier PriorityClassifier
+
+	// RetryAnalytics, when non-nil, receives one outcome per
+	// retry attempt (success / retry / failed) per stage via
+	// RecordAttempt. Used by /v1/admin/pipeline/retry-stats
+	// (Round-6 Task 12 / Round-8 Task 4).
+	RetryAnalytics *RetryAnalytics
 }
 
 func (c *CoordinatorConfig) defaults() {
@@ -128,6 +154,9 @@ func (c *CoordinatorConfig) defaults() {
 	}
 	c.Workers.defaults()
 	c.GraphRAG = graphRAGOrNoop(c.GraphRAG)
+	if c.PriorityBuffer != nil && c.PriorityClassifier == nil {
+		c.PriorityClassifier = DefaultPriorityClassifier{}
+	}
 }
 
 // CoordinatorMetrics counts the events that flow through the
@@ -211,6 +240,27 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 	g, gctx := errgroup.WithContext(ctx)
 
+	// Round-8 Task 2: when a PriorityBuffer fronts Stage 1, launch a
+	// drain goroutine that pulls events out of the buffer in
+	// priority order and feeds c.stage1. We close c.stage1 once the
+	// drain returns (buffer closed + drained), so the existing
+	// Stage-1 workers shut down cleanly. When PriorityBuffer is nil
+	// the legacy path (Submit -> c.stage1 directly, CloseInputs
+	// closes c.stage1) is preserved.
+	if c.cfg.PriorityBuffer != nil {
+		g.Go(func() error {
+			defer close(c.stage1)
+			c.cfg.PriorityBuffer.Drain(gctx, func(evt IngestEvent) {
+				select {
+				case <-gctx.Done():
+				case c.stage1 <- stagedEvent{evt: evt}:
+					c.recordChannelDepths()
+				}
+			})
+			return nil
+		})
+	}
+
 	// Run N workers for a stage; the closer goroutine waits for all
 	// workers in the stage to finish before closing the downstream
 	// channel. This generalises the original "1 worker per stage"
@@ -266,7 +316,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 					continue
 				}
-				doc, err := c.runWithRetry(gctx, "fetch", func(rc context.Context) (any, error) {
+				doc, err := c.runWithRetry(gctx, "fetch", se.evt.TenantID+":"+se.evt.DocumentID, func(rc context.Context) (any, error) {
 					return c.cfg.Fetch.FetchEvent(rc, se.evt)
 				})
 				if errors.Is(err, ErrUnchanged) {
@@ -311,7 +361,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 					continue
 				}
-				blocks, err := c.runWithRetry(gctx, "parse", func(rc context.Context) (any, error) {
+				blocks, err := c.runWithRetry(gctx, "parse", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
 					return c.cfg.Parse.Parse(rc, it.doc)
 				})
 				if err != nil {
@@ -369,8 +419,17 @@ func (c *Coordinator) Run(ctx context.Context) error {
 					em      [][]float32
 					modelID string
 				}
-				out, err := c.runWithRetry(gctx, "embed", func(rc context.Context) (any, error) {
-					em, model, err := c.cfg.Embed.EmbedBlocks(rc, it.evt.TenantID, it.blocks)
+				out, err := c.runWithRetry(gctx, "embed", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
+					var (
+						em    [][]float32
+						model string
+						err   error
+					)
+					if eb, ok := c.cfg.Embed.(EmbedStageBySource); ok {
+						em, model, err = eb.EmbedBlocksForSource(rc, it.evt.TenantID, it.evt.SourceID, it.blocks)
+					} else {
+						em, model, err = c.cfg.Embed.EmbedBlocks(rc, it.evt.TenantID, it.blocks)
+					}
 					if err != nil {
 						return nil, err
 					}
@@ -422,7 +481,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 					return
 				}
 				if it.evt.Kind == EventDocumentDeleted || it.evt.Kind == EventPurge {
-					if _, err := c.runWithRetry(gctx, "delete", func(rc context.Context) (any, error) {
+					if _, err := c.runWithRetry(gctx, "delete", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
 						return nil, c.cfg.Store.Delete(rc, it.evt.TenantID, it.evt.DocumentID)
 					}); err != nil {
 						c.routeDLQ(gctx, it.evt, err)
@@ -430,7 +489,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 						continue
 					}
 				} else {
-					if _, err := c.runWithRetry(gctx, "store", func(rc context.Context) (any, error) {
+					if _, err := c.runWithRetry(gctx, "store", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
 						return nil, c.cfg.Store.Store(rc, it.doc, it.blocks, it.embeddings, it.modelID)
 					}); err != nil {
 						c.routeDLQ(gctx, it.evt, err)
@@ -466,6 +525,13 @@ func (c *Coordinator) Run(ctx context.Context) error {
 // in NewCoordinator and Run drains them.
 func (c *Coordinator) Submit(ctx context.Context, evt IngestEvent) error {
 	c.Metrics.Submitted.Add(1)
+	if c.cfg.PriorityBuffer != nil {
+		prio := PriorityNormal
+		if c.cfg.PriorityClassifier != nil {
+			prio = c.cfg.PriorityClassifier.Classify(evt)
+		}
+		return c.cfg.PriorityBuffer.Push(ctx, evt, prio)
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -491,13 +557,23 @@ func (c *Coordinator) recordChannelDepths() {
 // CloseInputs must be called exactly once per Run; calling it twice
 // panics on the underlying channel close.
 func (c *Coordinator) CloseInputs() {
+	if c.cfg.PriorityBuffer != nil {
+		// The drain goroutine in Run() owns close(c.stage1) and
+		// exits once the buffer is closed and drained.
+		c.cfg.PriorityBuffer.Close()
+		return
+	}
 	close(c.stage1)
 }
 
-// runWithRetry executes fn with bounded retries on transient errors.
-// Poison messages (ErrPoisonMessage) and ErrUnchanged are returned
-// immediately without retry.
-func (c *Coordinator) runWithRetry(ctx context.Context, stage string, fn func(context.Context) (any, error)) (any, error) {
+// runWithRetry executes fn with bounded retries on transient errors,
+// threading a per-document key through to RetryAnalytics so
+// success_after_retry can be computed. docKey may be empty (the
+// analytics still updates the per-stage aggregates, but the
+// success_after_retry attribution requires a key). Poison messages
+// (ErrPoisonMessage) and ErrUnchanged are returned immediately
+// without retry.
+func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn func(context.Context) (any, error)) (any, error) {
 	ctx, span := observability.StartSpan(ctx, "pipeline."+stage,
 		observability.AttrStage.String(stage),
 	)
@@ -507,11 +583,15 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage string, fn func(co
 		observability.ObserveStageDuration(stage, time.Since(start).Seconds())
 	}()
 
+	rec := c.cfg.RetryAnalytics
 	var lastErr error
 	backoff := c.cfg.InitialBackoff
 	for attempt := 1; attempt <= c.cfg.MaxAttempts; attempt++ {
 		out, err := fn(ctx)
 		if err == nil {
+			if rec != nil {
+				_ = rec.RecordAttempt(stage, docKey, RetryOutcomeSuccess, "")
+			}
 			return out, nil
 		}
 		if errors.Is(err, ErrUnchanged) {
@@ -519,11 +599,21 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage string, fn func(co
 		}
 		if errors.Is(err, ErrPoisonMessage) {
 			observability.RecordError(span, err)
+			if rec != nil {
+				_ = rec.RecordAttempt(stage, docKey, RetryOutcomeFailed, err.Error())
+			}
 			return nil, err
 		}
 		lastErr = err
-		if attempt == c.cfg.MaxAttempts {
+		if attempt < c.cfg.MaxAttempts {
+			if rec != nil {
+				_ = rec.RecordAttempt(stage, docKey, RetryOutcomeRetry, err.Error())
+			}
+		} else {
 			observability.RecordError(span, err)
+			if rec != nil {
+				_ = rec.RecordAttempt(stage, docKey, RetryOutcomeFailed, err.Error())
+			}
 			break
 		}
 		t := time.NewTimer(backoff)

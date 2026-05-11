@@ -435,6 +435,55 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-11: **Round 8: Next 20 tasks — pipeline wiring, GORM stores, notification delivery, e2e, runbook, docs**.
+  - **Task 1**: `pipeline.Deduplicator` wired into Stage 4 store worker; gated
+    by `CONTEXT_ENGINE_DEDUP_ENABLED`. Test:
+    `internal/pipeline/round8_wiring_test.go`.
+  - **Task 2**: `pipeline.PriorityBuffer` routed through coordinator `Submit`
+    when `CONTEXT_ENGINE_PRIORITY_ENABLED=true`. Test:
+    `internal/pipeline/round8_wiring_test.go`.
+  - **Task 3**: `admin.EmbeddingConfigRepository` consulted by Stage 3 embed
+    worker for per-source model overrides. Test: `internal/pipeline/embed_test.go`.
+  - **Task 4**: `pipeline.RetryAnalytics` recording every retry/success/failure
+    in `coordinator.runWithRetry`. Test: `internal/pipeline/round8_wiring_test.go`.
+  - **Task 5**: Notification dispatcher fans audit events out to webhook /
+    email subscribers. Wired in `cmd/api/main.go`; integration test in
+    `internal/admin/notification_audit_test.go`.
+  - **Task 6**: GORM-backed `QueryAnalyticsStoreGORM` swapped for the in-memory
+    fake in `cmd/api/main.go`; SQLite test in `internal/admin/round8_gorm_test.go`.
+  - **Task 7**: GORM-backed `PinnedResultStoreGORM` in
+    `internal/admin/pinned_results_gorm.go`; wired via
+    `Handler.SetPinLookup`; tests in `round8_gorm_test.go` and
+    `internal/retrieval/round8_handler_test.go`.
+  - **Task 8**: GORM-backed `SyncHistoryGORM` wired in `cmd/api/main.go`;
+    test in `round8_gorm_test.go`.
+  - **Task 9**: GORM-backed `LatencyBudgetGORM` + `Handler.SetLatencyBudgetLookup`
+    so per-tenant `max_latency_ms` bounds the request context. Tests in
+    `round8_gorm_test.go` and `round8_handler_test.go`.
+  - **Task 10**: `CacheTTLGORM` + `Handler.SetCacheTTLLookup` so per-tenant
+    cache TTL is applied on every `cache.Set`. Tests in `round8_gorm_test.go`
+    and `round8_handler_test.go`.
+  - **Task 11**: GORM-backed `CredentialHealthGORM` + periodic
+    `CredentialHealthWorker` in `cmd/ingest/main.go` (interval via
+    `CONTEXT_ENGINE_CREDENTIAL_HEALTH_INTERVAL`). Test in `round8_gorm_test.go`.
+  - **Task 12**: Migrations 024–031 + rollbacks verified present.
+  - **Task 13**: `docs/openapi.yaml` extended with Round 5/6/7 endpoints.
+  - **Task 14**: `tests/e2e/round8_test.go` (build tag `e2e`) round-trips all
+    Round-8 admin handlers.
+  - **Task 15**: A/B router stamps `experiment_name` / `experiment_arm` on the
+    `query_analytics` event; test in `round8_handler_test.go`.
+  - **Task 16**: `pin_apply.ApplyPins` invoked in retrieval handler after
+    policy filtering and before caching; test in `round8_handler_test.go`.
+  - **Task 17**: Notification retry worker + persisted `next_retry_at` with
+    linear backoff and dead-letter after `DefaultMaxRetryAttempts`. Tests in
+    `internal/admin/notification_retry_worker_test.go`.
+  - **Task 18**: `.github/workflows/ci.yml` extended with fast-lane jobs for
+    `make alerts-check` and migration/rollback parity tests.
+  - **Task 19**: `docs/runbooks/operational.md` covering Round 6/7/8
+    operational procedures.
+  - **Task 20**: Documentation audit — this changelog, README Round-8 section,
+    ARCHITECTURE Round-8 tech-choices section, PHASES.md status note.
+
 - 2026-05-11: **Round 7: Next 20 tasks — analytics, wiring, hardening, rollbacks**.
   - **Task 1**: Rollback scripts for migrations 015–031 — every numeric prefix
     under `migrations/` now has a matching `migrations/rollback/NNN_*.down.sql`;

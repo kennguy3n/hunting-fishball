@@ -159,6 +159,21 @@ type HandlerConfig struct {
 	// can debug reranker decisions without needing the admin RBAC
 	// role. Round-5 Task 12.
 	ExplainEnvEnabled bool
+
+	// LatencyBudget is the optional per-tenant latency budget
+	// lookup (Round-8 Task 9). When set, the handler bounds the
+	// fan-out deadline with the returned budget.
+	LatencyBudget LatencyBudgetLookup
+
+	// CacheTTLLookup is the optional per-tenant cache TTL
+	// override (Round-8 Task 10). When set, the handler asks the
+	// lookup for the TTL before each cache Set.
+	CacheTTLLookup CacheTTLLookup
+
+	// PinLookup is the optional per-tenant pinned-results lookup
+	// (Round-8 Task 16). When set, the handler injects pins
+	// after policy filtering and before MMR diversity.
+	PinLookup PinLookup
 }
 
 // ShardVersionLookup is the narrow port the retrieval handler uses
@@ -393,6 +408,11 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 		return
 	}
+	// Round-7 Task 4 / Round-8 Task 15: record per-retrieval
+	// analytics on every successful response. reqStart is captured
+	// before any work so the latency_ms column reflects total
+	// wall-clock from request entry to response.
+	reqStart := time.Now()
 	// Round-6 Task 10: route the request through the configured
 	// A/B test (if any) BEFORE topK is resolved so the variant's
 	// `top_k` override (when present) flows into the topK cap, the
@@ -444,6 +464,18 @@ func (h *Handler) retrieve(c *gin.Context) {
 		privacyMode = string(snapshot.EffectiveMode)
 	}
 
+	// Round-8 Task 9: per-tenant latency budget. When the admin
+	// store has a row for this tenant, derive a request-bound
+	// context with that timeout and substitute it on c.Request so
+	// every downstream c.Request.Context() call inherits it.
+	if h.cfg.LatencyBudget != nil {
+		if budget, ok := h.cfg.LatencyBudget(c.Request.Context(), tenantID); ok && budget > 0 {
+			ctx, cancel := context.WithTimeout(c.Request.Context(), budget)
+			defer cancel()
+			c.Request = c.Request.WithContext(ctx)
+		}
+	}
+
 	vec, err := h.cfg.Embedder.EmbedQuery(c.Request.Context(), tenantID, req.Query)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "embed failed"})
@@ -485,6 +517,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
 			h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+			h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, true, reqStart, nil, route)
 			c.JSON(http.StatusOK, resp)
 
 			return
@@ -558,17 +591,56 @@ func (h *Handler) retrieve(c *gin.Context) {
 		}
 		resp.Hits = append(resp.Hits, hit)
 	}
+
+	// Round-8 Task 16: apply operator-pinned chunks after policy
+	// filtering and before caching, so pinned chunks land at their
+	// configured slots in the response and are written into the
+	// semantic cache alongside the dynamic hits.
+	if h.cfg.PinLookup != nil {
+		pinHits := h.cfg.PinLookup(c.Request.Context(), tenantID, req.Query)
+		if len(pinHits) > 0 {
+			pins := make([]Pin, 0, len(pinHits))
+			for _, p := range pinHits {
+				pins = append(pins, Pin(p))
+			}
+			resp.Hits = ApplyPins(resp.Hits, pins)
+			if len(resp.Hits) > topK {
+				resp.Hits = resp.Hits[:topK]
+			}
+		}
+	}
+
 	resp.TraceID = observability.TraceID(c.Request.Context())
 
 	// Cache the merged + reranked + filtered response. Errors are
 	// swallowed — failing to write a cache entry must not fail the
-	// retrieval.
+	// retrieval. Round-8 Task 10: when CacheTTLLookup is wired, the
+	// per-tenant override takes precedence over the default.
 	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
-		_ = h.cfg.Cache.Set(c.Request.Context(), tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), h.cfg.CacheTTL)
+		ttl := h.cfg.CacheTTL
+		if h.cfg.CacheTTLLookup != nil {
+			ttl = h.cfg.CacheTTLLookup(c.Request.Context(), tenantID, ttl)
+		}
+		_ = h.cfg.Cache.Set(c.Request.Context(), tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), ttl)
 	}
 
 	h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+	h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, false, reqStart, backendTimingsMillis(backendTimings), route)
 	c.JSON(http.StatusOK, resp)
+}
+
+// backendTimingsMillis projects the per-backend time.Duration map
+// into the int64 millisecond shape the QueryAnalytics recorder
+// expects.
+func backendTimingsMillis(in map[string]time.Duration) map[string]int64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(in))
+	for k, v := range in {
+		out[k] = v.Milliseconds()
+	}
+	return out
 }
 
 // applyDeviceFirst computes the on-device-first hint and writes it
@@ -724,7 +796,11 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	}
 	stampExperiment(&resp, route)
 	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
-		_ = h.cfg.Cache.Set(ctx, tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), h.cfg.CacheTTL)
+		ttl := h.cfg.CacheTTL
+		if h.cfg.CacheTTLLookup != nil {
+			ttl = h.cfg.CacheTTLLookup(ctx, tenantID, ttl)
+		}
+		_ = h.cfg.Cache.Set(ctx, tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), ttl)
 	}
 	h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
 	return resp, nil

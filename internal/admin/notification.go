@@ -348,6 +348,27 @@ func (d *NotificationDispatcher) Dispatch(ctx context.Context, tenantID, eventTy
 			}
 		}
 		if d.deliveryLog != nil {
+			// Round-8 Task 17: when the immediate Send loop has
+			// failed but the response code is retryable (i.e. not
+			// a 4xx) the dispatcher schedules a follow-up attempt
+			// via next_retry_at. The retry worker
+			// (NotificationRetryWorker) picks these rows up and
+			// re-delivers them with exponential backoff up to
+			// MaxRetryAttempts.
+			var nextRetry *time.Time
+			if status == NotificationDeliveryStatusFailed && isRetryableResponseCode(result.StatusCode) {
+				at := time.Now().UTC().Add(time.Minute)
+				nextRetry = &at
+			}
+			// Attempt is a worker-cycle counter, not a count of
+			// inner HTTP retries. The first dispatch is logically
+			// one cycle (regardless of how many backoff hops Send
+			// took internally); each subsequent NotificationRetry
+			// Worker tick on this row will increment it by one.
+			// We keep result.Attempts available on the response
+			// side via ResponseCode + ErrorMessage; the inner
+			// retry count is purely diagnostic and is intentionally
+			// not persisted here.
 			_ = d.deliveryLog.Append(ctx, &NotificationDeliveryAttempt{
 				TenantID:     tenantID,
 				PreferenceID: p.ID,
@@ -356,13 +377,31 @@ func (d *NotificationDispatcher) Dispatch(ctx context.Context, tenantID, eventTy
 				Target:       p.Target,
 				Payload:      payloadMap,
 				Status:       status,
-				Attempt:      result.Attempts,
+				Attempt:      1,
 				ResponseCode: result.StatusCode,
 				ErrorMessage: errMsg,
+				NextRetryAt:  nextRetry,
 			})
 		}
 	}
 	return firstErr
+}
+
+// isRetryableResponseCode returns true for 5xx / transport
+// failures (StatusCode == 0) and for HTTP 429 (Too Many Requests).
+// Other 4xx codes are treated as permanent failures; the retry
+// worker leaves them alone.
+//
+// 429 is intentionally retryable here so it stays consistent with
+// WebhookDelivery.Send, which also exempts 429 from its
+// short-circuit-on-4xx branch. Without this, a webhook that 429s
+// for longer than the inner retry window would be dropped instead
+// of being scheduled for a later worker retry.
+func isRetryableResponseCode(code int) bool {
+	if code == 0 {
+		return true
+	}
+	return code >= 500 || code == http.StatusTooManyRequests
 }
 
 // NotificationHandler is the admin HTTP surface.
