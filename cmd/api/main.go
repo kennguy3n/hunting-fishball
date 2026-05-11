@@ -1021,6 +1021,28 @@ func run() error {
 	})
 	go poolSampler.Start(keepAliveCtx)
 
+	// Round-13 Task 18: Postgres pool leak detector. Sustained
+	// utilisation above 90% across three consecutive samples
+	// produces a structured warning; the percent reading is also
+	// published to the context_engine_postgres_pool_utilization_percent
+	// gauge for dashboards.
+	if pgMax, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_PG_MAX_OPEN")); pgMax > 0 {
+		ldet, lerr := observability.NewPoolLeakDetector(observability.PoolLeakDetectorConfig{
+			Pool: observability.PostgresStatsFunc(func() int {
+				sqlDB, derr := db.DB()
+				if derr != nil || sqlDB == nil {
+					return 0
+				}
+				return sqlDB.Stats().OpenConnections
+			}),
+			MaxOpen:  pgMax,
+			Interval: 30 * time.Second,
+		})
+		if lerr == nil {
+			go ldet.Start(keepAliveCtx)
+		}
+	}
+
 	// Round-10 Task 6: background OAuth token refresh worker.
 	// Scans every active source on `CONTEXT_ENGINE_TOKEN_REFRESH_INTERVAL`
 	// (default 15m) and refreshes any credential whose expiry is
