@@ -18,7 +18,6 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -31,7 +30,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/glebarez/go-sqlite"
 	"github.com/glebarez/sqlite"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"gorm.io/gorm"
@@ -225,24 +223,24 @@ func (f *fakeRLInspector) Inspect(_ context.Context, tenant, source string) (adm
 // ---------- (c) Audit retention sweeper deletes old rows ----------
 
 func TestRound12_AuditRetention_DeletesOldRows(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(`CREATE TABLE audit_logs (
+	if err := db.Exec(`CREATE TABLE audit_logs (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL,
 		action TEXT NOT NULL,
-		created_at DATETIME NOT NULL)`); err != nil {
+		created_at DATETIME NOT NULL)`).Error; err != nil {
 		t.Fatalf("schema: %v", err)
 	}
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	insert := func(id string, ts time.Time) {
 		t.Helper()
-		_, err := db.Exec(`INSERT INTO audit_logs(id,tenant_id,action,created_at) VALUES(?,?,?,?)`,
-			id, "tenant-x", "act", ts)
-		if err != nil {
+		if err := db.Exec(
+			`INSERT INTO audit_logs(id,tenant_id,action,created_at) VALUES(?,?,?,?)`,
+			id, "tenant-x", "act", ts,
+		).Error; err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 	}
@@ -263,8 +261,8 @@ func TestRound12_AuditRetention_DeletesOldRows(t *testing.T) {
 	if err := s.Tick(context.Background()); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_logs`).Scan(&n); err != nil {
+	var n int64
+	if err := db.Raw(`SELECT COUNT(*) FROM audit_logs`).Scan(&n).Error; err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if n != 1 {

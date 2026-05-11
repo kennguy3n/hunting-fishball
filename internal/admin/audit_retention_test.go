@@ -1,69 +1,76 @@
 // Round-12 Task 17 — tests for the audit retention sweeper.
 //
-// We open an in-memory SQLite database, create the audit_logs
-// table with the same schema 001_audit_log.sql + 011_varchar_ids.sql
-// produce in production (id, tenant_id, action, created_at), seed
+// We open an in-memory SQLite database via the GORM dialector
+// (same path the production wiring uses through gorm.Open), seed
 // a mix of stale and fresh rows, and verify Tick deletes only the
-// stale rows and increments the metric.
+// stale rows and increments the metric. Using GORM here matches
+// the production driver (pgx) at the placeholder-translation
+// layer, so the same SQL the sweeper issues at runtime is the SQL
+// the test executes.
 package admin_test
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
-	_ "github.com/glebarez/go-sqlite"
+	"github.com/glebarez/sqlite"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"github.com/kennguy3n/hunting-fishball/internal/admin"
 	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
-func newAuditDB(t *testing.T) *sql.DB {
+func newAuditDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: logger.Discard,
+	})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(`
+	if err := db.Exec(`
 		CREATE TABLE audit_logs (
 			id TEXT PRIMARY KEY,
 			tenant_id TEXT NOT NULL,
 			action TEXT NOT NULL,
 			created_at DATETIME NOT NULL
 		)
-	`)
-	if err != nil {
+	`).Error; err != nil {
 		t.Fatalf("schema: %v", err)
 	}
 	return db
 }
 
-func insertAudit(t *testing.T, db *sql.DB, id string, createdAt time.Time) {
+func insertAudit(t *testing.T, db *gorm.DB, id string, createdAt time.Time) {
 	t.Helper()
-	_, err := db.Exec(`INSERT INTO audit_logs (id, tenant_id, action, created_at) VALUES (?, ?, ?, ?)`,
-		id, "tenant-a", "test", createdAt)
-	if err != nil {
+	if err := db.Exec(
+		`INSERT INTO audit_logs (id, tenant_id, action, created_at) VALUES (?, ?, ?, ?)`,
+		id, "tenant-a", "test", createdAt,
+	).Error; err != nil {
 		t.Fatalf("insert %s: %v", id, err)
 	}
 }
 
-func countAudit(t *testing.T, db *sql.DB) int {
+func countAudit(t *testing.T, db *gorm.DB) int {
 	t.Helper()
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_logs`).Scan(&n); err != nil {
+	var n int64
+	if err := db.Raw(`SELECT COUNT(*) FROM audit_logs`).Scan(&n).Error; err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	return n
+	return int(n)
 }
 
 // TestAuditRetention_DeletesOldRowsAndKeepsFresh seeds 3 stale + 2
 // fresh rows, runs Tick once, and verifies only the stale rows
 // were removed and the metric was incremented by 3.
 func TestAuditRetention_DeletesOldRowsAndKeepsFresh(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel(): observability.AuditRowsExpiredTotal is
+	// a package-global counter shared with the other two tests
+	// in this file. Running these in parallel races on the
+	// delta the test measures.
 	db := newAuditDB(t)
 	observability.AuditRowsExpiredTotal.Add(0) // touch to ensure registered
 	before := testutil.ToFloat64(observability.AuditRowsExpiredTotal)
@@ -102,7 +109,6 @@ func TestAuditRetention_DeletesOldRowsAndKeepsFresh(t *testing.T) {
 // window so a row that is 2 days old becomes stale even though
 // the default would consider it fresh.
 func TestAuditRetention_RespectsCustomRetentionWindow(t *testing.T) {
-	t.Parallel()
 	db := newAuditDB(t)
 	now := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
 	twoDays := now.Add(-2 * 24 * time.Hour)
@@ -128,7 +134,6 @@ func TestAuditRetention_RespectsCustomRetentionWindow(t *testing.T) {
 // TestAuditRetention_NoRowsToDeleteIsNoOp ensures a clean sweep
 // neither errors nor moves the metric.
 func TestAuditRetention_NoRowsToDeleteIsNoOp(t *testing.T) {
-	t.Parallel()
 	db := newAuditDB(t)
 	now := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
 	insertAudit(t, db, "y1", now.Add(-1*time.Hour))

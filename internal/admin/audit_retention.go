@@ -19,27 +19,32 @@
 //     long-running sweep doesn't drift the cutoff forward
 //     mid-loop.
 //
-// Database compatibility: the DELETE uses parameterised SQL that
-// works on both Postgres and SQLite (used by the unit test). The
-// 034_audit_retention.sql migration adds an index on created_at
-// to keep the WHERE clause cheap.
+// Database compatibility: the DELETE runs through GORM so the
+// underlying driver translates placeholders for its dialect
+// (`$1, $2` on pgx, `?` on SQLite). Migration
+// 034_audit_retention.sql adds an index on created_at to keep
+// the WHERE clause cheap.
 package admin
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
 	"time"
+
+	"gorm.io/gorm"
 
 	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // AuditRetentionConfig is the wiring contract for the sweeper.
 type AuditRetentionConfig struct {
-	// DB is the Postgres / SQLite connection. Required.
-	DB *sql.DB
+	// DB is the GORM connection. Required. Using GORM (rather
+	// than a raw *sql.DB) lets the underlying dialector translate
+	// `?` placeholders to the form pgx expects (`$1, $2`) on
+	// Postgres while leaving them as `?` on SQLite.
+	DB *gorm.DB
 
 	// RetentionWindow is how long audit_logs rows are kept. Rows
 	// with created_at < (now() - RetentionWindow) are deleted.
@@ -123,10 +128,11 @@ func (s *AuditRetentionSweeper) Tick(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
-		// Use an explicit subquery for SQLite + Postgres
-		// compatibility. SQLite does not support LIMIT on DELETE
-		// directly, so we DELETE WHERE id IN (SELECT id ... LIMIT N).
-		query := `
+		// Explicit subquery so SQLite (which does not support
+		// LIMIT on DELETE directly) and Postgres agree on the
+		// shape. GORM rewrites `?` placeholders per dialect, so
+		// this same statement works under pgx and SQLite.
+		const query = `
 			DELETE FROM audit_logs
 			WHERE id IN (
 				SELECT id FROM audit_logs
@@ -134,17 +140,17 @@ func (s *AuditRetentionSweeper) Tick(ctx context.Context) error {
 				LIMIT ?
 			)
 		`
-		res, err := s.cfg.DB.ExecContext(ctx, query, cutoff, s.cfg.BatchSize)
-		if err != nil {
-			return fmt.Errorf("audit-retention: delete: %w", err)
+		res := s.cfg.DB.WithContext(ctx).Exec(query, cutoff, s.cfg.BatchSize)
+		if res.Error != nil {
+			return fmt.Errorf("audit-retention: delete: %w", res.Error)
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("audit-retention: rows affected: %w", err)
-		}
+		n := res.RowsAffected
 		total += n
-		for i := int64(0); i < n; i++ {
-			observability.AuditRowsExpiredTotal.Inc()
+		if n > 0 {
+			// Single atomic counter update per batch instead of
+			// n Inc() calls. Saves ~1k mutex acquisitions per
+			// full batch on the default BatchSize.
+			observability.AuditRowsExpiredTotal.Add(float64(n))
 		}
 		if n == 0 {
 			break
