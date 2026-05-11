@@ -572,6 +572,22 @@ func run() error {
 				}
 			}
 		}
+		// Round-13 Task 4: publish the gauge for the oldest unresolved
+		// DLQ row so the DLQAgeHigh alert can fire. Polls dlq_messages
+		// every minute; failures keep the previous gauge value rather
+		// than flap the alert.
+		ageMon, amErr := pipeline.NewDLQAgeMonitor(pipeline.DLQAgeMonitorConfig{
+			Lister: dlqStore,
+		})
+		if amErr != nil {
+			slog.Warn("ingest: dlq age monitor", slog.String("error", amErr.Error()))
+		} else {
+			go func() {
+				if err := ageMon.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Warn("ingest: dlq age monitor", slog.String("error", err.Error()))
+				}
+			}()
+		}
 	}
 
 	// ---- Phase 8 Task 20: HTTP probes + /metrics on a sidecar port.

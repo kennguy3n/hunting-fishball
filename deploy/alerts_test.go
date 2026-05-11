@@ -310,3 +310,42 @@ func TestAlertsManifest_Round13BurnRate(t *testing.T) {
 		}
 	}
 }
+
+// TestAlertsManifest_Round13DLQAge — Round-13 Task 4.
+//
+// Validates that the DLQAgeHigh alert exists in deploy/alerts.yaml
+// and references the gauge published by the DLQAgeMonitor.
+func TestAlertsManifest_Round13DLQAge(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join(".", "alerts.yaml"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var m manifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		t.Fatalf("yaml: %v", err)
+	}
+	var dlqAge rule
+	for _, g := range m.Spec.Groups {
+		for _, r := range g.Rules {
+			if r.Alert == "DLQAgeHigh" {
+				dlqAge = r
+			}
+		}
+	}
+	if dlqAge.Alert == "" {
+		t.Fatal("DLQAgeHigh alert missing")
+	}
+	if dlqAge.Labels["severity"] != "warning" {
+		t.Errorf("severity=%q want=warning", dlqAge.Labels["severity"])
+	}
+	if dlqAge.For == "" {
+		t.Errorf("missing `for:`")
+	}
+	if !strings.Contains(dlqAge.Expr, "context_engine_dlq_oldest_message_age_seconds") {
+		t.Errorf("expr missing gauge metric: %q", dlqAge.Expr)
+	}
+	if !strings.Contains(dlqAge.Expr, "3600") {
+		t.Errorf("expr missing 1h threshold: %q", dlqAge.Expr)
+	}
+}
