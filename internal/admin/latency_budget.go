@@ -3,9 +3,13 @@
 // Per-tenant retrieval latency budgets. The retrieval handler
 // consults the LatencyBudgetStore when no explicit
 // max_latency_ms is set on the request, and emits the
-// `context_engine_retrieval_budget_violations_total{tenant_id}`
-// counter (see internal/observability.ObserveBudgetViolation)
-// when the observed latency exceeds the budget.
+// `context_engine_retrieval_budget_violations_total` counter
+// (see internal/observability.ObserveBudgetViolation) when the
+// observed latency exceeds the budget. The per-tenant
+// breakdown is intentionally NOT a Prometheus label — it lives
+// in the structured log line ObserveBudgetViolation emits, the
+// same pattern DLQMessagesTotal uses to keep multi-tenant
+// cardinality bounded.
 package admin
 
 import (

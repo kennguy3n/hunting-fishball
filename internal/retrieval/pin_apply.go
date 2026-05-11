@@ -31,6 +31,14 @@ type Pin struct {
 // queries) where the dynamic backends return zero hits. The
 // synthetic RetrieveHit branch below handles pins that aren't in
 // `known` without requiring the hit list to be populated.
+//
+// The merge loop iterates up to max(len(hits)+len(pinned),
+// lastPinPosition+1) so pins configured at sparse positions
+// (e.g. Position=5 with len(hits)=0) still emit at their
+// configured slot. Slots between the last dynamic hit and the
+// next pin are skipped without padding so callers don't see
+// zero-valued RetrieveHits — pinned ordering, not contiguous
+// indices, is the invariant.
 func ApplyPins(hits []RetrieveHit, pins []Pin) []RetrieveHit {
 	if len(pins) == 0 {
 		return hits
@@ -46,10 +54,14 @@ func ApplyPins(hits []RetrieveHit, pins []Pin) []RetrieveHit {
 	for _, p := range pinned {
 		pinSet[p.ChunkID] = p.Position
 	}
-	out := make([]RetrieveHit, 0, len(hits)+len(pinned))
+	maxIdx := len(hits) + len(pinned)
+	if last := pinned[len(pinned)-1].Position + 1; last > maxIdx {
+		maxIdx = last
+	}
+	out := make([]RetrieveHit, 0, maxIdx)
 	pinIdx := 0
 	src := 0
-	for i := 0; i < len(hits)+len(pinned); i++ {
+	for i := 0; i < maxIdx; i++ {
 		if pinIdx < len(pinned) && pinned[pinIdx].Position == i {
 			if h, ok := known[pinned[pinIdx].ChunkID]; ok {
 				out = append(out, h)
@@ -59,8 +71,14 @@ func ApplyPins(hits []RetrieveHit, pins []Pin) []RetrieveHit {
 			pinIdx++
 			continue
 		}
-		if src >= len(hits) {
+		// Both sides exhausted — nothing left to emit.
+		if pinIdx >= len(pinned) && src >= len(hits) {
 			break
+		}
+		// Dynamic side exhausted but more pins remain at later
+		// positions; skip ahead without emitting padding.
+		if src >= len(hits) {
+			continue
 		}
 		for src < len(hits) {
 			h := hits[src]

@@ -44,3 +44,66 @@ func TestApplyPins_DeduplicatesPinnedHit(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyPins_SparsePositions covers the cold-start and sparse-
+// position cases the original loop bound dropped silently.
+func TestApplyPins_SparsePositions(t *testing.T) {
+	cases := []struct {
+		name string
+		hits []retrieval.RetrieveHit
+		pins []retrieval.Pin
+		want []string
+	}{
+		{
+			name: "empty hits with pin at position 0",
+			hits: nil,
+			pins: []retrieval.Pin{{ChunkID: "z", Position: 0}},
+			want: []string{"z"},
+		},
+		{
+			name: "empty hits with pin at sparse position",
+			hits: nil,
+			pins: []retrieval.Pin{{ChunkID: "z", Position: 5}},
+			want: []string{"z"},
+		},
+		{
+			name: "small hits with pin beyond hit length",
+			hits: []retrieval.RetrieveHit{{ID: "a"}, {ID: "b"}},
+			pins: []retrieval.Pin{{ChunkID: "p", Position: 10}},
+			want: []string{"a", "b", "p"},
+		},
+		{
+			name: "multiple sparse pins with intermediate hits",
+			hits: []retrieval.RetrieveHit{{ID: "a"}, {ID: "b"}},
+			pins: []retrieval.Pin{
+				{ChunkID: "p1", Position: 0},
+				{ChunkID: "p2", Position: 2},
+				{ChunkID: "p3", Position: 5},
+			},
+			want: []string{"p1", "a", "p2", "b", "p3"},
+		},
+		{
+			name: "pins beyond hits emitted in sorted order",
+			hits: nil,
+			pins: []retrieval.Pin{
+				{ChunkID: "third", Position: 3},
+				{ChunkID: "first", Position: 0},
+				{ChunkID: "second", Position: 1},
+			},
+			want: []string{"first", "second", "third"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := retrieval.ApplyPins(tc.hits, tc.pins)
+			if len(out) != len(tc.want) {
+				t.Fatalf("len mismatch: want %d, got %d (%+v)", len(tc.want), len(out), out)
+			}
+			for i, id := range tc.want {
+				if out[i].ID != id {
+					t.Errorf("pos %d: want %q, got %q (full=%+v)", i, id, out[i].ID, out)
+				}
+			}
+		})
+	}
+}

@@ -630,7 +630,16 @@ func run() error {
 		rsum := cacheWarmer.Warm(ctx, rtuples)
 		out := admin.CacheWarmSummary{Total: rsum.Total, Succeeded: rsum.Succeeded, Failed: rsum.Failed}
 		for _, r := range rsum.Results {
-			out.Results = append(out.Results, admin.CacheWarmResult{Query: r.Tuple.Query, Hits: r.Hits, Latency: r.Latency})
+			errMsg := ""
+			if r.Err != nil {
+				errMsg = r.Err.Error()
+			}
+			out.Results = append(out.Results, admin.CacheWarmResult{
+				Query:   r.Tuple.Query,
+				Hits:    r.Hits,
+				Latency: r.Latency,
+				Error:   errMsg,
+			})
 		}
 		return out
 	})

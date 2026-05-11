@@ -8,6 +8,7 @@
 package observability
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -171,14 +172,17 @@ var (
 
 	// RetrievalBudgetViolationsTotal counts retrievals whose end-to-
 	// end latency exceeded the tenant's configured budget (Round-7
-	// Task 11). Operators alert on a per-tenant rate so a single
-	// noisy tenant doesn't drag down the cluster-wide SLO.
-	RetrievalBudgetViolationsTotal = prometheus.NewCounterVec(
+	// Task 11). Operators alert on the cluster-wide rate of this
+	// counter; per-tenant breakdowns live in the structured logs
+	// (tenant_id field) where Loki / Splunk index them without the
+	// cardinality blow-up that a Prometheus label would carry on a
+	// multi-tenant fleet — mirroring the DLQMessagesTotal pattern
+	// above.
+	RetrievalBudgetViolationsTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "context_engine_retrieval_budget_violations_total",
-			Help: "Retrievals whose latency exceeded the tenant budget.",
+			Help: "Retrievals whose latency exceeded the tenant budget. Per-tenant breakdowns live in structured logs (tenant_id field).",
 		},
-		[]string{"tenant_id"},
 	)
 )
 
@@ -234,7 +238,6 @@ func ResetForTest() {
 	TokenRefreshesTotal.Reset()
 	CredentialsExpiring.Reset()
 	IndexAutoReindexesTotal.Reset()
-	RetrievalBudgetViolationsTotal.Reset()
 	Registry.MustRegister(
 		APIRequestsTotal,
 		APIRequestDurationSeconds,
@@ -252,14 +255,16 @@ func ResetForTest() {
 	)
 }
 
-// ObserveBudgetViolation increments the per-tenant counter when a
-// retrieval response misses its latency budget. tenant_id is the
-// ULID; the helper is no-op when tenantID is empty.
+// ObserveBudgetViolation increments the cluster-wide counter when a
+// retrieval response misses its latency budget and emits a
+// structured log entry carrying the tenant_id. We deliberately do
+// NOT add tenant_id as a Prometheus label — see the comment on
+// RetrievalBudgetViolationsTotal and the DLQMessagesTotal precedent.
 func ObserveBudgetViolation(tenantID string) {
-	if tenantID == "" {
-		return
+	RetrievalBudgetViolationsTotal.Inc()
+	if tenantID != "" {
+		slog.Warn("retrieval budget violation", "tenant_id", tenantID)
 	}
-	RetrievalBudgetViolationsTotal.WithLabelValues(tenantID).Inc()
 }
 
 // ObserveStageDuration records the per-stage duration for the
