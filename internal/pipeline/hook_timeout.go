@@ -22,6 +22,8 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -77,12 +79,26 @@ func ResetHookTimeoutForTest() {
 // hook is a bounded enumeration of label values (see
 // observability.HookTimeoutsTotal); pass the matching string from
 // the call site.
+//
+// Panic safety: the spawned goroutine wraps fn in a deferred
+// recover() so a nil-pointer dereference inside a GORM driver (or
+// any other panic the recorder might raise) is converted to a
+// returned error rather than killing the whole ingest process.
+// Sibling wrapper internal/retrieval/graceful_degradation.go uses
+// the same pattern; both must stay in sync.
 func runWithHookTimeout(ctx context.Context, hook string, fn func(context.Context) error) error {
 	cctx, cancel := context.WithTimeout(ctx, HookTimeout())
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				observability.ObserveHookTimeout(hook)
+				slog.Warn("pipeline: hook panicked", "hook", hook, "panic", fmt.Sprint(r))
+				done <- fmt.Errorf("hook %s panicked: %v", hook, r)
+			}
+		}()
 		done <- fn(cctx)
 	}()
 
