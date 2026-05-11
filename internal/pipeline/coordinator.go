@@ -748,12 +748,23 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn
 			return out, nil
 		}
 		if errors.Is(err, ErrUnchanged) {
+			// Stage ran cleanly; the document just hasn't changed.
+			// Treat as a healthy stage outcome so the breaker probe
+			// is released and the half-open gate clears.
+			if breaker != nil {
+				breaker.OnSuccess()
+			}
 			return nil, err
 		}
 		if errors.Is(err, ErrPoisonMessage) {
 			observability.RecordError(span, err)
 			if rec != nil {
 				_ = rec.RecordAttempt(stage, docKey, RetryOutcomeFailed, err.Error())
+			}
+			// Poison is a document-level fault, not stage
+			// infrastructure. Don't count it against the breaker.
+			if breaker != nil {
+				breaker.OnSuccess()
 			}
 			return nil, err
 		}
@@ -773,7 +784,12 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn
 		select {
 		case <-ctx.Done():
 			t.Stop()
-
+			// Abandoning mid-retry after a failed attempt:
+			// release the probe gate by recording a failure so
+			// the breaker can re-open cleanly.
+			if breaker != nil {
+				breaker.OnFailure()
+			}
 			return nil, ctx.Err()
 		case <-t.C:
 		}

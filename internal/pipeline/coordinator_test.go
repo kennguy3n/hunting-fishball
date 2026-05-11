@@ -656,3 +656,77 @@ func TestCoordinator_StageBreaker_ShortCircuits(t *testing.T) {
 		t.Fatalf("dlq error=%v; expected ErrStageBreakerOpen", dlqErr)
 	}
 }
+
+// TestCoordinator_StageBreaker_HalfOpenProbeReleasesOnEarlyReturn —
+// Round-13 regression. Allow() arms the probeInFlight gate on the
+// half-open transition; the gate is cleared only by OnSuccess /
+// OnFailure. runWithRetry's early-exit paths (ErrUnchanged,
+// ErrPoisonMessage, ctx.Done during backoff) must therefore call
+// the breaker callbacks so the stage isn't permanently stuck.
+//
+// This test exercises the ErrUnchanged path: it pre-trips the
+// fetch breaker, advances the clock past the cooldown, then
+// submits two events. The first arms the half-open probe and
+// returns ErrUnchanged; the second can only flow if the probe
+// gate was released and the breaker closed.
+func TestCoordinator_StageBreaker_HalfOpenProbeReleasesOnEarlyReturn(t *testing.T) {
+	t.Parallel()
+	clock := time.Now().UTC()
+	var fetchCalls atomic.Int32
+	cfg := newFastConfig(
+		fakeFetch{fn: func(_ context.Context, _ IngestEvent) (*Document, error) {
+			fetchCalls.Add(1)
+			return nil, ErrUnchanged
+		}},
+		fakeParse{fn: func(_ context.Context, _ *Document) ([]Block, error) {
+			return nil, errors.New("must not call parse")
+		}},
+		fakeEmbed{fn: func(_ context.Context, _ string, _ []Block) ([][]float32, string, error) {
+			return nil, "", errors.New("must not call embed")
+		}},
+		&fakeStore{},
+	)
+	breaker, err := NewStageCircuitBreaker(StageCircuitBreakerConfig{
+		Stage:     "fetch",
+		Threshold: 1,
+		OpenFor:   10 * time.Millisecond,
+		NowFn:     func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatalf("NewStageCircuitBreaker: %v", err)
+	}
+	breaker.OnFailure()
+	if breaker.State() != StageBreakerOpen {
+		t.Fatalf("pre-trip state=%s", breaker.State())
+	}
+	clock = clock.Add(50 * time.Millisecond)
+	cfg.StageBreakers = map[string]*StageCircuitBreaker{"fetch": breaker}
+
+	var dlqCalls atomic.Int32
+	cfg.OnDLQ = func(_ context.Context, _ IngestEvent, _ error) { dlqCalls.Add(1) }
+
+	c, _ := NewCoordinator(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	if err := c.Submit(ctx, IngestEvent{Kind: EventDocumentChanged, TenantID: "t", DocumentID: "d1"}); err != nil {
+		t.Fatalf("Submit #1: %v", err)
+	}
+	if err := c.Submit(ctx, IngestEvent{Kind: EventDocumentChanged, TenantID: "t", DocumentID: "d2"}); err != nil {
+		t.Fatalf("Submit #2: %v", err)
+	}
+	c.CloseInputs()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := fetchCalls.Load(); got != 2 {
+		t.Fatalf("fetchCalls=%d; expected 2 (probe + post-close call)", got)
+	}
+	if got := breaker.State(); got != StageBreakerClosed {
+		t.Fatalf("breaker state=%s; expected closed after probe success", got)
+	}
+	if got := dlqCalls.Load(); got != 0 {
+		t.Fatalf("dlq calls=%d; expected 0 (no events should short-circuit)", got)
+	}
+}
