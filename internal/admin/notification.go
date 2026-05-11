@@ -258,6 +258,19 @@ func (w *WebhookDelivery) Send(ctx context.Context, target string, channel Notif
 				return res, nil
 			}
 			lastErr = fmt.Errorf("webhook %s returned %d", target, resp.StatusCode)
+			// Deterministic client errors (4xx other than 429)
+			// will not recover on retry — the request body is
+			// identical on every attempt, so a 400/401/403/404/
+			// 422/etc. is the receiver's final answer. Returning
+			// immediately avoids burning the full 1s+5s+15s
+			// backoff cliff per subscriber on misconfigured
+			// targets. 429 (rate limit) stays retried because the
+			// receiver explicitly invites a later attempt; 5xx
+			// stays retried because it's a transient server-side
+			// failure.
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+				return res, lastErr
+			}
 		}
 		if attempt >= maxAttempts {
 			break

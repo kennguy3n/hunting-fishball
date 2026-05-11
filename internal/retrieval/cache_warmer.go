@@ -7,9 +7,13 @@
 // into Redis, so warming is just "issue the same call the
 // production client would later make".
 //
-// The warmer is invoked from cmd/api at startup (background) and
-// from POST /v1/admin/retrieval/warm-cache for operator-initiated
-// warming.
+// IMPORTANT: warming must go through the cache-aware entrypoint
+// RetrieveWithSnapshotCached, NOT RetrieveWithSnapshot. The latter
+// is the Phase 4 simulator path and intentionally skips both the
+// cache.Get short-circuit AND the cache.Set write-back (see
+// handler.go:606-628). Calling it from the warmer would pay the
+// full fan-out cost on every tuple and write zero entries — i.e.
+// the entire feature would be a no-op.
 package retrieval
 
 import (
@@ -47,7 +51,11 @@ type WarmSummary struct {
 	Results      []WarmResult  `json:"results"`
 }
 
-// CacheWarmer runs Handler.RetrieveWithSnapshot for each tuple.
+// CacheWarmer runs Handler.RetrieveWithSnapshotCached for each
+// tuple — the cache-aware twin of RetrieveWithSnapshot. The
+// handler's post-retrieve cache.Set is what actually populates
+// the semantic cache, so picking the wrong entrypoint silently
+// turns warming into an expensive no-op.
 type CacheWarmer struct {
 	handler  *Handler
 	resolver PolicyResolver
@@ -94,7 +102,10 @@ func (w *CacheWarmer) Warm(ctx context.Context, tuples []WarmTuple) WarmSummary 
 			Channels:    append([]string{}, t.Channels...),
 			PrivacyMode: t.PrivacyMode,
 		}
-		resp, err := w.handler.RetrieveWithSnapshot(ctx, t.TenantID, req, snapshot)
+		// Must be the cache-aware variant. See package doc — calling
+		// RetrieveWithSnapshot here would skip the cache.Set bookend
+		// and the warmer would never warm anything.
+		resp, err := w.handler.RetrieveWithSnapshotCached(ctx, t.TenantID, req, snapshot)
 		res.Latency = time.Since(start)
 		if err != nil {
 			res.Err = err
