@@ -344,6 +344,18 @@ func run() error {
 	// header, and trace span carries the X-Request-ID.
 	r.Use(observability.RequestIDMiddleware())
 	r.Use(observability.PrometheusMiddleware())
+	// Round-13 Task 11: payload size limiter. Configurable via
+	// CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES; defaults to 10 MiB.
+	maxBody := observability.DefaultMaxRequestBodyBytes
+	if raw := os.Getenv("CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES"); raw != "" {
+		if v, perr := strconv.ParseInt(raw, 10, 64); perr == nil && v > 0 {
+			maxBody = v
+		}
+	}
+	r.Use(observability.PayloadSizeLimiter(observability.PayloadLimiterConfig{
+		MaxBytes:  maxBody,
+		SkipPaths: []string{"/metrics", "/healthz", "/readyz"},
+	}))
 	// Round-4 Task 7: structured error envelope. The middleware
 	// converts any *errors.Error attached via c.Error() into a
 	// JSON envelope keyed by stable codes so log scanners and

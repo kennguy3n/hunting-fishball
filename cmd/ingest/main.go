@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -631,9 +632,21 @@ func run() error {
 		}
 	}
 	httpAddr := envOr("CONTEXT_ENGINE_INGEST_HTTP_ADDR", ":8090")
+	// Round-13 Task 11: wrap the probe/metrics mux with the
+	// payload-size limiter so the ingest sidecar has the same
+	// safety net as the public API.
+	maxBody := observability.DefaultMaxRequestBodyBytes
+	if raw := os.Getenv("CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES"); raw != "" {
+		if v, perr := strconv.ParseInt(raw, 10, 64); perr == nil && v > 0 {
+			maxBody = v
+		}
+	}
 	httpSrv := &http.Server{
-		Addr:              httpAddr,
-		Handler:           ingestHTTPHandler(db, redisClient, brokerList),
+		Addr: httpAddr,
+		Handler: observability.PayloadSizeLimiterHTTP(observability.PayloadLimiterConfig{
+			MaxBytes:  maxBody,
+			SkipPaths: []string{"/metrics", "/healthz", "/readyz"},
+		}, ingestHTTPHandler(db, redisClient, brokerList)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
