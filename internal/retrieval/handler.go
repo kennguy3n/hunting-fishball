@@ -688,14 +688,25 @@ func backendTimingsMillis(in map[string]time.Duration) map[string]int64 {
 // schema consistent across both paths is required so dashboards
 // can join cache_hit + non-cache_hit rows on the same
 // backend_timings keys.
+//
+// The key set MUST stay aligned with backendTimingsMillis — both
+// functions write into the same query_analytics.backend_timings
+// JSONB column, and dashboards aggregate per-backend latency by
+// joining rows on these keys. The canonical key names are the
+// Source* constants from merger.go ("vector", "bm25", "graph",
+// "memory"). MergeMs and RerankMs are deliberately excluded
+// because they are pipeline-stage timings, not per-backend
+// timings — backendTimingsMillis does not emit them either, and
+// adding them on only this path would re-introduce the same
+// schema-drift the alignment is meant to prevent. See
+// TestBackendTimingsSchemaParity in round11_review_test.go for
+// the regression guard.
 func timingsToMap(t RetrieveTimings) map[string]int64 {
 	return map[string]int64{
-		"vector_ms": t.VectorMs,
-		"bm25_ms":   t.BM25Ms,
-		"graph_ms":  t.GraphMs,
-		"memory_ms": t.MemoryMs,
-		"merge_ms":  t.MergeMs,
-		"rerank_ms": t.RerankMs,
+		SourceVector: t.VectorMs,
+		SourceBM25:   t.BM25Ms,
+		SourceGraph:  t.GraphMs,
+		SourceMemory: t.MemoryMs,
 	}
 }
 

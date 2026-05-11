@@ -545,12 +545,26 @@ func TestRetrieveWithSnapshotCached_RecordsBackendTimingsOnMiss(t *testing.T) {
 			"resp.Timings; this dropped per-backend latency for every batch + " +
 			"cache-warm row in query_analytics.")
 	}
-	// The map must carry the schema keys timingsToMap emits, so
-	// dashboards can JOIN cache_hit + non-cache_hit rows on the
-	// same column names without coalescing.
-	for _, key := range []string{"vector_ms", "bm25_ms", "graph_ms", "memory_ms", "merge_ms", "rerank_ms"} {
+	// The map must carry the canonical schema keys timingsToMap
+	// emits (the Source* constants — "vector", "bm25", "graph",
+	// "memory"), so dashboards can JOIN cache_hit + non-cache_hit
+	// rows on the same column names without coalescing. The pre-fix
+	// shape used the suffixed RetrieveTimings JSON tags
+	// (vector_ms / bm25_ms / etc.) which diverged from the keys
+	// backendTimingsMillis emits on the gin fan-out path —
+	// query_analytics rows from the gin handler and from
+	// RetrieveWithSnapshotCached would have lived in the same
+	// JSONB column under two different schemas. See
+	// TestBackendTimingsSchemaParity (backend_timings_schema_test.go)
+	// for the in-package parity guard.
+	for _, key := range []string{"vector", "bm25", "graph", "memory"} {
 		if _, ok := evt.BackendTimings[key]; !ok {
 			t.Errorf("BackendTimings missing %q key; got keys = %v", key, mapKeys(evt.BackendTimings))
+		}
+	}
+	for _, key := range []string{"vector_ms", "bm25_ms", "merge_ms", "rerank_ms"} {
+		if _, ok := evt.BackendTimings[key]; ok {
+			t.Errorf("BackendTimings has stale key %q (pre-fix RetrieveTimings JSON tag); want only the Source* canonical keys to match backendTimingsMillis", key)
 		}
 	}
 }
@@ -627,9 +641,14 @@ func TestRetrieveWithSnapshotCached_RecordsBackendTimingsOnHit(t *testing.T) {
 			"populated map so downstream consumers can join cache_hit + " +
 			"non-cache_hit rows on a consistent schema.")
 	}
-	for _, key := range []string{"vector_ms", "bm25_ms", "graph_ms", "memory_ms", "merge_ms", "rerank_ms"} {
+	for _, key := range []string{"vector", "bm25", "graph", "memory"} {
 		if _, ok := evt.BackendTimings[key]; !ok {
 			t.Errorf("BackendTimings missing %q key on cache-hit path; got %v", key, mapKeys(evt.BackendTimings))
+		}
+	}
+	for _, key := range []string{"vector_ms", "bm25_ms", "merge_ms", "rerank_ms"} {
+		if _, ok := evt.BackendTimings[key]; ok {
+			t.Errorf("BackendTimings has stale key %q on cache-hit path (pre-fix RetrieveTimings JSON tag); want only the Source* canonical keys", key)
 		}
 	}
 }
