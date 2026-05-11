@@ -536,8 +536,12 @@ func TestBatch_DiversityFieldThreadedToSubRequests(t *testing.T) {
 // the entire fan-out in a parent "retrieval.batch" span and emit
 // N child "retrieval.batch.sub" spans. The HTTP response echoes
 // the parent trace id back to the caller in BatchResponse.TraceID.
+//
+// Runs serially because installTracer mutates the process-global
+// otel TracerProvider; other parallel batch tests would otherwise
+// emit "retrieval.batch" spans into this recorder and overwrite
+// the parent trace id we're trying to verify.
 func TestBatch_TraceIDEcho_Round13Task3(t *testing.T) {
-	t.Parallel()
 	rec := installTracer(t)
 	vs := &slowVectorStore{hits: []storage.QdrantHit{{ID: "a:b:c", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}}}}
 	h, err := retrieval.NewHandler(retrieval.HandlerConfig{VectorStore: vs, Embedder: &fakeEmbedder{vec: []float32{1, 2}}})
