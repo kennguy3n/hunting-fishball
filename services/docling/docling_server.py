@@ -19,6 +19,7 @@ from concurrent import futures
 from typing import Iterable, Tuple
 
 import grpc
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 # Make `_proto` importable. Servers run from anywhere, but the proto
 # stubs live under `services/_proto`.
@@ -151,9 +152,26 @@ def serve(addr: str, backend: DoclingBackend | None = None) -> Tuple[grpc.Server
 
     Returns the server plus the bound port (resolves "[::]:0" so unit
     tests can pick a port without contention).
+
+    Round-12 Task 5: every Python sidecar registers the standard
+    grpc.health.v1.Health servicer so Kubernetes liveness probes and
+    the Go-side circuit breaker can verify the process is SERVING
+    without invoking the domain-specific RPC.
     """
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     docling_pb2_grpc.add_DoclingServiceServicer_to_server(DoclingServicer(backend), server)
+
+    health_servicer = health.HealthServicer()
+    # Empty service name advertises overall server health; the
+    # per-service entry lets clients query specifically for the
+    # Docling RPC surface.
+    health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    health_servicer.set(
+        "docling.v1.DoclingService",
+        health_pb2.HealthCheckResponse.SERVING,
+    )
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+
     port = server.add_insecure_port(addr)
     server.start()
     LOG.info("docling-server listening on port %d", port)

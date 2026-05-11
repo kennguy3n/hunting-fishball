@@ -19,6 +19,7 @@ from concurrent import futures
 from typing import List, Sequence, Tuple
 
 import grpc
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 # Make `_proto` importable.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -111,10 +112,25 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
 
 
 def serve(addr: str, backend: EmbeddingBackend | None = None) -> Tuple[grpc.Server, int]:
+    """Build a gRPC server and start it.
+
+    Round-12 Task 5: registers the standard grpc.health.v1.Health
+    servicer alongside the domain RPC so liveness probes and the
+    Go-side circuit breaker can check SERVING state cheaply.
+    """
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     embedding_pb2_grpc.add_EmbeddingServiceServicer_to_server(
         EmbeddingServicer(backend), server
     )
+
+    health_servicer = health.HealthServicer()
+    health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    health_servicer.set(
+        "embedding.v1.EmbeddingService",
+        health_pb2.HealthCheckResponse.SERVING,
+    )
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+
     port = server.add_insecure_port(addr)
     server.start()
     LOG.info("embedding-server listening on port %d", port)

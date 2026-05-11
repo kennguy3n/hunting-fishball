@@ -11,6 +11,7 @@ package deploy_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -176,6 +177,72 @@ func TestAlertsManifest_Round11Alerts(t *testing.T) {
 	for name, found := range required {
 		if !found {
 			t.Errorf("required Round-11 alert missing: %s", name)
+		}
+	}
+}
+
+// TestAlertsManifest_Round12Alerts — Round-12 Tasks 1+2.
+//
+// Asserts every Round-12 alert is present and carries the expected
+// severity. The three rules — GRPCCircuitBreakerOpen,
+// PostgresPoolSaturated, RedisPoolSaturated — must stay wired up so
+// future refactors of the manifest don't silently drop them.
+func TestAlertsManifest_Round12Alerts(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join(".", "alerts.yaml"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var m manifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		t.Fatalf("yaml: %v", err)
+	}
+	wantSeverity := map[string]string{
+		"GRPCCircuitBreakerOpen": "page",
+		"PostgresPoolSaturated":  "warning",
+		"RedisPoolSaturated":     "warning",
+	}
+	found := map[string]rule{}
+	for _, g := range m.Spec.Groups {
+		for _, r := range g.Rules {
+			if _, ok := wantSeverity[r.Alert]; ok {
+				found[r.Alert] = r
+			}
+		}
+	}
+	for name, sev := range wantSeverity {
+		r, ok := found[name]
+		if !ok {
+			t.Errorf("required Round-12 alert missing: %s", name)
+			continue
+		}
+		if r.Labels["severity"] != sev {
+			t.Errorf("alert=%s severity=%q want=%q", name, r.Labels["severity"], sev)
+		}
+		if r.For == "" {
+			t.Errorf("alert=%s missing `for:` duration", name)
+		}
+		if r.Expr == "" {
+			t.Errorf("alert=%s missing expr", name)
+		}
+	}
+	// Round-12 Task 1 specifically requires breaker == 2 (open).
+	if r, ok := found["GRPCCircuitBreakerOpen"]; ok {
+		if !strings.Contains(r.Expr, "context_engine_grpc_circuit_breaker_state") {
+			t.Errorf("GRPCCircuitBreakerOpen expr missing breaker metric: %q", r.Expr)
+		}
+		if !strings.Contains(r.Expr, "== 2") {
+			t.Errorf("GRPCCircuitBreakerOpen expr must pin the open state (==2): %q", r.Expr)
+		}
+	}
+	if r, ok := found["PostgresPoolSaturated"]; ok {
+		if !strings.Contains(r.Expr, "context_engine_postgres_pool_open_connections") {
+			t.Errorf("PostgresPoolSaturated expr missing pool metric: %q", r.Expr)
+		}
+	}
+	if r, ok := found["RedisPoolSaturated"]; ok {
+		if !strings.Contains(r.Expr, "context_engine_redis_pool_active_connections") {
+			t.Errorf("RedisPoolSaturated expr missing pool metric: %q", r.Expr)
 		}
 	}
 }

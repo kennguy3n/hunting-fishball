@@ -140,6 +140,50 @@ phase.
 > observability/operability; shard pre-generation extends
 > Phase 5. See PROGRESS.md for the per-task list.
 >
+> **Round 12** (2026-05-11) layers another 20 tasks focused on
+> observability alerts, resilience hardening, CI gates, OpenAPI
+> completeness, fuzz expansion, and docs audit. Highlights:
+> three new alerts (`GRPCCircuitBreakerOpen`,
+> `PostgresPoolSaturated`, `RedisPoolSaturated`) in
+> `deploy/alerts.yaml`; retention worker metrics
+> (`context_engine_retention_expired_chunks_total` +
+> `_sweep_duration_seconds`); the scheduler's tick is now
+> `SafeTick`-wrapped (`recover()` envelope; recovered panics
+> + propagated errors bump `context_engine_scheduler_errors_total`
+> and persist on the `sync_schedules` row); Python sidecars
+> register the gRPC health protocol (`grpc_health.v1`); a new
+> background DLQ auto-replay worker
+> (`internal/pipeline/dlq_auto_replay.go`, gated on
+> `CONTEXT_ENGINE_DLQ_AUTO_REPLAY=true`) re-emits eligible
+> dead-letter rows with capped backoff;
+> `tests/e2e/isolation_smoke_test.go` + `make test-isolation`
+> wire the Round-12 tenant isolation smoke into CI's full
+> lane; `make eval` (Precision@5 ≥ 0.8) and
+> `make migrate-dry-run` join the fast lane; 34 new typed
+> OpenAPI response schemas + four typed request schemas
+> replace `additionalProperties: true` stubs in
+> `docs/openapi.yaml`; four new Go-native fuzz targets cover
+> `pipeline.ParsePartitionKey`, `policy.EffectiveMode`,
+> `shard.DeltaDiff`, and `admin.QueryHash`; adaptive
+> rate-limiter exports `_adaptive_rate_current{connector}` +
+> `_adaptive_rate_halved_total{connector}`;
+> `tests/integration/rbac_coverage_test.go` (every
+> `/v1/admin/` route must have RBAC middleware) and
+> `internal/retrieval/cache_invalidation_test.go` (AST-based
+> companion-call audit for `QdrantClient.Upsert` /
+> `FalkorDBClient.WriteNodes` / `BleveClient.Index`) ship as
+> structural tests; a per-connector
+> `GET /v1/admin/sources/:id/rate-limit-status` endpoint
+> returns the adaptive rate limiter's full state; an audit
+> log retention sweeper deletes
+> `audit_logs` rows older than
+> `CONTEXT_ENGINE_AUDIT_RETENTION_DAYS` (default 90) in
+> batches of 1000; `tests/regression/round911_manifest.go`
+> catalogues the six Round-11 Devin Review fixes;
+> `tests/e2e/round12_test.go` covers the Round-12 surface
+> end-to-end. Migration count is now 034. See PROGRESS.md
+> for the per-task list.
+
 > **Round 11** (2026-05-11) layers another 20 tasks focused on
 > bug fixes, observability completeness, and graceful
 > degradation. Highlights: the `Makefile` `fuzz` target now

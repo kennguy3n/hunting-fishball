@@ -20,6 +20,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	"github.com/kennguy3n/hunting-fishball/internal/policy"
 	"github.com/kennguy3n/hunting-fishball/internal/storage"
 )
@@ -154,7 +155,17 @@ type SweepResult struct {
 // Sweep runs a single retention pass across every tenant returned by
 // the chunk source. The result is suitable for emitting structured
 // log lines.
+//
+// Round-12 Task 3: every sweep observes the wall-clock duration into
+// the `context_engine_retention_sweep_duration_seconds` histogram and
+// every successful chunk delete bumps the
+// `context_engine_retention_expired_chunks_total` counter (via
+// sweepTenant → DeleteChunk on success).
 func (w *RetentionWorker) Sweep(ctx context.Context) error {
+	start := w.cfg.Now()
+	defer func() {
+		observability.RetentionSweepDurationSeconds.Observe(w.cfg.Now().Sub(start).Seconds())
+	}()
 	tenants, err := w.cfg.Chunks.ListTenants(ctx)
 	if err != nil {
 		return err
@@ -224,6 +235,7 @@ func (w *RetentionWorker) sweepTenant(ctx context.Context, tenantID string, res 
 			continue
 		}
 		res.ChunksDeleted++
+		observability.RetentionExpiredChunksTotal.Inc()
 		w.emitChunkExpired(ctx, c, eff.MaxAgeDays)
 	}
 	return nil

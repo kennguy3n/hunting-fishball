@@ -211,3 +211,92 @@ redis.call('PEXPIRE', key, 3600000)
 
 return { allowed, retry_ms }
 `
+
+// RateLimitStatus is a read-only snapshot of the bucket state for
+// (tenantID, sourceID). Round-12 Task 16. The fields mirror the
+// JSON payload returned by GET /v1/admin/sources/:id/rate-limit-status:
+//
+//   - CurrentTokens is the most recently observed token count for
+//     the bucket. May be slightly stale because Redis updates the
+//     bucket only on Allow() calls; the time-decay refill is
+//     computed at the moment of Inspect.
+//   - MaxTokens mirrors the configured Capacity.
+//   - EffectiveRate is the steady-state refill rate (tokens/sec)
+//     after any adaptive halving. NB: the admin's RateLimiter is a
+//     simple Lua bucket without per-key adaptive state, so this
+//     defers to the configured RefillPerSecond and the
+//     AdaptiveRateLimiter wrapper sets the actual rate on Redis.
+//   - HalveCount and Last429At require external bookkeeping (the
+//     AdaptiveRateLimiter); see RateLimitStatusFromAdaptive.
+//   - IsThrottled is true when CurrentTokens == 0.
+type RateLimitStatus struct {
+	TenantID      string    `json:"tenant_id"`
+	SourceID      string    `json:"source_id"`
+	CurrentTokens float64   `json:"current_tokens"`
+	MaxTokens     int       `json:"max_tokens"`
+	EffectiveRate float64   `json:"effective_rate"`
+	HalveCount    int       `json:"halve_count"`
+	Last429At     time.Time `json:"last_429_at,omitempty"`
+	IsThrottled   bool      `json:"is_throttled"`
+}
+
+// inspectLua reads the bucket state without consuming a token. It
+// mirrors the time-decay refill from tokenBucketLua so the
+// returned CurrentTokens reflects the value Allow would see.
+const inspectLua = `
+local key      = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refill   = tonumber(ARGV[2])
+local now_ms   = tonumber(ARGV[3])
+
+local data   = redis.call('HMGET', key, 'tokens', 'last')
+local tokens = tonumber(data[1])
+local last   = tonumber(data[2])
+
+if not tokens then tokens = capacity end
+if not last   then last   = now_ms   end
+
+local elapsed = (now_ms - last) / 1000.0
+if elapsed < 0 then elapsed = 0 end
+tokens = math.min(capacity, tokens + elapsed * refill)
+
+return tostring(tokens)
+`
+
+// Inspect returns the current bucket snapshot for (tenantID,
+// sourceID) without consuming a token. Used by the
+// /v1/admin/sources/:id/rate-limit-status endpoint.
+func (r *RateLimiter) Inspect(ctx context.Context, tenantID, sourceID string) (RateLimitStatus, error) {
+	if tenantID == "" || sourceID == "" {
+		return RateLimitStatus{}, errors.New("ratelimit: missing tenant/source")
+	}
+	key := fmt.Sprintf("%s:%s:%s", r.keyPrefix, tenantID, sourceID)
+	now := time.Now().UnixMilli()
+	args := []any{
+		strconv.Itoa(r.limit.Capacity),
+		strconv.FormatFloat(r.limit.RefillPerSecond, 'f', -1, 64),
+		strconv.FormatInt(now, 10),
+	}
+	// We always Eval (no caching) because Inspect is on the slow
+	// admin path; the script is small and the cost is negligible.
+	res, err := r.client.Eval(ctx, inspectLua, []string{key}, args...).Result()
+	if err != nil {
+		return RateLimitStatus{}, fmt.Errorf("ratelimit: inspect: %w", err)
+	}
+	str, ok := res.(string)
+	if !ok {
+		return RateLimitStatus{}, fmt.Errorf("ratelimit: inspect: unexpected reply: %T", res)
+	}
+	tokens, err := strconv.ParseFloat(str, 64)
+	if err != nil {
+		return RateLimitStatus{}, fmt.Errorf("ratelimit: inspect parse: %w", err)
+	}
+	return RateLimitStatus{
+		TenantID:      tenantID,
+		SourceID:      sourceID,
+		CurrentTokens: tokens,
+		MaxTokens:     r.limit.Capacity,
+		EffectiveRate: r.limit.RefillPerSecond,
+		IsThrottled:   tokens < 1,
+	}, nil
+}

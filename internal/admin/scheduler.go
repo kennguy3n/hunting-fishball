@@ -16,11 +16,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/oklog/ulid/v2"
+
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // SyncSchedule is the GORM model for sync_schedules. Schema lives
@@ -36,6 +39,12 @@ type SyncSchedule struct {
 	LastRunAt time.Time `gorm:"column:last_run_at" json:"last_run_at,omitempty"`
 	CreatedAt time.Time `gorm:"not null;column:created_at" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null;column:updated_at" json:"updated_at"`
+	// Round-12 Task 4: last_error and last_error_at give operators a
+	// per-schedule view into why a tick failed without trawling
+	// process logs. last_error is bounded to 1KB (truncated on
+	// write) so a stack trace doesn't blow the row size budget.
+	LastError   string    `gorm:"type:varchar(1024);column:last_error" json:"last_error,omitempty"`
+	LastErrorAt time.Time `gorm:"column:last_error_at" json:"last_error_at,omitempty"`
 }
 
 // TableName overrides the default GORM pluralisation.
@@ -99,11 +108,14 @@ func (s *Scheduler) AutoMigrate(ctx context.Context) error {
 
 // Run executes Tick on a ticker until ctx is cancelled. Errors are
 // logged but never propagate so a transient DB outage does not
-// kill the goroutine.
+// kill the goroutine. Round-12 Task 4 layered a recover() around
+// every tick (see safeTick) so a panic in a child path (e.g. an
+// emitter crashing on a malformed Kafka payload) never bricks the
+// scheduler goroutine.
 func (s *Scheduler) Run(ctx context.Context) error {
 	ticker := time.NewTicker(s.cfg.Interval)
 	defer ticker.Stop()
-	if err := s.Tick(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := s.SafeTick(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		s.cfg.Logger.Warn("scheduler: tick", slog.String("error", err.Error()))
 	}
 	for {
@@ -111,11 +123,39 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := s.Tick(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := s.SafeTick(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.cfg.Logger.Warn("scheduler: tick", slog.String("error", err.Error()))
 			}
 		}
 	}
+}
+
+// SafeTick wraps Tick in a recover() so a panic in the tick path
+// is converted into an error rather than killing the goroutine.
+// The counter context_engine_scheduler_errors_total is bumped on
+// every recovered panic AND every returned error so operators get
+// a unified view of scheduler health. Exported as the panic-safe
+// public alternative to Tick — callers driving the scheduler from
+// their own loop (e.g. e2e tests) should prefer this over Tick.
+func (s *Scheduler) SafeTick(ctx context.Context) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			observability.SchedulerErrorsTotal.Inc()
+			stack := string(debug.Stack())
+			s.cfg.Logger.Error("scheduler: panic recovered",
+				slog.Any("panic", r),
+				slog.String("stack", stack),
+			)
+			err = fmt.Errorf("scheduler: panic recovered: %v", r)
+		}
+	}()
+	if tickErr := s.Tick(ctx); tickErr != nil && !errors.Is(tickErr, context.Canceled) {
+		observability.SchedulerErrorsTotal.Inc()
+		return tickErr
+	} else if tickErr != nil {
+		return tickErr
+	}
+	return nil
 }
 
 // Tick runs a single scheduling pass: load every enabled schedule
@@ -146,6 +186,8 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 				slog.String("schedule_id", row.ID),
 				slog.String("error", err.Error()),
 			)
+			observability.SchedulerErrorsTotal.Inc()
+			s.recordScheduleError(ctx, row.ID, err, now)
 			continue
 		}
 		next := schedule.Next(now)
@@ -155,6 +197,17 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 			)
 			continue
 		}
+		// The success path advances next_run_at in one UPDATE and
+		// clears last_error / last_error_at in a separate
+		// best-effort UPDATE. Bundling them risks freezing the
+		// schedule if last_error / last_error_at are ever missing
+		// (e.g. a deploy that lands the code before
+		// 035_sync_schedules_error_fields.sql, or a rollback that
+		// removed the columns): the full UPDATE would fail and
+		// next_run_at would never advance, causing Tick to re-fire
+		// the same row every interval and triggering EmitSync over
+		// and over. The split mirrors recordScheduleError's
+		// best-effort treatment of the error fields.
 		if err := s.cfg.DB.WithContext(ctx).
 			Model(&SyncSchedule{}).
 			Where("id = ?", row.ID).
@@ -167,9 +220,59 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 				slog.String("schedule_id", row.ID),
 				slog.String("error", err.Error()),
 			)
+			observability.SchedulerErrorsTotal.Inc()
+			s.recordScheduleError(ctx, row.ID, err, now)
+			continue
 		}
+		s.clearScheduleError(ctx, row.ID, now)
 	}
 	return nil
+}
+
+// clearScheduleError nulls last_error / last_error_at on the
+// sync_schedules row after a successful tick. Best-effort: a
+// failure here (e.g. the columns are absent on a partially
+// migrated database) is logged but never blocks the critical
+// next_run_at advancement that already landed in the caller.
+func (s *Scheduler) clearScheduleError(ctx context.Context, scheduleID string, now time.Time) {
+	if err := s.cfg.DB.WithContext(ctx).
+		Model(&SyncSchedule{}).
+		Where("id = ?", scheduleID).
+		Updates(map[string]any{
+			"last_error":    "",
+			"last_error_at": time.Time{},
+			"updated_at":    now,
+		}).Error; err != nil {
+		s.cfg.Logger.Warn("scheduler: clear last_error",
+			slog.String("schedule_id", scheduleID),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// recordScheduleError persists last_error / last_error_at on the
+// sync_schedules row. The error string is truncated to 1KB so a
+// stack trace can't blow up the row. Best-effort: a failure here
+// is logged but not surfaced — the in-memory counter and slog
+// already captured the original failure.
+func (s *Scheduler) recordScheduleError(ctx context.Context, scheduleID string, srcErr error, now time.Time) {
+	msg := srcErr.Error()
+	if len(msg) > 1024 {
+		msg = msg[:1024]
+	}
+	if err := s.cfg.DB.WithContext(ctx).
+		Model(&SyncSchedule{}).
+		Where("id = ?", scheduleID).
+		Updates(map[string]any{
+			"last_error":    msg,
+			"last_error_at": now,
+			"updated_at":    now,
+		}).Error; err != nil {
+		s.cfg.Logger.Warn("scheduler: persist last_error",
+			slog.String("schedule_id", scheduleID),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // ErrScheduleValidation is the sentinel returned from UpsertSchedule

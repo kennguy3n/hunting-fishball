@@ -24,6 +24,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // RateBucket is the narrow port the adaptive layer adapts. The
@@ -114,7 +116,15 @@ func (a *AdaptiveRateLimiter) Throttled(ctx context.Context, key string) error {
 	}
 	rate := a.current
 	a.mu.Unlock()
-	return a.cfg.Bucket.SetRate(ctx, key, rate)
+	if err := a.cfg.Bucket.SetRate(ctx, key, rate); err != nil {
+		return err
+	}
+	// Round-12 Task 13: surface every halve event + the new
+	// effective rate so dashboards can correlate 429-driven
+	// throttling with upstream incidents without grepping logs.
+	observability.AdaptiveRateHalvedTotal.WithLabelValues(key).Inc()
+	observability.AdaptiveRateCurrent.WithLabelValues(key).Set(rate)
+	return nil
 }
 
 // Healthy is called after a successful upstream operation. The
@@ -140,7 +150,14 @@ func (a *AdaptiveRateLimiter) Healthy(ctx context.Context, key string) error {
 	rate := a.current
 	a.lastUp = now
 	a.mu.Unlock()
-	return a.cfg.Bucket.SetRate(ctx, key, rate)
+	if err := a.cfg.Bucket.SetRate(ctx, key, rate); err != nil {
+		return err
+	}
+	// Round-12 Task 13: emit the recovered rate so operators can
+	// see the connector working its way back to BaseRate after a
+	// throttling incident.
+	observability.AdaptiveRateCurrent.WithLabelValues(key).Set(rate)
+	return nil
 }
 
 // CurrentRate returns the present adaptive rate per second. Used

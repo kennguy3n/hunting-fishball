@@ -23,6 +23,7 @@ from concurrent import futures
 from typing import Tuple
 
 import grpc
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 # Make `_proto` importable.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -221,8 +222,23 @@ class MemoryServicer(memory_pb2_grpc.MemoryServiceServicer):
 
 
 def serve(addr: str, backend: MemoryBackend | None = None) -> Tuple[grpc.Server, int]:
+    """Build a gRPC server and start it.
+
+    Round-12 Task 5: registers the standard grpc.health.v1.Health
+    servicer so the Go-side circuit breaker and k8s liveness probe
+    can verify SERVING without invoking Mem0.
+    """
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     memory_pb2_grpc.add_MemoryServiceServicer_to_server(MemoryServicer(backend), server)
+
+    health_servicer = health.HealthServicer()
+    health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    health_servicer.set(
+        "memory.v1.MemoryService",
+        health_pb2.HealthCheckResponse.SERVING,
+    )
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+
     port = server.add_insecure_port(addr)
     server.start()
     LOG.info("memory-server listening on port %d", port)
