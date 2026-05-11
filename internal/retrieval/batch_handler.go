@@ -19,7 +19,6 @@ import (
 	"errors"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -144,7 +143,13 @@ func (h *Handler) runOne(ctx context.Context, tenantID string, index int, sub Re
 	// query was paying the full fan-out cost on every batch slot.
 	// RetrieveWithSnapshotCached re-uses the live snapshot's cache
 	// slot so a sub-ms cache hit is possible per slot.
-	subStart := time.Now()
+	//
+	// Analytics: RetrieveWithSnapshotCached records the query
+	// analytics event itself (Round-11 Devin Review fix), reading
+	// sub.Source above and resolving topK/DefaultTopK consistently
+	// with the request that actually ran — the batch handler no
+	// longer records explicitly, which used to mis-report topK as
+	// `len(resp.Hits)` when the caller omitted top_k.
 	resp, rerr := h.RetrieveWithSnapshotCached(ctx, tenantID, sub, snapshot)
 	if rerr != nil {
 		if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
@@ -155,18 +160,5 @@ func (h *Handler) runOne(ctx context.Context, tenantID string, index int, sub Re
 	if resp.Policy.PrivacyMode == "" {
 		resp.Policy.PrivacyMode = string(policy.PrivacyModeNoAI)
 	}
-	// Emit a batch-tagged analytics event for the sub-request.
-	// RetrieveWithSnapshotCached itself does not record analytics
-	// (the gin handler does), so the batch path records here so
-	// operators can see batch traffic in the query_analytics table.
-	subTopK := sub.TopK
-	if subTopK <= 0 {
-		subTopK = len(resp.Hits)
-	}
-	h.recordQueryAnalytics(
-		ctx, tenantID, sub.Query, len(resp.Hits),
-		subTopK, resp.Policy.CacheHit, subStart, nil, nil,
-		QueryAnalyticsSourceBatch,
-	)
 	return BatchResultItem{Index: index, Response: &resp}
 }

@@ -786,6 +786,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	if req.Query == "" {
 		return RetrieveResponse{}, errors.New("retrieval: query is required")
 	}
+	reqStart := time.Now()
 	// Round-6 Task 10: route through the configured A/B test (if
 	// any) BEFORE topK resolution so the variant's `top_k`
 	// override flows into both the cache scope hash and the
@@ -819,6 +820,13 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
 			h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+			// Round-11 Devin Review fix: record analytics from the
+			// cache-aware entry point so non-gin callers (batch
+			// handler, CacheWarmer) participate in query_analytics.
+			// req.Source is set by the caller (batch -> "batch",
+			// CacheWarmer -> "cache_warm"); empty string defaults
+			// to "user" downstream.
+			h.recordQueryAnalytics(ctx, tenantID, req.Query, len(resp.Hits), topK, true, reqStart, nil, route, req.Source)
 			return resp, nil
 		}
 		observability.ObserveCacheMiss()
@@ -839,6 +847,9 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 		h.writeCacheOnMiss(ctx, tenantID, channelID, vec, scopeHash, resp, ttl)
 	}
 	h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+	// Round-11 Devin Review fix: see cache-hit branch above for the
+	// rationale; this records the cache-miss path.
+	h.recordQueryAnalytics(ctx, tenantID, req.Query, len(resp.Hits), topK, false, reqStart, nil, route, req.Source)
 	return resp, nil
 }
 
