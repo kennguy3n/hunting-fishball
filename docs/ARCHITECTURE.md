@@ -2218,3 +2218,123 @@ time.
   `is_throttled`) that distinguishes "rate-limited by us"
   from "rate-limited upstream" in seconds rather than
   log-diving.
+
+### Tech choices added in Round 13
+
+Round 13 layers a final set of operational and quality
+guardrails on top of Rounds 7-12. The theme is "make the
+platform debuggable, breakable, and recoverable in production":
+new health surfaces, sustained-saturation detectors, payload /
+audit / fallback safety nets, chaos coverage, and dialect-aware
+schema validation.
+
+- **Aggregated health endpoint.** `GET /v1/admin/health/summary`
+  fans out to every health probe (Postgres, Redis, Qdrant,
+  Kafka, gRPC sidecars, credential health) in parallel and
+  returns one JSON document with per-component status, latency,
+  and an overall `healthy | degraded | unhealthy` verdict. The
+  parallel fan-out is bounded by the slowest probe; the per-
+  component timeouts prevent a stuck Qdrant from masking
+  Postgres latency. Implemented in
+  `internal/admin/health_summary_handler.go`.
+
+- **SLO multi-window burn-rate alerts.** `deploy/alerts/slo_burn_rate.yaml`
+  declares the Google-SRE-Book canonical burn-rate alerts for
+  the retrieval P95 SLO (500 ms) and the pipeline throughput
+  SLO. Multi-window means each alert fires only when *both*
+  short (5 m / 1 h) and long (1 h / 6 h) windows agree, so a
+  brief blip doesn't page, but a sustained budget burn does.
+  Wired into `make alerts-check` and asserted in
+  `deploy/alerts_test.go`.
+
+- **Per-stage circuit breakers.** Before Round 13 only the gRPC
+  sidecars had circuit breakers. `internal/pipeline/stage_breaker.go`
+  introduces `StageCircuitBreaker` — a per-stage state machine
+  (closed / open / half-open) that short-circuits to the DLQ
+  when Parse or Embed fail N consecutive times. Gated on
+  `CONTEXT_ENGINE_STAGE_BREAKER_ENABLED` so production can
+  ramp it gradually. Metrics:
+  `context_engine_pipeline_stage_breaker_transitions_total` and
+  `context_engine_pipeline_stage_breaker_short_circuits_total`.
+
+- **Payload size limiter middleware.**
+  `internal/observability/payload_limiter.go` is a Gin
+  middleware + a `net/http` wrapper that rejects bodies larger
+  than `CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES` (default
+  10 MiB) with HTTP 413. Wired into both `cmd/api` and
+  `cmd/ingest` so a malicious / mis-configured client cannot
+  exhaust pod memory by streaming an unbounded multipart
+  upload. GET/HEAD/DELETE and probe paths
+  (`/metrics`, `/healthz`, `/readyz`) bypass the limiter.
+
+- **Audit log integrity chain.**
+  `internal/audit/integrity.go` exposes
+  `GET /v1/admin/audit/integrity`. The handler reads the
+  recent audit rows, sorts them oldest-first by ID (so the
+  chain is deterministic regardless of query result order),
+  and folds each row into a SHA-256 chain:
+  `next = SHA256(prev || id || tenant_id || actor_id || action || resource_type || resource_id)`.
+  The empty chain hashes a tenant-keyed seed
+  (`audit-chain-empty:<tenant>`) so the response is meaningful
+  even when no rows exist. Operators store the head hash + the
+  last-entry ID between checks; any tampered or deleted row
+  changes the head, while a newly appended row preserves the
+  historical prefix (only the new entry's hash is folded in).
+
+- **Postgres pool leak detector.**
+  `internal/observability/pool_leak_detector.go` polls
+  `db.Stats().OpenConnections` against
+  `CONTEXT_ENGINE_PG_MAX_OPEN` every 30 s and emits a
+  structured warning once utilisation stays above 90 % for
+  three consecutive samples. Publishes the percent reading to
+  `context_engine_postgres_pool_utilization_percent` for the
+  Grafana dashboard. The constructor returns `ErrNoMaxOpen`
+  when the ceiling is unset, which `cmd/api` treats as an
+  opt-in.
+
+- **Embedding fallback path.**
+  `internal/pipeline/embed_fallback.go` provides a
+  deterministic 256-dim hashing-trick embedder that activates
+  when the gRPC sidecar circuit breaker opens and
+  `CONTEXT_ENGINE_EMBED_FALLBACK_ENABLED` is set. The fallback
+  is L2-normalised so cosine similarity stays meaningful, and
+  records the model id `hf-fallback-v1` on the stored chunk so
+  retrieval can filter / down-weight degraded rows. A periodic
+  reindex job is expected to replace them once the sidecar
+  recovers.
+
+- **Chaos coverage.** `tests/e2e/chaos_kafka_test.go` exercises
+  the coordinator's retry + DLQ paths under a simulated Kafka
+  broker outage, and `tests/e2e/concurrent_delete_test.go`
+  proves the cryptographic-forget orchestrator's fenced Redis
+  lease is the single race point. Both use in-process stubs
+  rather than container manipulation so they run reliably in CI
+  without docker-compose timing flakes.
+
+- **OpenAPI completeness gate.**
+  `docs/openapi_test.go::TestOpenAPI_RouterCoverage` parses
+  `internal/admin`, `internal/audit`, and `internal/retrieval`
+  with the Go AST, enumerates every gin route registration
+  prefixed with `/v1/`, normalises `:id` to `{id}`, and asserts
+  each route has a path entry in `docs/openapi.yaml`. This
+  catches the failure mode "new endpoint shipped without a
+  spec entry" — previously a recurring source of contract
+  drift between server and SDK generators.
+
+- **Dialect-aware migration dry-run.**
+  `scripts/migrate-dry-run-pg.sh` launches a disposable
+  Postgres 16 container, applies every `migrations/*.sql` in
+  lexical order, then runs the matching rollbacks in reverse.
+  The previous SQLite-based dry-run could not catch
+  Postgres-specific syntax errors (`JSONB`, `TIMESTAMPTZ`,
+  `ADD COLUMN IF NOT EXISTS`, partial indexes). Wired into
+  CI as `full-migrate-dry-run-pg` (full lane only — it pulls a
+  Postgres image, so it stays out of the fast lane).
+
+- **`make doctor`.** A focused script
+  (`scripts/doctor.sh`) that walks the prereqs a new
+  contributor needs (Go ≥ 1.25, Docker daemon,
+  docker-compose, Python 3.11+, protoc, golangci-lint) and
+  prints a green / red checklist. The script exits non-zero on
+  any required failure so CI can gate too. Reduces onboarding
+  questions in chat.

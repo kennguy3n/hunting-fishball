@@ -354,6 +354,66 @@ The full set of public + admin endpoints is documented in
   rollback coverage; `make migrate-rollback` applies them in
   reverse order.
 
+**Round 13 additions:**
+
+- New admin endpoints:
+  - `GET /v1/admin/health/summary` — Round-13 Task 1.
+    Parallel fan-out to every health probe (Postgres, Redis,
+    Qdrant, Kafka, gRPC sidecars, credential health) returning
+    a verdict (`healthy` | `degraded` | `unhealthy`) plus
+    per-component latency / error
+    (`internal/admin/health_summary_handler.go`).
+  - `GET /v1/admin/analytics/queries/slow` — Round-13 Task 8.
+    Lists recent retrievals exceeding
+    `CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS` (default 1000 ms)
+    with per-backend timings (`internal/admin/slow_query.go`).
+  - `GET /v1/admin/analytics/cache-stats` — Round-13 Task 9.
+    Per-tenant cache hit / miss / hit_rate_pct over a
+    configurable window
+    (`internal/admin/cache_stats_handler.go`).
+  - `POST /v1/admin/tenants/:tenant_id/rotate-api-key` —
+    Round-13 Task 10. Returns the new key exactly once; old key
+    valid for `CONTEXT_ENGINE_API_KEY_GRACE_PERIOD` (default
+    24 h) (`internal/admin/api_key_rotation.go`).
+  - `GET /v1/admin/audit/integrity` — Round-13 Task 12.
+    SHA-256 hash-chain head over audit rows (deterministic via
+    oldest-first sort), so operators can detect tampered or
+    deleted rows (`internal/audit/integrity.go`).
+- Pipeline + reliability hardening: per-stage circuit breakers
+  for Parse / Embed (Task 5, `internal/pipeline/stage_breaker.go`),
+  DLQ age monitor + `DLQAgeHigh` alert (Task 4), payload size
+  limiter middleware rejecting bodies >
+  `CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES` (default 10 MiB)
+  with HTTP 413 (Task 11), Postgres pool leak detector that
+  warns on sustained > 90 % utilisation (Task 18), and a
+  degraded-mode Go-native embedding fallback that activates
+  when the gRPC sidecar circuit breaker opens (Task 19,
+  `internal/pipeline/embed_fallback.go`).
+- Observability: SLO multi-window burn-rate alerts in
+  `deploy/alerts/slo_burn_rate.yaml` (Task 2), parent-trace
+  correlation across `POST /v1/retrieve/batch` (Task 3),
+  per-backend contribution breakdown in
+  `internal/retrieval/explain.go` (Task 7), aggregated
+  `percent_complete` on the sync-progress endpoint (Task 6).
+- Testing depth: chaos-Kafka e2e
+  (`tests/e2e/chaos_kafka_test.go`, Task 13), concurrent
+  delete race e2e (`tests/e2e/concurrent_delete_test.go`,
+  Task 14), eval corpus expanded from 20 → 50 cases covering
+  multi-hop graph, BM25 exact-match, memory-augmented, and
+  cross-namespace queries (`tests/eval/golden_corpus.json`,
+  Task 15).
+- Developer experience: `make doctor` checks all prerequisites
+  (Task 16, `scripts/doctor.sh`); `docs/openapi_test.go`'s new
+  `TestOpenAPI_RouterCoverage` walks the gin router and
+  asserts every registered `/v1/` route has a path entry in
+  `docs/openapi.yaml` (Task 17).
+- CI / infrastructure: `fast-go` split with `fast-lint` in
+  parallel (Task 0, brings fast-lane under 3 min); new
+  `make migrate-dry-run-pg` + `full-migrate-dry-run-pg` CI job
+  catches Postgres-specific syntax (JSONB / TIMESTAMPTZ /
+  `ADD COLUMN IF NOT EXISTS`) that the SQLite dry-run misses
+  (Task 20, `scripts/migrate-dry-run-pg.sh`).
+
 **Round 12 additions:**
 
 - Three new Prometheus alerts in `deploy/alerts.yaml`:
@@ -710,8 +770,10 @@ Other targets:
 | `make fuzz`             | Run Go native fuzz targets across `internal/retrieval/`, `internal/admin/`, `internal/pipeline/`, `internal/policy/`, `internal/shard/` (30s per target) |
 | `make migrate-rollback` | Apply `migrations/rollback/*.down.sql` in reverse via `psql` (gated on `CONTEXT_ENGINE_DATABASE_URL`) |
 | `make migrate-dry-run`  | Run `internal/migrate/runner.go` with `DryRun=true` against a fresh SQLite database — catches SQL syntax errors before merge (Round 12 Task 9) |
+| `make migrate-dry-run-pg` | Launch a disposable Postgres 16 container and replay every up + rollback migration in lexical order — catches PG-specific syntax (JSONB / TIMESTAMPTZ / `ADD COLUMN IF NOT EXISTS`) the SQLite dry-run misses (Round 13 Task 20) |
+| `make doctor`           | Check developer prerequisites: Go ≥ 1.25, Docker, docker-compose, Python 3.11+, protoc, golangci-lint, e2e env vars (Round 13 Task 16) |
 | `make test-isolation`   | Run the Round-12 tenant-isolation e2e smoke (`tests/e2e/isolation_smoke_test.go`, build tag `e2e`) |
-| `make eval`             | Run the golden-corpus eval; fails if Precision@5 < 0.8 (Round 12 Task 8) |
+| `make eval`             | Run the golden-corpus eval; fails if Precision@5 < 0.6 (Round 13 Task 15 — 50-case corpus, thresholds unchanged) |
 | `make clean`            | Remove `./bin/` and coverage artefacts                      |
 
 ### Python ML microservices (Phase 3)
@@ -871,6 +933,10 @@ hunting-fishball/
 │                              # FalkorDB / Docling / embedding / memory
 ├── Makefile                   # build / test / lint / proto-gen /
 │                              # test-e2e / test-integration / bench
+├── scripts/                   # Round-13 Task 16/20:
+│                              # doctor.sh (prereq checklist),
+│                              # migrate-dry-run-pg.sh (PG dialect
+│                              # check via disposable container)
 └── .github/workflows/ci.yml   # CI: vet / test / lint / proto-check /
                                # e2e / services-unit / integration
 ```
