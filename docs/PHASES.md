@@ -140,6 +140,31 @@ phase.
 > observability/operability; shard pre-generation extends
 > Phase 5. See PROGRESS.md for the per-task list.
 >
+> **Round 10** (2026-05-11) layers another 20 tasks that
+> *wire* the components shipped in Rounds 7–9 into the API +
+> ingest binaries and add the integration / e2e gates that
+> prevent regression. Highlights: the retrieval handler now
+> reads `max_latency_ms` from the GORM `LatencyBudgetStore` and
+> seeds the per-request deadline; the Redis semantic cache
+> looks up per-tenant TTL through the GORM `CacheConfigStore`;
+> the pipeline coordinator records sync history on every
+> backfill run and runs the chunk-quality scorer as a Stage-4
+> pre-write hook (both gated by env vars and persisted via the
+> GORM stores); periodic background workers for credential
+> health + token refresh are wired into `cmd/api`; periodic
+> retention + cron-scheduler workers are wired into
+> `cmd/ingest`; new tests pin the synonym/expander chain
+> (`tests/integration/query_expansion_test.go`), the Round-9
+> GORM stores (`tests/e2e/round9_test.go`), and the
+> per-stage timeout / cache-warm-on-miss behaviour
+> (`tests/e2e/round9_pipeline_test.go`); admin API JSON inputs
+> now have fuzz coverage; `docs/openapi.yaml` completeness +
+> connector-runbook completeness are pinned by tests
+> (`docs/openapi_test.go`, `docs/runbooks/runbook_test.go`);
+> CI grows `fast-proto-check`, `full-connector-smoke`,
+> `full-bench-e2e`, `full-capacity-test`, and a nightly
+> `make fuzz` job. See PROGRESS.md for the per-task list.
+
 > **Round 9** (2026-05-11) layers another 20 tasks
 > that finish the GORM cutover and harden the retrieval +
 > pipeline surfaces: the last five in-memory admin stores

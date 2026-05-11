@@ -136,6 +136,32 @@ jobs:
       - name: rollback parity tests
         run: go test -race -count=1 ./migrations/rollback/...
 
+  fast-proto-check:
+    name: Fast — proto-check (no codegen drift)
+    # Round-10 Task 17: pin the proto-gen output as a fast-lane
+    # gate. proto-check runs proto-gen and fails when the working
+    # tree diverges from the committed stubs, so every PR is
+    # required to keep proto/ in sync.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Install protoc
+        env:
+          PROTOC_VERSION: "25.3"
+        run: |
+          curl -sSLo /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          sudo unzip -q -o /tmp/protoc.zip -d /usr/local
+          protoc --version
+
+      - name: proto-check
+        run: make proto-check
+
   fast-python:
     name: Fast Python services unit tests
     runs-on: ubuntu-latest
@@ -163,7 +189,7 @@ jobs:
   fast-required:
     name: Required CI (fast lane)
     runs-on: ubuntu-latest
-    needs: [fast-go, fast-eval, fast-alerts, fast-rollback-parity, fast-python]
+    needs: [fast-go, fast-eval, fast-alerts, fast-rollback-parity, fast-proto-check, fast-python]
     if: always()
     steps:
       - name: Verify fast-lane jobs passed
@@ -175,13 +201,14 @@ jobs:
             "${{ needs.fast-eval.result }}" \
             "${{ needs.fast-alerts.result }}" \
             "${{ needs.fast-rollback-parity.result }}" \
+            "${{ needs.fast-proto-check.result }}" \
             "${{ needs.fast-python.result }}"; do
             if [ "$r" != "success" ]; then
               fail=1
             fi
           done
           if [ "$fail" = "1" ]; then
-            echo "::error::fast-go=${{ needs.fast-go.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-python=${{ needs.fast-python.result }}"
+            echo "::error::fast-go=${{ needs.fast-go.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
             exit 1
           fi
           echo "fast lane green"
@@ -329,3 +356,84 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  # ===============================================================
+  # Round-10 Task 17: nightly-only heavy jobs. Each runs against
+  # `schedule` and `workflow_dispatch`; PRs can opt in via the
+  # `full-ci` label.
+  # ===============================================================
+
+  full-connector-smoke:
+    name: Full — connector smoke
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: go mod download
+        run: go mod download
+      - name: connector smoke
+        run: make test-connector-smoke
+
+  full-bench-e2e:
+    name: Full — end-to-end P95 bench
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: go mod download
+        run: go mod download
+      - name: bench-e2e
+        run: make bench-e2e
+
+  full-capacity-test:
+    name: Full — capacity test
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: go mod download
+        run: go mod download
+      - name: capacity test
+        run: make capacity-test
+
+  nightly-fuzz:
+    name: Nightly — fuzz targets
+    runs-on: ubuntu-latest
+    # Fuzzing is wall-clock-heavy: 30s per target × N targets. Limit
+    # to nightly cron + workflow_dispatch; PRs that need it can fire
+    # workflow_dispatch by hand.
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: go mod download
+        run: go mod download
+      - name: make fuzz
+        run: make fuzz

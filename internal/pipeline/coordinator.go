@@ -152,6 +152,27 @@ type CoordinatorConfig struct {
 	ParseTimeout time.Duration
 	EmbedTimeout time.Duration
 	StoreTimeout time.Duration
+
+	// Round-10 Task 3: per-tenant sync-history recorder. When
+	// non-nil, Stage 1 calls Start on every backfill kickoff and
+	// Stage 4 / DLQ increments per-(tenant, source) counters as
+	// the documents stream through. Callers close the row via
+	// Coordinator.FinishBackfillRun.
+	SyncHistory SyncHistoryRecorder
+
+	// SyncRunIDGen mints the run_id stored on sync_history rows.
+	// Defaults to ulid.Make().String().
+	SyncRunIDGen func() string
+
+	// ChunkScorer is the optional Round-10 Task 4 hook that the
+	// store stage invokes before each chunk write so admins get a
+	// per-chunk quality score persisted via ChunkQualityRecorder.
+	ChunkScorer *ChunkScorer
+
+	// ChunkQuality is the sink the store stage writes per-chunk
+	// quality reports into. Best-effort: write failures are logged
+	// and ignored so a scoring outage cannot block ingestion.
+	ChunkQuality ChunkQualityRecorder
 }
 
 // LoadStageTimeoutsFromEnv reads the four
@@ -225,6 +246,9 @@ func (c *CoordinatorConfig) defaults() {
 	if c.PriorityBuffer != nil && c.PriorityClassifier == nil {
 		c.PriorityClassifier = DefaultPriorityClassifier{}
 	}
+	if c.SyncHistory != nil && c.SyncRunIDGen == nil {
+		c.SyncRunIDGen = defaultSyncRunIDGen
+	}
 }
 
 // CoordinatorMetrics counts the events that flow through the
@@ -249,6 +273,11 @@ type Coordinator struct {
 	stage2 chan stagedItem
 	stage3 chan stagedItem
 	stage4 chan stagedItem
+
+	// Round-10 Task 3: per-(tenant, source) sync-run counters. See
+	// syncRunState. nil when CoordinatorConfig.SyncHistory is unset.
+	syncRunsMu sync.Mutex
+	syncRuns   map[string]*syncRunState
 }
 
 type stagedEvent struct {
@@ -287,6 +316,9 @@ func NewCoordinator(cfg CoordinatorConfig) (*Coordinator, error) {
 	c.stage2 = make(chan stagedItem, c.cfg.QueueSize)
 	c.stage3 = make(chan stagedItem, c.cfg.QueueSize)
 	c.stage4 = make(chan stagedItem, c.cfg.QueueSize)
+	if c.cfg.SyncHistory != nil {
+		c.syncRuns = make(map[string]*syncRunState)
+	}
 
 	return c, nil
 }
@@ -370,6 +402,10 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				if !ok {
 					return
 				}
+				// Round-10 Task 3: a backfill kickoff opens a
+				// sync_history row so the admin endpoint can
+				// observe the run in flight.
+				c.recordSyncStart(gctx, se.evt)
 				if se.evt.Kind == EventDocumentDeleted || se.evt.Kind == EventPurge {
 					doc := &Document{
 						TenantID:   se.evt.TenantID,
@@ -390,6 +426,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				if errors.Is(err, ErrUnchanged) {
 					c.Metrics.Skipped.Add(1)
 					c.Metrics.Completed.Add(1)
+					c.recordSyncOutcome(se.evt, true)
 					if c.cfg.OnSuccess != nil {
 						c.cfg.OnSuccess(gctx, se.evt)
 					}
@@ -557,6 +594,13 @@ func (c *Coordinator) Run(ctx context.Context) error {
 						continue
 					}
 				} else {
+					// Round-10 Task 4: per-chunk quality
+					// scoring runs before the Store write so
+					// the report row carries the same chunk_id
+					// the chunk lands under. Best-effort — a
+					// recorder write failure must not block the
+					// chunk itself.
+					c.scoreAndRecordBlocks(gctx, it)
 					if _, err := c.runWithRetry(gctx, "store", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
 						return nil, c.cfg.Store.Store(rc, it.doc, it.blocks, it.embeddings, it.modelID)
 					}); err != nil {
@@ -566,6 +610,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 					}
 				}
 				c.Metrics.Completed.Add(1)
+				c.recordSyncOutcome(it.evt, true)
 				if c.cfg.OnSuccess != nil {
 					c.cfg.OnSuccess(gctx, it.evt)
 				}
@@ -720,6 +765,7 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn
 // counts the failure; the DLQ callback itself is best-effort.
 func (c *Coordinator) routeDLQ(ctx context.Context, evt IngestEvent, err error) {
 	c.Metrics.DLQ.Add(1)
+	c.recordSyncOutcome(evt, false)
 	if c.cfg.OnDLQ != nil {
 		c.cfg.OnDLQ(ctx, evt, err)
 	}

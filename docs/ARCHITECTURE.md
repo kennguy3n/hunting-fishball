@@ -1794,6 +1794,79 @@ prefix under `migrations/rollback/`** — a reviewer who forgets
 the down-script gets caught at unit-test time, not at incident
 time.
 
+### Tech choices added in Round 10
+
+- **LatencyBudgetLookup port — per-tenant deadline at request
+  ingress.** The retrieval handler now reads the tenant's
+  `max_latency_ms` from `internal/admin/latency_budget_gorm.go`
+  via the new `LatencyBudgetLookup` port whenever a request omits
+  `limits.max_latency_ms`. The lookup runs on a 200ms timeout so a
+  slow store never poisons the hot path. This is the missing
+  bridge between the Round-7 budget store and the per-request
+  context deadline that already existed in the handler.
+
+- **CacheTTLLookup port — per-tenant Redis `PEXPIRE`.** The Redis
+  semantic-cache (`internal/storage/redis_cache.go`) now consults
+  `internal/admin/cache_config_gorm.go` through the new
+  `CacheTTLLookup` port on every `Set`. When a row exists, the
+  per-tenant TTL is used; otherwise the global default applies.
+  This makes the Round-7 `cache_config` table a load-bearing
+  control rather than dead inventory.
+
+- **SyncHistoryRecorder hook — backfill provenance for free.**
+  The pipeline coordinator now invokes a `SyncHistoryRecorder`
+  port on every backfill kickoff and finishes the row on
+  completion/error. `cmd/ingest/main.go` wires the production
+  recorder through the Round-7 `internal/admin/sync_history_gorm.go`
+  store. Net effect: every backfill becomes a row in
+  `sync_history` with start/end/status/docs_processed/docs_failed,
+  unlocking the existing admin `/v1/admin/sync-history` UI.
+
+- **ChunkScorer pre-write hook — Stage 4 chunk quality.** The
+  coordinator now calls `pipeline.ChunkScorer.Score()` on every
+  block before Stage 4 writes (gated by
+  `CONTEXT_ENGINE_CHUNK_SCORING_ENABLED`) and persists the four-
+  axis score (length, language, embedding norm, near-duplicate)
+  through the Round-9 GORM `ChunkQualityStore`. Operators get
+  observability into low-quality chunks without a separate batch
+  job.
+
+- **Periodic workers in cmd/api and cmd/ingest.** Four wired-as-
+  goroutines workers shipped in this round:
+  - `credential_health` runs on
+    `CONTEXT_ENGINE_CREDENTIAL_CHECK_INTERVAL` (default 1h) in
+    `cmd/api/main.go`.
+  - `token_refresh` runs on
+    `CONTEXT_ENGINE_TOKEN_REFRESH_INTERVAL` (default 15m) in
+    `cmd/api/main.go`.
+  - `retention_worker` runs on
+    `CONTEXT_ENGINE_RETENTION_ENABLED` (or the legacy
+    `CONTEXT_ENGINE_RETENTION_INTERVAL`) in `cmd/ingest/main.go`.
+  - `scheduler` runs on `CONTEXT_ENGINE_SCHEDULER_ENABLED`
+    (default `true`) in `cmd/ingest/main.go`.
+  Each worker registers with the lifecycle shutdown runner so a
+  SIGTERM drains them before the binary exits.
+
+- **Query expansion in the retrieval hot path.** The handler
+  gained `SetQueryExpander` so the production `SynonymExpander`
+  reaches every retrieve request. The end-to-end chain
+  (`SynonymStoreGORM` → `SynonymExpander` → `Handler` → BM25) is
+  pinned by `tests/integration/query_expansion_test.go`.
+
+- **OpenAPI + connector-runbook completeness gates.**
+  `docs/openapi_test.go` now pins every route registered in
+  `cmd/api/main.go` against `docs/openapi.yaml`, and
+  `docs/runbooks/runbook_test.go` pins every registered
+  connector against `docs/runbooks/<name>.md` with the four
+  required sections. Both gates run in the fast lane.
+
+- **CI lane audit.** Fast lane gains `fast-proto-check` (running
+  `make proto-check` so committed gRPC stubs cannot drift). Full
+  lane gains `full-connector-smoke`, `full-bench-e2e`, and
+  `full-capacity-test`. A new nightly-only `nightly-fuzz` job
+  runs `make fuzz`, which itself now covers
+  `./internal/admin/...` in addition to `./internal/retrieval/...`.
+
 ### Tech choices added in Round 9
 
 - **GORM cutover complete.** The five remaining in-memory admin

@@ -252,6 +252,37 @@ func run() error {
 	}
 	// Round-9 Task 8: per-stage timeouts.
 	coordCfg.LoadStageTimeoutsFromEnv(os.Getenv)
+
+	// Round-10 Task 3: sync-history recording. Stage 1 opens a
+	// row on every backfill kickoff; Stage 4 / DLQ bump
+	// processed / failed counters. The admin handler reads the
+	// rows back through /v1/admin/sources/:id/sync-history.
+	syncHistoryStore, shErr := admin.NewSyncHistoryGORM(db)
+	if shErr != nil {
+		return fmt.Errorf("sync_history: %w", shErr)
+	}
+	if mErr := db.AutoMigrate(&admin.SyncHistoryRow{}); mErr != nil {
+		return fmt.Errorf("sync_history migrate: %w", mErr)
+	}
+	coordCfg.SyncHistory = newSyncHistoryAdapter(syncHistoryStore)
+	coordCfg.SyncRunIDGen = makeRunID
+
+	// Round-10 Task 4: optional per-chunk quality scoring. Gated
+	// by CONTEXT_ENGINE_CHUNK_SCORING_ENABLED so deployments that
+	// don't want the extra Postgres writes can opt out.
+	if os.Getenv("CONTEXT_ENGINE_CHUNK_SCORING_ENABLED") == "true" {
+		cqStore, cqErr := admin.NewChunkQualityStoreGORM(db)
+		if cqErr != nil {
+			return fmt.Errorf("chunk_quality: %w", cqErr)
+		}
+		if mErr := cqStore.AutoMigrate(context.Background()); mErr != nil {
+			return fmt.Errorf("chunk_quality migrate: %w", mErr)
+		}
+		coordCfg.ChunkScorer = pipeline.NewChunkScorer()
+		coordCfg.ChunkQuality = newChunkQualityAdapter(cqStore)
+		slog.Info("ingest: chunk-quality scoring enabled")
+	}
+
 	coord, err := pipeline.NewCoordinator(coordCfg)
 	if err != nil {
 		return fmt.Errorf("coordinator: %w", err)
@@ -307,27 +338,42 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	scheduler, err := admin.NewScheduler(admin.SchedulerConfig{
-		DB: db,
-		Emitter: admin.SyncEmitterFunc(func(ctx context.Context, tenantID, sourceID string) error {
-			// Re-use the source.connected kick-off envelope so the
-			// existing backfill orchestrator picks the schedule
-			// fire up without a new code path.
-			return syncProducer.EmitSourceConnected(ctx, tenantID, sourceID, "")
-		}),
-		Logger: slog.Default(),
-	})
-	if err != nil {
-		return fmt.Errorf("scheduler: %w", err)
+	// Round-10 Task 8: scheduler is opt-in via
+	// CONTEXT_ENGINE_SCHEDULER_ENABLED. Defaults to "true" so
+	// the prior single-binary behaviour is preserved when the
+	// env var is unset.
+	schedulerEnabled := os.Getenv("CONTEXT_ENGINE_SCHEDULER_ENABLED")
+	if schedulerEnabled == "" {
+		schedulerEnabled = "true"
 	}
-	if err := scheduler.AutoMigrate(ctx); err != nil {
-		return fmt.Errorf("scheduler migrate: %w", err)
-	}
-	go func() {
-		if err := scheduler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Warn("ingest: scheduler", slog.String("error", err.Error()))
+	schedulerDone := make(chan struct{})
+	if schedulerEnabled == "true" || schedulerEnabled == "1" {
+		scheduler, err := admin.NewScheduler(admin.SchedulerConfig{
+			DB: db,
+			Emitter: admin.SyncEmitterFunc(func(ctx context.Context, tenantID, sourceID string) error {
+				// Re-use the source.connected kick-off envelope so the
+				// existing backfill orchestrator picks the schedule
+				// fire up without a new code path.
+				return syncProducer.EmitSourceConnected(ctx, tenantID, sourceID, "")
+			}),
+			Logger: slog.Default(),
+		})
+		if err != nil {
+			return fmt.Errorf("scheduler: %w", err)
 		}
-	}()
+		if err := scheduler.AutoMigrate(ctx); err != nil {
+			return fmt.Errorf("scheduler migrate: %w", err)
+		}
+		go func() {
+			defer close(schedulerDone)
+			if err := scheduler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("ingest: scheduler", slog.String("error", err.Error()))
+			}
+		}()
+	} else {
+		close(schedulerDone)
+		slog.Info("ingest: scheduler disabled (CONTEXT_ENGINE_SCHEDULER_ENABLED=false)")
+	}
 
 	// Round-8 Task 11: periodic credential health worker. Runs
 	// connector.Validate() for every active source on a
@@ -349,9 +395,20 @@ func run() error {
 		return fmt.Errorf("credential_health worker: %w", err)
 	}
 	credHealthInterval := admin.CredentialHealthInterval
-	if v := os.Getenv("CONTEXT_ENGINE_CREDENTIAL_HEALTH_INTERVAL"); v != "" {
-		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
-			credHealthInterval = d
+	// Round-10 Task 5: accept the new
+	// CONTEXT_ENGINE_CREDENTIAL_CHECK_INTERVAL spelling alongside
+	// the original CONTEXT_ENGINE_CREDENTIAL_HEALTH_INTERVAL. The
+	// new alias takes precedence so an operator who upgrades to
+	// the documented env name doesn't have to clear the legacy
+	// value first.
+	for _, k := range []string{
+		"CONTEXT_ENGINE_CREDENTIAL_HEALTH_INTERVAL",
+		"CONTEXT_ENGINE_CREDENTIAL_CHECK_INTERVAL",
+	} {
+		if v := os.Getenv(k); v != "" {
+			if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+				credHealthInterval = d
+			}
 		}
 	}
 	go func() {
@@ -415,15 +472,25 @@ func run() error {
 		}()
 	}
 
-	// Task 6: optional retention worker. Sweeps the chunks table per
-	// tenant and evicts rows whose ingested_at exceeds the effective
-	// MaxAgeDays of the resolved retention policy. Off by default; set
-	// CONTEXT_ENGINE_RETENTION_INTERVAL=1h (any duration string) to
-	// enable.
-	if v := os.Getenv("CONTEXT_ENGINE_RETENTION_INTERVAL"); v != "" {
-		interval, perr := time.ParseDuration(v)
-		if perr != nil {
-			return fmt.Errorf("retention interval: %w", perr)
+	// Task 6 / Round-10 Task 7: optional retention worker.
+	// Sweeps the chunks table per tenant and evicts rows whose
+	// ingested_at exceeds the effective MaxAgeDays of the
+	// resolved retention policy. Enabled when EITHER
+	// CONTEXT_ENGINE_RETENTION_ENABLED=true (Round-10 spelling)
+	// OR the legacy CONTEXT_ENGINE_RETENTION_INTERVAL=<duration>
+	// is set. Defaults to a 1h interval when only the boolean
+	// gate is on; an explicit interval value overrides.
+	retentionEnabled := os.Getenv("CONTEXT_ENGINE_RETENTION_ENABLED") == "true" ||
+		os.Getenv("CONTEXT_ENGINE_RETENTION_ENABLED") == "1" ||
+		os.Getenv("CONTEXT_ENGINE_RETENTION_INTERVAL") != ""
+	if retentionEnabled {
+		interval := time.Hour
+		if v := os.Getenv("CONTEXT_ENGINE_RETENTION_INTERVAL"); v != "" {
+			d, perr := time.ParseDuration(v)
+			if perr != nil {
+				return fmt.Errorf("retention interval: %w", perr)
+			}
+			interval = d
 		}
 		policySrc := pipeline.NewRetentionPolicySourceGORM(db)
 		if err := policySrc.AutoMigrate(ctx); err != nil {
@@ -525,6 +592,14 @@ func run() error {
 		return waitChanClosed(ctx, coordDone)
 	})
 	sd.Add("http-server", func(ctx context.Context) error { return httpSrv.Shutdown(ctx) })
+	sd.Add("scheduler", func(ctx context.Context) error {
+		select {
+		case <-schedulerDone:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
 	if sqlDB, derr := db.DB(); derr == nil {
 		sd.Add("postgres", func(_ context.Context) error { return sqlDB.Close() })
 	}
