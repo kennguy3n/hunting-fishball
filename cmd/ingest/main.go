@@ -592,6 +592,14 @@ func run() error {
 		return waitChanClosed(ctx, coordDone)
 	})
 	sd.Add("http-server", func(ctx context.Context) error { return httpSrv.Shutdown(ctx) })
+	sd.Add("scheduler", func(ctx context.Context) error {
+		select {
+		case <-schedulerDone:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
 	if sqlDB, derr := db.DB(); derr == nil {
 		sd.Add("postgres", func(_ context.Context) error { return sqlDB.Close() })
 	}

@@ -1193,7 +1193,7 @@ paths:
       responses: { '200': { description: OK } }
 
   /v1/admin/isolation-check:
-    get:
+    post:
       summary: Cross-tenant isolation invariants (Round-7 alias).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
       responses: { '200': { description: OK } }
