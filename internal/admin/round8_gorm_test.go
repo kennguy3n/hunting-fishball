@@ -45,6 +45,7 @@ const queryAnalyticsSQLiteDDL = `CREATE TABLE IF NOT EXISTS query_analytics (
 	backend_timings TEXT NOT NULL DEFAULT '{}',
 	experiment_name TEXT,
 	experiment_arm  TEXT,
+	source          TEXT NOT NULL DEFAULT 'user',
 	created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );`
 

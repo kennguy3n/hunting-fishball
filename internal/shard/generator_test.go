@@ -147,3 +147,50 @@ func TestGenerator_RejectsMissingTenant(t *testing.T) {
 		t.Fatal("expected missing-tenant error")
 	}
 }
+
+// TestGenerator_FiltersByChunkACL — Round-11 Task 8.
+//
+// Confirms that after the source-level ACL approves a chunk, the
+// per-chunk ACL on the policy snapshot still strips chunks whose
+// chunk_id is explicitly denied (or whose tags match a deny rule).
+func TestGenerator_FiltersByChunkACL(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	src := &fakeChunkSource{
+		chunks: []shard.ChunkScope{
+			{ChunkID: "c-keep", SourceID: "s1", URI: "drive/x.md", PrivacyLabel: "internal", Tags: []string{"general"}},
+			{ChunkID: "c-deny-by-id", SourceID: "s1", URI: "drive/y.md", PrivacyLabel: "internal", Tags: []string{"general"}},
+			{ChunkID: "c-deny-by-tag", SourceID: "s1", URI: "drive/z.md", PrivacyLabel: "internal", Tags: []string{"pii-ssn"}},
+		},
+	}
+
+	snap := policy.PolicySnapshot{
+		EffectiveMode: policy.PrivacyModeHybrid,
+		ChunkACL: policy.NewChunkACL([]policy.ChunkACLTag{
+			{ChunkID: "c-deny-by-id", Decision: policy.ChunkACLDecisionDeny},
+			{TagPrefix: "pii-", Decision: policy.ChunkACLDecisionDeny},
+		}),
+	}
+
+	gen, err := shard.NewGenerator(shard.GeneratorConfig{
+		Repo:   repo,
+		Chunks: src,
+		Policy: stubResolver{snap: snap},
+	})
+	if err != nil {
+		t.Fatalf("new generator: %v", err)
+	}
+
+	res, err := gen.Generate(context.Background(), shard.GenerateRequest{
+		TenantID:    "tenant-acl",
+		UserID:      "user-1",
+		ChannelID:   "channel-1",
+		PrivacyMode: "internal",
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if len(res.ChunkIDs) != 1 || res.ChunkIDs[0] != "c-keep" {
+		t.Fatalf("unexpected chunk set after ChunkACL: %v", res.ChunkIDs)
+	}
+}

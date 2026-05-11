@@ -130,3 +130,53 @@ func TestApiReadyz_AllUp_Returns200_AllSkipped(t *testing.T) {
 		t.Fatalf("ok: %v", got["ok"])
 	}
 }
+
+// TestApiReadyz_LatencyFieldsPresent — Round-11 Task 10.
+//
+// Asserts the response body now includes a `latencies` map with
+// numeric postgres_ms / redis_ms / qdrant_ms entries even when
+// optional backends are skipped. The exact value is timing-
+// dependent, but the keys must be present so operators can chart
+// p99 latency directly from the readyz envelope.
+func TestApiReadyz_LatencyFieldsPresent(t *testing.T) {
+	t.Parallel()
+
+	sqlDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	mock.ExpectPing()
+
+	gormDB := gormFromMock(t, sqlDB)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/readyz", apiReadyzHandler(gormDB, nil, nil))
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/readyz", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body: %s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	lat, ok := got["latencies"].(map[string]any)
+	if !ok {
+		t.Fatalf("latencies map missing: %v", got["latencies"])
+	}
+	for _, key := range []string{"postgres_ms", "redis_ms", "qdrant_ms"} {
+		val, present := lat[key]
+		if !present {
+			t.Fatalf("latencies[%q] missing", key)
+		}
+		// JSON numbers decode as float64.
+		if _, ok := val.(float64); !ok {
+			t.Fatalf("latencies[%q] not numeric: %T %v", key, val, val)
+		}
+	}
+}

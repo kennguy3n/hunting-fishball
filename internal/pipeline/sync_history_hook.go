@@ -49,10 +49,14 @@ func (c *Coordinator) recordSyncStart(ctx context.Context, evt IngestEvent) {
 	c.syncRunsMu.Unlock()
 
 	if hadPrev {
-		_ = c.cfg.SyncHistory.Finish(ctx, evt.TenantID, evt.SourceID, prev.runID,
-			SyncStatusSucceeded, int(prev.processed.Load()), int(prev.failed.Load()))
+		_ = runWithHookTimeout(ctx, "sync_history_finish", func(cctx context.Context) error {
+			return c.cfg.SyncHistory.Finish(cctx, evt.TenantID, evt.SourceID, prev.runID,
+				SyncStatusSucceeded, int(prev.processed.Load()), int(prev.failed.Load()))
+		})
 	}
-	_ = c.cfg.SyncHistory.Start(ctx, evt.TenantID, evt.SourceID, runID)
+	_ = runWithHookTimeout(ctx, "sync_history_start", func(cctx context.Context) error {
+		return c.cfg.SyncHistory.Start(cctx, evt.TenantID, evt.SourceID, runID)
+	})
 }
 
 // recordSyncOutcome bumps the per-run counter when a backfill
@@ -99,6 +103,8 @@ func (c *Coordinator) FinishBackfillRun(ctx context.Context, tenantID, sourceID 
 	if !ok {
 		return nil
 	}
-	return c.cfg.SyncHistory.Finish(ctx, tenantID, sourceID, state.runID, status,
-		int(state.processed.Load()), int(state.failed.Load()))
+	return runWithHookTimeout(ctx, "sync_history_finish", func(cctx context.Context) error {
+		return c.cfg.SyncHistory.Finish(cctx, tenantID, sourceID, state.runID, status,
+			int(state.processed.Load()), int(state.failed.Load()))
+	})
 }

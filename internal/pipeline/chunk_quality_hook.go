@@ -11,6 +11,8 @@ package pipeline
 
 import (
 	"context"
+
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // ChunkQualityReport is the package-neutral shape the coordinator
@@ -40,7 +42,15 @@ type ChunkQualityRecorder interface {
 // after embeddings are attached and before the Store.Store call.
 //
 // Returns the number of quality reports successfully written;
-// errors are swallowed (and would be logged in production wiring).
+// errors are observed via:
+//
+//   - observability.ChunkQualityErrorsTotal (cluster-wide counter)
+//   - observability.HookTimeoutsTotal{hook="chunk_quality_record"}
+//     when the per-call deadline fires.
+//
+// Both paths emit a structured slog.Warn with tenant_id, chunk_id,
+// and the error. Failures NEVER propagate back to the caller —
+// losing a score must not lose the chunk.
 func (c *Coordinator) scoreAndRecordBlocks(ctx context.Context, it stagedItem) int {
 	if c.cfg.ChunkScorer == nil || c.cfg.ChunkQuality == nil {
 		return 0
@@ -69,9 +79,14 @@ func (c *Coordinator) scoreAndRecordBlocks(ctx context.Context, it stagedItem) i
 			EmbedScore:   score.Embedding,
 			Duplicate:    score.Duplicate,
 		}
-		if err := c.cfg.ChunkQuality.Record(ctx, report); err == nil {
+		err := runWithHookTimeout(ctx, "chunk_quality_record", func(cctx context.Context) error {
+			return c.cfg.ChunkQuality.Record(cctx, report)
+		})
+		if err == nil {
 			written++
+			continue
 		}
+		observability.ObserveChunkQualityError(report.TenantID, report.ChunkID, err)
 	}
 	return written
 }

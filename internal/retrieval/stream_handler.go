@@ -81,16 +81,64 @@ func (h *StreamHandler) Register(rg *gin.RouterGroup) {
 }
 
 // StreamBackendEvent is the body of an `event: backend` SSE frame.
+//
+// Round-11 Task 7: when the caller sets `Explain: true` on the
+// /v1/retrieve/stream request, each backend event carries the
+// per-backend timing + a score breakdown for every match emitted
+// by that backend. The fields are omitted on non-explain requests
+// to keep the wire format minimal for the common case.
 type StreamBackendEvent struct {
 	Backend  string        `json:"backend"`
 	Matches  []*Match      `json:"matches"`
 	Error    string        `json:"error,omitempty"`
 	Duration time.Duration `json:"duration_ns,omitempty"`
+
+	// Explain is populated only when the originating
+	// RetrieveRequest had Explain=true. The shape mirrors the
+	// per-backend block on RetrieveResponse.Explain so clients
+	// can reuse the same renderer for both transports.
+	Explain *StreamExplainEvent `json:"explain,omitempty"`
+}
+
+// StreamExplainEvent is the per-event explain payload (Round-11
+// Task 7). DurationMS is duplicated from StreamBackendEvent.Duration
+// for the explain renderer's convenience; ScoreBreakdown lists the
+// raw score for each match keyed by chunk ID so the caller can
+// surface which backend contributed which signal.
+type StreamExplainEvent struct {
+	Backend        string             `json:"backend"`
+	DurationMS     int64              `json:"duration_ms"`
+	HitCount       int                `json:"hit_count"`
+	ScoreBreakdown []StreamExplainHit `json:"score_breakdown,omitempty"`
+	Error          string             `json:"error,omitempty"`
+}
+
+// StreamExplainHit is a single (chunk_id, score) entry on the
+// per-backend score breakdown.
+type StreamExplainHit struct {
+	ChunkID string  `json:"chunk_id"`
+	Score   float32 `json:"score"`
 }
 
 // StreamDoneEvent is the body of the terminal `event: done` frame.
+// Round-11 Task 7: when explain is true, the final event also
+// carries an aggregated per-backend timing map so the client can
+// reconstruct the same explain shape /v1/retrieve emits.
 type StreamDoneEvent struct {
 	Matches []*Match `json:"matches"`
+
+	// Explain is populated only when the originating
+	// RetrieveRequest had Explain=true.
+	Explain *StreamDoneExplain `json:"explain,omitempty"`
+}
+
+// StreamDoneExplain is the aggregate explain payload emitted in
+// the terminal frame (Round-11 Task 7). The per-backend timing
+// duplicates what each backend frame carried, but a client that
+// joins mid-stream can still get the full timing roll-up here.
+type StreamDoneExplain struct {
+	BackendDurationsMS map[string]int64 `json:"backend_durations_ms"`
+	BackendHitCounts   map[string]int   `json:"backend_hit_counts"`
 }
 
 func (h *StreamHandler) stream(c *gin.Context) {
@@ -120,8 +168,18 @@ func (h *StreamHandler) stream(c *gin.Context) {
 	ch := h.runBackends(c.Request.Context(), req)
 
 	per := map[string][]*Match{}
+	durations := map[string]int64{}
+	hitCounts := map[string]int{}
 	for evt := range ch {
 		per[evt.Backend] = evt.Matches
+		durations[evt.Backend] = evt.Duration.Milliseconds()
+		hitCounts[evt.Backend] = len(evt.Matches)
+		// Round-11 Task 7: thread per-event explain into the
+		// outbound SSE frame so explain-enabled clients can
+		// render score/timing without a separate request.
+		if req.Explain {
+			evt.Explain = buildStreamExplainEvent(evt)
+		}
 		writeSSE(c.Writer, "backend", evt)
 	}
 
@@ -130,7 +188,40 @@ func (h *StreamHandler) stream(c *gin.Context) {
 		writeSSE(c.Writer, "error", map[string]string{"error": err.Error()})
 		return
 	}
-	writeSSE(c.Writer, "done", StreamDoneEvent{Matches: merged})
+	done := StreamDoneEvent{Matches: merged}
+	if req.Explain {
+		done.Explain = &StreamDoneExplain{
+			BackendDurationsMS: durations,
+			BackendHitCounts:   hitCounts,
+		}
+	}
+	writeSSE(c.Writer, "done", done)
+}
+
+// buildStreamExplainEvent projects a backend frame into the
+// explain shape clients render. Empty error payloads are kept so
+// the renderer can show "vector: 12ms (failed: ...)" symmetrically
+// to non-error backends.
+func buildStreamExplainEvent(evt StreamBackendEvent) *StreamExplainEvent {
+	out := &StreamExplainEvent{
+		Backend:    evt.Backend,
+		DurationMS: evt.Duration.Milliseconds(),
+		HitCount:   len(evt.Matches),
+		Error:      evt.Error,
+	}
+	if len(evt.Matches) > 0 {
+		out.ScoreBreakdown = make([]StreamExplainHit, 0, len(evt.Matches))
+		for _, m := range evt.Matches {
+			if m == nil {
+				continue
+			}
+			out.ScoreBreakdown = append(out.ScoreBreakdown, StreamExplainHit{
+				ChunkID: m.ID,
+				Score:   m.Score,
+			})
+		}
+	}
+	return out
 }
 
 // runBackends fans the request out to every backend in parallel

@@ -196,3 +196,50 @@ func TestRound9_AdminCodes_RoundTripThroughMiddleware(t *testing.T) {
 		})
 	}
 }
+
+// TestCatalog_AllCodesUniqueAndValid — Round-11 Task 13.
+//
+// Asserts that every Code in DefaultCatalog has a valid HTTP
+// status (between 400 and 599 inclusive, the operator surface)
+// and that no two codes map to the same string literal. The
+// uniqueness side is the important one: a typo that duplicates
+// an existing code value silently overwrites an existing entry
+// and breaks the alert pipeline downstream.
+func TestCatalog_AllCodesUniqueAndValid(t *testing.T) {
+	t.Parallel()
+	seen := map[errcat.Code]struct{}{}
+	for code, entry := range errcat.DefaultCatalog {
+		if _, dup := seen[code]; dup {
+			t.Errorf("duplicate Code %q in DefaultCatalog", code)
+			continue
+		}
+		seen[code] = struct{}{}
+		if code == "" {
+			t.Errorf("empty Code value")
+		}
+		if entry.HTTPStatus < 400 || entry.HTTPStatus > 599 {
+			t.Errorf("code %s: invalid HTTP status %d (must be 4xx or 5xx)", code, entry.HTTPStatus)
+		}
+		if entry.Message == "" {
+			t.Errorf("code %s: empty Message", code)
+		}
+	}
+	// Spot-check the Round-11 additions exist so a refactor
+	// can't silently drop them.
+	for _, code := range []errcat.Code{
+		errcat.CodeMissingTenant,
+		errcat.CodeInvalidRequestBody,
+		errcat.CodeChunkQualityFailed,
+		errcat.CodePolicyHistoryFailed,
+		errcat.CodeABTestResultsFailed,
+		errcat.CodeDashboardListFailed,
+		errcat.CodeSimulatorPersistFail,
+		errcat.CodeSimulatorEvalFail,
+		errcat.CodeSimulatorDraftMissing,
+		errcat.CodeSyncStreamFailed,
+	} {
+		if _, ok := errcat.DefaultCatalog[code]; !ok {
+			t.Errorf("required Round-11 code missing from catalog: %s", code)
+		}
+	}
+}

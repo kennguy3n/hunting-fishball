@@ -294,6 +294,14 @@ type RetrieveRequest struct {
 	// applies either the control or the variant retrieval config.
 	ExperimentName      string `json:"experiment_name,omitempty"`
 	ExperimentBucketKey string `json:"experiment_bucket_key,omitempty"`
+
+	// Source tags the call site for the query analytics recorder
+	// (Round-11 Task 9). Set internally by the various entry
+	// points (the gin /v1/retrieve handler defaults to "user",
+	// /v1/retrieve/batch sets "batch", cache-warm jobs set
+	// "cache_warm"). NOT user-settable over the wire — the json
+	// tag is "-" so any field on the inbound payload is ignored.
+	Source string `json:"-"`
 }
 
 // RetrieveHit is one entry in the response.
@@ -477,7 +485,11 @@ func (h *Handler) retrieve(c *gin.Context) {
 	// context with that timeout and substitute it on c.Request so
 	// every downstream c.Request.Context() call inherits it.
 	if h.cfg.LatencyBudget != nil {
-		if budget, ok := h.cfg.LatencyBudget(c.Request.Context(), tenantID); ok && budget > 0 {
+		// Round-11 Task 18: degrade gracefully if the per-tenant
+		// budget lookup is slow/unreachable. safeLatencyBudgetLookup
+		// returns ok=false on timeout/panic so the request keeps
+		// its caller-supplied deadline.
+		if budget, ok := safeLatencyBudgetLookup(c.Request.Context(), h.cfg.LatencyBudget, tenantID); ok && budget > 0 {
 			ctx, cancel := context.WithTimeout(c.Request.Context(), budget)
 			defer cancel()
 			c.Request = c.Request.WithContext(ctx)
@@ -526,7 +538,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
 			h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
-			h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, true, reqStart, nil, route)
+			h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, true, reqStart, nil, route, req.Source)
 			c.JSON(http.StatusOK, resp)
 
 			return
@@ -611,7 +623,8 @@ func (h *Handler) retrieve(c *gin.Context) {
 	// configured slots in the response and are written into the
 	// semantic cache alongside the dynamic hits.
 	if h.cfg.PinLookup != nil {
-		pinHits := h.cfg.PinLookup(c.Request.Context(), tenantID, req.Query)
+		// Round-11 Task 18: safe lookup returns nil on timeout/panic.
+		pinHits := safePinLookup(c.Request.Context(), h.cfg.PinLookup, tenantID, req.Query)
 		if len(pinHits) > 0 {
 			pins := make([]Pin, 0, len(pinHits))
 			for _, p := range pinHits {
@@ -636,13 +649,15 @@ func (h *Handler) retrieve(c *gin.Context) {
 	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
 		ttl := h.cfg.CacheTTL
 		if h.cfg.CacheTTLLookup != nil {
-			ttl = h.cfg.CacheTTLLookup(c.Request.Context(), tenantID, ttl)
+			// Round-11 Task 18: safe lookup falls back to the previous
+			// TTL value on timeout/panic.
+			ttl = safeCacheTTLLookup(c.Request.Context(), h.cfg.CacheTTLLookup, tenantID, ttl)
 		}
 		h.writeCacheOnMiss(c.Request.Context(), tenantID, channelID, vec, scopeHash, resp, ttl)
 	}
 
 	h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
-	h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, false, reqStart, backendTimingsMillis(backendTimings), route)
+	h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, false, reqStart, backendTimingsMillis(backendTimings), route, req.Source)
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -817,7 +832,9 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
 		ttl := h.cfg.CacheTTL
 		if h.cfg.CacheTTLLookup != nil {
-			ttl = h.cfg.CacheTTLLookup(ctx, tenantID, ttl)
+			// Round-11 Task 18: safe lookup falls back to the previous
+			// TTL value on timeout/panic.
+			ttl = safeCacheTTLLookup(ctx, h.cfg.CacheTTLLookup, tenantID, ttl)
 		}
 		h.writeCacheOnMiss(ctx, tenantID, channelID, vec, scopeHash, resp, ttl)
 	}
