@@ -76,10 +76,13 @@ type stubAutoReplayStore struct {
 	rows []pipeline.DLQMessage
 }
 
-func (s *stubAutoReplayStore) ListAutoReplayable(_ context.Context, now time.Time, limit int) ([]pipeline.DLQMessage, error) {
+func (s *stubAutoReplayStore) ListAutoReplayable(_ context.Context, now time.Time, limit, maxAutoRetries int) ([]pipeline.DLQMessage, error) {
+	if maxAutoRetries <= 0 {
+		maxAutoRetries = pipeline.DefaultAutoReplayMaxRetries
+	}
 	out := make([]pipeline.DLQMessage, 0, len(s.rows))
 	for _, r := range s.rows {
-		if r.ReplayedAt == nil && r.AttemptCount < 5 {
+		if r.ReplayedAt == nil && r.AttemptCount < maxAutoRetries {
 			out = append(out, r)
 			if len(out) >= limit {
 				break

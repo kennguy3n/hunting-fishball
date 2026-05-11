@@ -71,8 +71,14 @@ func BackoffFor(n int) (time.Duration, bool) {
 // don't reuse DLQListFilter.TenantID because the worker scans every
 // tenant in one pass — DLQ replay is an operator-level recovery
 // path, not a tenant-facing API.
+//
+// ListAutoReplayable takes the operator-configured retry budget so
+// the SQL `WHERE attempt_count < ?` filter matches the worker's
+// in-memory cfg.MaxAutoRetries. Hardcoding the constant here would
+// silently drop rows whenever an operator raises the budget above
+// DefaultAutoReplayMaxRetries.
 type AutoReplayStore interface {
-	ListAutoReplayable(ctx context.Context, now time.Time, limit int) ([]DLQMessage, error)
+	ListAutoReplayable(ctx context.Context, now time.Time, limit, maxAutoRetries int) ([]DLQMessage, error)
 	Get(ctx context.Context, tenantID, id string) (*DLQMessage, error)
 }
 
@@ -133,6 +139,19 @@ func NewDLQAutoReplayer(cfg DLQAutoReplayConfig) (*DLQAutoReplayer, error) {
 	if cfg.MaxAutoRetries <= 0 {
 		cfg.MaxAutoRetries = DefaultAutoReplayMaxRetries
 	}
+	// The in-memory schedule (AutoReplayBackoff) is the source of
+	// truth for per-attempt delays. If an operator raises the
+	// budget past the schedule length, rows beyond the schedule
+	// would be picked up by the SQL filter and then silently
+	// dropped by BackoffFor's `n >= len(AutoReplayBackoff)`
+	// branch. Clamp + warn so the two stay consistent.
+	if n := len(AutoReplayBackoff); cfg.MaxAutoRetries > n {
+		cfg.Logger.Warn("dlq auto-replay: MaxAutoRetries clamped to backoff schedule length",
+			slog.Int("requested", cfg.MaxAutoRetries),
+			slog.Int("clamped", n),
+		)
+		cfg.MaxAutoRetries = n
+	}
 	if cfg.Now == nil {
 		cfg.Now = func() time.Time { return time.Now().UTC() }
 	}
@@ -163,7 +182,7 @@ func (w *DLQAutoReplayer) Run(ctx context.Context) error {
 // Tick runs one scan + replay pass. Exposed for tests.
 func (w *DLQAutoReplayer) Tick(ctx context.Context) error {
 	now := w.cfg.Now()
-	rows, err := w.cfg.Store.ListAutoReplayable(ctx, now, w.cfg.BatchSize)
+	rows, err := w.cfg.Store.ListAutoReplayable(ctx, now, w.cfg.BatchSize, w.cfg.MaxAutoRetries)
 	if err != nil {
 		return err
 	}
@@ -202,9 +221,16 @@ func (w *DLQAutoReplayer) Tick(ctx context.Context) error {
 // ListAutoReplayable is the gorm-backed read for the worker. It is
 // a method on DLQStoreGORM so the worker can keep its narrow
 // AutoReplayStore interface clean of tenant filtering.
-func (s *DLQStoreGORM) ListAutoReplayable(ctx context.Context, now time.Time, limit int) ([]DLQMessage, error) {
+//
+// maxAutoRetries is plumbed through from DLQAutoReplayConfig so
+// raising the budget at the worker is honoured by the SQL filter
+// rather than being clamped to DefaultAutoReplayMaxRetries.
+func (s *DLQStoreGORM) ListAutoReplayable(ctx context.Context, now time.Time, limit, maxAutoRetries int) ([]DLQMessage, error) {
 	if limit <= 0 {
 		limit = 100
+	}
+	if maxAutoRetries <= 0 {
+		maxAutoRetries = DefaultAutoReplayMaxRetries
 	}
 	// The SQL filter is a coarse pre-cut — it picks up every row
 	// whose attempt_count is still in budget and whose failure
@@ -215,7 +241,7 @@ func (s *DLQStoreGORM) ListAutoReplayable(ctx context.Context, now time.Time, li
 	var rows []DLQMessage
 	q := s.db.WithContext(ctx).
 		Where("replayed_at IS NULL").
-		Where("attempt_count < ?", DefaultAutoReplayMaxRetries).
+		Where("attempt_count < ?", maxAutoRetries).
 		Where("failed_at <= ?", cutoff).
 		Order("failed_at ASC").
 		Limit(limit)

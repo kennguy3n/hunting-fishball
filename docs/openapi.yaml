@@ -427,20 +427,28 @@ components:
         accepted:  { type: boolean }
     BulkSourceRequest:
       type: object
-      required: [operation, source_ids]
+      required: [action, source_ids]
       properties:
-        operation: { type: string, enum: [connect, purge, reindex] }
+        action: { type: string, enum: [pause, resume, disconnect] }
         source_ids:
           type: array
           items: { type: string }
+    BulkSourceResult:
+      type: object
+      properties:
+        source_id: { type: string }
+        ok:        { type: boolean }
+        error:     { type: string }
     BulkSourceResponse:
       type: object
       properties:
-        accepted_count: { type: integer }
-        rejected_count: { type: integer }
-        details:
+        action:  { type: string, enum: [pause, resume, disconnect] }
+        total:   { type: integer }
+        ok:      { type: integer }
+        failed:  { type: integer }
+        results:
           type: array
-          items: { type: object, additionalProperties: true }
+          items: { $ref: '#/components/schemas/BulkSourceResult' }
     SourceBucket:
       type: object
       properties:
@@ -1310,13 +1318,13 @@ paths:
         '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/WarmCacheResponse' } } } }
   /v1/admin/sources/bulk:
     post:
-      summary: Bulk source operations (connect / purge / reindex).
+      summary: Bulk source operations (pause / resume / disconnect).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/BulkSourceRequest' } } }
       responses:
-        '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/BulkSourceResponse' } } } }
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BulkSourceResponse' } } } }
   /v1/admin/latency-budget:
     get:
       summary: Get the per-tenant retrieval latency budget.
