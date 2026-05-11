@@ -159,7 +159,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("notification dispatcher: %w", err)
 	}
-	notifDeliveryLog := admin.NewInMemoryNotificationDeliveryLog()
+	notifDeliveryLog := admin.NewNotificationDeliveryLogGORM(db)
+	if err := notifDeliveryLog.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("notif_delivery_log migrate: %w", err)
+	}
 	notifDispatcher.SetDeliveryLog(notifDeliveryLog)
 	notifyingAudit := &admin.NotifyingAuditWriter{Inner: auditRepo, Dispatcher: notifDispatcher, Async: true}
 
@@ -570,7 +573,14 @@ func run() error {
 	// to, otherwise GET /v1/admin/retrieval/experiments/:name/results
 	// always returns zero arms. Hoist the store construction here so
 	// the aggregator and the recorder share one instance.
-	queryAnalyticsStore := admin.NewInMemoryQueryAnalyticsStore()
+	//
+	// Round-8 Task 6: GORM-backed. The store auto-migrates so the
+	// query_analytics table is created even if the SQL migration
+	// hasn't been replayed against the target database.
+	queryAnalyticsStore := admin.NewQueryAnalyticsStoreGORM(db)
+	if err := queryAnalyticsStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("query_analytics migrate: %w", err)
+	}
 
 	if abtestResults, aerr := admin.NewABTestResultsAggregator(queryAnalyticsStore); aerr == nil {
 		if arHandler, herr := admin.NewABTestResultsHandler(abtestResults); herr == nil {
@@ -621,8 +631,15 @@ func run() error {
 		qaHandler.Register(api)
 	}
 
-	// Round-7 Task 7: credential health worker + endpoint.
-	credHealth := admin.NewInMemoryCredentialHealthStore()
+	// Round-7 Task 7 / Round-8 Task 11: credential health worker +
+	// endpoint. The GORM-backed store reads the credential_* columns
+	// migrations/026_credential_valid.sql adds to source_health, so
+	// the periodic worker in cmd/ingest and the read endpoint here
+	// share one row per source.
+	credHealth, err := admin.NewCredentialHealthGORM(db)
+	if err != nil {
+		return fmt.Errorf("credential_health: %w", err)
+	}
 	if chHandler, cerr := admin.NewCredentialHealthHandler(credHealth); cerr == nil {
 		chHandler.Register(api)
 	}
@@ -662,10 +679,28 @@ func run() error {
 		bulkHandler.Register(api)
 	}
 
-	// Round-7 Task 11: per-tenant latency budget.
-	if lbHandler, lerr := admin.NewLatencyBudgetHandler(admin.NewInMemoryLatencyBudgetStore(), notifyingAudit); lerr == nil {
+	// Round-7 Task 11 / Round-8 Task 9: per-tenant latency budget.
+	latencyBudgetStore, err := admin.NewLatencyBudgetGORM(db)
+	if err != nil {
+		return fmt.Errorf("latency_budget: %w", err)
+	}
+	if err := db.AutoMigrate(&admin.LatencyBudget{}); err != nil {
+		return fmt.Errorf("latency_budget migrate: %w", err)
+	}
+	if lbHandler, lerr := admin.NewLatencyBudgetHandler(latencyBudgetStore, notifyingAudit); lerr == nil {
 		lbHandler.Register(api)
 	}
+	// Round-8 Task 9: the retrieval handler consults the per-tenant
+	// latency budget on every request through the LatencyBudgetLookup
+	// hook, which mirrors the SetQueryAnalyticsRecorder pattern so the
+	// admin → retrieval import stays one-way.
+	retrievalHandler.SetLatencyBudgetLookup(func(ctx context.Context, tenantID string) (time.Duration, bool) {
+		b, err := latencyBudgetStore.Get(ctx, tenantID)
+		if err != nil || b == nil || b.MaxLatencyMS <= 0 {
+			return 0, false
+		}
+		return time.Duration(b.MaxLatencyMS) * time.Millisecond, true
+	})
 
 	// Round-7 Task 12: chunk quality report.
 	if cqHandler, cerr := admin.NewChunkQualityHandler(admin.NewInMemoryChunkQualityStore()); cerr == nil {
@@ -677,20 +712,57 @@ func run() error {
 		aeHandler.Register(api)
 	}
 
-	// Round-7 Task 15: per-tenant cache TTL.
-	if ccHandler, cerr := admin.NewCacheConfigHandler(admin.NewInMemoryCacheTTLStore(), notifyingAudit); cerr == nil {
+	// Round-7 Task 15 / Round-8 Task 10: per-tenant cache TTL.
+	cacheTTLStore, err := admin.NewCacheTTLGORM(db)
+	if err != nil {
+		return fmt.Errorf("cache_ttl: %w", err)
+	}
+	if err := db.AutoMigrate(&admin.CacheConfig{}); err != nil {
+		return fmt.Errorf("cache_config migrate: %w", err)
+	}
+	if ccHandler, cerr := admin.NewCacheConfigHandler(cacheTTLStore, notifyingAudit); cerr == nil {
 		ccHandler.Register(api)
 	}
+	retrievalHandler.SetCacheTTLLookup(func(ctx context.Context, tenantID string, fallback time.Duration) time.Duration {
+		return cacheTTLStore.TTLFor(ctx, tenantID, fallback)
+	})
 
-	// Round-7 Task 16: sync history.
-	if shHandler, serr := admin.NewSyncHistoryHandler(admin.NewInMemorySyncHistoryRecorder()); serr == nil {
+	// Round-7 Task 16 / Round-8 Task 8: sync history.
+	syncHistoryStore, err := admin.NewSyncHistoryGORM(db)
+	if err != nil {
+		return fmt.Errorf("sync_history: %w", err)
+	}
+	if err := db.AutoMigrate(&admin.SyncHistoryRow{}); err != nil {
+		return fmt.Errorf("sync_history migrate: %w", err)
+	}
+	if shHandler, serr := admin.NewSyncHistoryHandler(syncHistoryStore); serr == nil {
 		shHandler.Register(api)
 	}
 
-	// Round-7 Task 17: pinned retrieval results.
-	if prHandler, perr := admin.NewPinnedResultsHandler(admin.NewInMemoryPinnedResultStore(nil), notifyingAudit); perr == nil {
+	// Round-7 Task 17 / Round-8 Task 7: pinned retrieval results.
+	pinnedStore, err := admin.NewPinnedResultStoreGORM(db)
+	if err != nil {
+		return fmt.Errorf("pinned_results: %w", err)
+	}
+	if err := pinnedStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("pinned_results migrate: %w", err)
+	}
+	if prHandler, perr := admin.NewPinnedResultsHandler(pinnedStore, notifyingAudit); perr == nil {
 		prHandler.Register(api)
 	}
+	// Round-8 Task 16: pin lookup hook so retrieval can call into
+	// the GORM-backed store after policy filtering and before MMR.
+	retrievalHandler.SetPinLookup(func(ctx context.Context, tenantID, query string) []retrieval.PinnedHit {
+		rows, err := pinnedStore.Lookup(ctx, tenantID, query)
+		if err != nil || len(rows) == 0 {
+			return nil
+		}
+		out := make([]retrieval.PinnedHit, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, retrieval.PinnedHit{ChunkID: r.ChunkID, Position: r.Position})
+		}
+		return out
+	})
 
 	// Round-7 Task 18: pipeline health dashboard.
 	if phAgg, perr := admin.NewPipelineHealthAggregator(observability.Registry); perr == nil {

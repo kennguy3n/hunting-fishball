@@ -326,6 +326,45 @@ func run() error {
 		}
 	}()
 
+	// Round-8 Task 11: periodic credential health worker. Runs
+	// connector.Validate() for every active source on a
+	// configurable interval (env: CONTEXT_ENGINE_CREDENTIAL_HEALTH_INTERVAL,
+	// default 1h) and writes the outcome through CredentialHealthGORM
+	// so the admin endpoint surfaces persisted state across restarts.
+	sourceRepoForCredHealth := admin.NewSourceRepository(db)
+	credHealthStore, err := admin.NewCredentialHealthGORM(db)
+	if err != nil {
+		return fmt.Errorf("credential_health: %w", err)
+	}
+	credHealthWorker, err := admin.NewCredentialHealthWorker(admin.CredentialHealthConfig{
+		Lister:    sourceRepoForCredHealth,
+		Validator: admin.NewRegistryValidator(),
+		Health:    credHealthStore,
+		Audit:     auditRepo,
+	})
+	if err != nil {
+		return fmt.Errorf("credential_health worker: %w", err)
+	}
+	credHealthInterval := admin.CredentialHealthInterval
+	if v := os.Getenv("CONTEXT_ENGINE_CREDENTIAL_HEALTH_INTERVAL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			credHealthInterval = d
+		}
+	}
+	go func() {
+		credHealthWorker.Tick(ctx) // run once at startup
+		t := time.NewTicker(credHealthInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				credHealthWorker.Tick(ctx)
+			}
+		}
+	}()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
