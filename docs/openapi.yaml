@@ -1743,3 +1743,108 @@ paths:
           required: true
           schema: { type: string }
       responses: { '200': { description: OK } }
+
+  /v1/admin/health/summary:
+    get:
+      summary: Aggregated health check (Postgres, Redis, Qdrant, Kafka, gRPC sidecars).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verdict: { type: string, enum: [healthy, degraded, unhealthy] }
+                  components:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:       { type: string }
+                        status:     { type: string }
+                        latency_ms: { type: integer }
+                        error:      { type: string }
+
+  /v1/admin/analytics/queries/slow:
+    get:
+      summary: List recent slow retrieval queries (Round-13 Task 8).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+
+  /v1/admin/analytics/cache-stats:
+    get:
+      summary: Per-tenant semantic cache hit/miss + hit_rate over a window.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: query
+          name: window_minutes
+          schema: { type: integer, default: 60 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id:      { type: string }
+                  hits:           { type: integer }
+                  misses:         { type: integer }
+                  hit_rate_pct:   { type: number }
+                  miss_rate_pct:  { type: number }
+                  window_minutes: { type: integer }
+
+  /v1/admin/tenants/{tenant_id}/rotate-api-key:
+    post:
+      summary: Rotate the API key for a tenant; old key valid during grace period.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: tenant_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: New key returned exactly once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [api_key, grace_until]
+                properties:
+                  api_key:     { type: string }
+                  grace_until: { type: string, format: date-time }
+
+  /v1/admin/audit/integrity:
+    get:
+      summary: SHA-256 hash-chain head over recent audit rows.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 1000 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id:      { type: string }
+                  entry_count:    { type: integer }
+                  head_hash:      { type: string }
+                  first_entry_id: { type: string }
+                  last_entry_id:  { type: string }
+                  algorithm:      { type: string }
