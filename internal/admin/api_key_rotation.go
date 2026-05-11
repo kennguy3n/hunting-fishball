@@ -63,9 +63,17 @@ type APIKeyRow struct {
 func (APIKeyRow) TableName() string { return "api_keys" }
 
 // APIKeyStore is the persistence port.
+//
+// Rotate atomically moves every active row for the tenant to
+// `grace` and inserts the supplied new active row in a single
+// transaction. Callers should prefer Rotate over chained
+// MoveActiveToGrace + Insert: if the insert fails after the
+// grace flip commits, the tenant loses all active keys with no
+// replacement.
 type APIKeyStore interface {
 	Insert(ctx context.Context, row *APIKeyRow) error
 	MoveActiveToGrace(ctx context.Context, tenantID string, graceUntil time.Time) error
+	Rotate(ctx context.Context, tenantID string, graceUntil time.Time, newRow *APIKeyRow) error
 }
 
 // APIKeyStoreGORM is the Postgres-backed store.
@@ -105,6 +113,32 @@ func (s *APIKeyStoreGORM) MoveActiveToGrace(ctx context.Context, tenantID string
 			"deactivated_at": &now,
 			"grace_until":    &graceUntil,
 		}).Error
+}
+
+// Rotate runs MoveActiveToGrace + Insert in a single transaction
+// so a tenant never observes a window with zero active keys (or,
+// worse, every key flipped to `grace` with no replacement) when
+// the insert leg fails.
+func (s *APIKeyStoreGORM) Rotate(ctx context.Context, tenantID string, graceUntil time.Time, newRow *APIKeyRow) error {
+	if tenantID == "" {
+		return errors.New("api_keys: missing tenant_id")
+	}
+	if newRow == nil || newRow.TenantID == "" || newRow.KeyHash == "" {
+		return errors.New("api_keys: missing tenant_id or key_hash on new row")
+	}
+	now := time.Now().UTC()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&APIKeyRow{}).
+			Where("tenant_id = ? AND status = ?", tenantID, string(APIKeyStatusActive)).
+			Updates(map[string]any{
+				"status":         string(APIKeyStatusGrace),
+				"deactivated_at": &now,
+				"grace_until":    &graceUntil,
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Create(newRow).Error
+	})
 }
 
 // APIKeyRotationHandler serves the rotation endpoint.
@@ -185,10 +219,6 @@ func (h *APIKeyRotationHandler) rotate(c *gin.Context) {
 	ctx := c.Request.Context()
 	now := h.now()
 	grace := now.Add(APIKeyGracePeriod())
-	if err := h.store.MoveActiveToGrace(ctx, tenantID, grace); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "deactivate previous key"})
-		return
-	}
 	raw, err := generateAPIKey()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "generate key"})
@@ -201,8 +231,8 @@ func (h *APIKeyRotationHandler) rotate(c *gin.Context) {
 		Status:    string(APIKeyStatusActive),
 		CreatedAt: now,
 	}
-	if err := h.store.Insert(ctx, row); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "insert key"})
+	if err := h.store.Rotate(ctx, tenantID, grace, row); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "rotate key"})
 		return
 	}
 	if h.audit != nil {

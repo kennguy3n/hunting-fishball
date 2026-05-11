@@ -466,8 +466,8 @@ ships, the matrix is empty. Each row records:
   - **Task 4**: `cmd/ingest/main.go` runs a `DLQAgeMonitor`
     goroutine that publishes
     `context_engine_dlq_oldest_message_age_seconds`. New
-    `DLQAgeHigh` alert in `deploy/alerts.yaml` (severity `page`,
-    fires when oldest > 1 h). Tests in
+    `DLQAgeHigh` alert in `deploy/alerts.yaml` (severity
+    `warning`, fires when oldest > 1 h). Tests in
     `internal/pipeline/dlq_age_monitor_test.go`.
   - **Task 5**: `internal/pipeline/stage_breaker.go` adds
     per-stage circuit breakers; consecutive failures on Parse /
