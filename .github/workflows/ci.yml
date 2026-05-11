@@ -170,13 +170,18 @@ jobs:
         run: |
           set -e
           fail=0
-          for r in "${{ needs.fast-go.result }}" "${{ needs.fast-eval.result }}" "${{ needs.fast-python.result }}"; do
+          for r in \
+            "${{ needs.fast-go.result }}" \
+            "${{ needs.fast-eval.result }}" \
+            "${{ needs.fast-alerts.result }}" \
+            "${{ needs.fast-rollback-parity.result }}" \
+            "${{ needs.fast-python.result }}"; do
             if [ "$r" != "success" ]; then
               fail=1
             fi
           done
           if [ "$fail" = "1" ]; then
-            echo "::error::fast-go=${{ needs.fast-go.result }} fast-eval=${{ needs.fast-eval.result }} fast-python=${{ needs.fast-python.result }}"
+            echo "::error::fast-go=${{ needs.fast-go.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-python=${{ needs.fast-python.result }}"
             exit 1
           fi
           echo "fast lane green"

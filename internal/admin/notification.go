@@ -379,13 +379,20 @@ func (d *NotificationDispatcher) Dispatch(ctx context.Context, tenantID, eventTy
 }
 
 // isRetryableResponseCode returns true for 5xx / transport
-// failures (StatusCode == 0). 4xx are treated as permanent
-// failures; the retry worker leaves them alone.
+// failures (StatusCode == 0) and for HTTP 429 (Too Many Requests).
+// Other 4xx codes are treated as permanent failures; the retry
+// worker leaves them alone.
+//
+// 429 is intentionally retryable here so it stays consistent with
+// WebhookDelivery.Send, which also exempts 429 from its
+// short-circuit-on-4xx branch. Without this, a webhook that 429s
+// for longer than the inner retry window would be dropped instead
+// of being scheduled for a later worker retry.
 func isRetryableResponseCode(code int) bool {
 	if code == 0 {
 		return true
 	}
-	return code >= 500
+	return code >= 500 || code == http.StatusTooManyRequests
 }
 
 // NotificationHandler is the admin HTTP surface.
