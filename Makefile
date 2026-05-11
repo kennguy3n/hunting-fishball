@@ -131,8 +131,12 @@ eval:
 
 .PHONY: fuzz
 fuzz:
-	$(GO) test -run=^$ -fuzz=. -fuzztime=30s ./internal/retrieval/...
-	$(GO) test -run=^$ -fuzz=. -fuzztime=30s ./internal/admin/...
+	$(GO) test -run='^$$' -fuzz='^FuzzRetrieveRequestDecode$$' -fuzztime=30s ./internal/retrieval/
+	$(GO) test -run='^$$' -fuzz='^FuzzACLEvaluate$$' -fuzztime=30s ./internal/retrieval/
+	$(GO) test -run='^$$' -fuzz='^FuzzPrivacyModeAllowed$$' -fuzztime=30s ./internal/retrieval/
+	$(GO) test -run='^$$' -fuzz='^FuzzABTestConfigDecode$$' -fuzztime=30s ./internal/admin/
+	$(GO) test -run='^$$' -fuzz='^FuzzConnectorTemplateDecode$$' -fuzztime=30s ./internal/admin/
+	$(GO) test -run='^$$' -fuzz='^FuzzNotificationPreferenceDecode$$' -fuzztime=30s ./internal/admin/
 
 .PHONY: migrate-rollback
 migrate-rollback:
