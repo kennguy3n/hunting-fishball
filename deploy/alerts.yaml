@@ -173,3 +173,81 @@ spec:
               source's Health page for the most recent failure
               reason and rotate credentials if relevant.
             runbook_url: "https://docs/RUNBOOKS.md#source-unhealthy"
+
+    # -------------------------------------------------------------
+    # Round-11 Task 11: chunk quality / cache / credentials / GORM
+    # -------------------------------------------------------------
+    - name: context-engine.round11
+      interval: 30s
+      rules:
+        - alert: ChunkQualityScoreDropped
+          # Avg score drops below 0.5 over 15 minutes — connector or
+          # chunker regression. The gauge is the cluster-wide rolling
+          # average emitted by scoreAndRecordBlocks.
+          expr: avg_over_time(context_engine_chunk_quality_score_avg[15m]) < 0.5
+          for: 15m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Average chunk quality score < 0.5 over 15m"
+            description: |
+              The cluster-wide average chunk quality score has been
+              under 0.5 for 15 minutes. Inspect recent connector
+              changes and the ChunkScorer thresholds; a regression
+              here directly degrades retrieval relevance.
+            runbook_url: "https://docs/RUNBOOKS.md#chunk-quality-dropped"
+
+        - alert: CacheHitRateLow
+          # Retrieval cache hit rate falls below 30% — either a
+          # configuration regression, a sudden workload shift, or a
+          # cache backend outage. The gauge tracks the live ratio.
+          expr: avg_over_time(context_engine_cache_hit_rate[15m]) < 0.3
+          for: 15m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Retrieval cache hit rate < 0.3 over 15m"
+            description: |
+              Cache hit rate has been below 30% for 15 minutes.
+              Investigate Redis health and the cache TTL config; a
+              sustained low hit rate inflates p95 latency by 3-5x.
+            runbook_url: "https://docs/RUNBOOKS.md#cache-hit-rate-low"
+
+        - alert: CredentialHealthDegraded
+          # Some source has credential_valid=false for >1h. The
+          # gauge counts how many sources are currently invalid;
+          # any value >0 sustained for an hour pages.
+          expr: context_engine_credential_invalid_sources > 0
+          for: 1h
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "One or more sources have credential_valid=false for >1h"
+            description: |
+              The credential health worker has flagged at least one
+              source as invalid for more than an hour. Inspect the
+              Credential Health page (admin portal) and rotate the
+              affected secret.
+            runbook_url: "https://docs/RUNBOOKS.md#credential-health-degraded"
+
+        - alert: GORMStoreLatencyHigh
+          # GORM query p95 exceeds 200ms over 5 minutes. The
+          # retrieval handler degrades gracefully on lookup errors
+          # but high latency without errors still blows the request
+          # budget.
+          expr: histogram_quantile(0.95, sum by (le, store) (rate(context_engine_gorm_query_duration_seconds_bucket[5m]))) > 0.2
+          for: 5m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "GORM store p95 latency > 200ms over 5m"
+            description: |
+              GORM-backed admin store {{ $labels.store }} p95 latency
+              is over 200ms. Inspect Postgres connection pool and
+              query plans; the retrieval handler will start falling
+              back to defaults if errors follow.
+            runbook_url: "https://docs/RUNBOOKS.md#gorm-store-latency-high"

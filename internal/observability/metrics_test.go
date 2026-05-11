@@ -3,6 +3,7 @@ package observability_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -82,4 +83,62 @@ func excerpt(body, needle string) string {
 		end = len(body)
 	}
 	return body[start:end]
+}
+
+// TestMetrics_NoTenantIDLabel — Round-11 Task 12.
+//
+// Grep-style assertion against the metrics.go source: no
+// Prometheus metric registration may list "tenant_id" as a
+// label. Tenant_id is unbounded (each new tenant is a new
+// label value) so it must live in structured logs only — the
+// cardinality policy is documented at the top of metrics.go.
+//
+// The test scans the actual source file rather than the live
+// Registry because Prometheus does not expose label names off
+// a generic Collector.
+func TestMetrics_NoTenantIDLabel(t *testing.T) {
+	t.Parallel()
+	const path = "metrics.go"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	src := string(data)
+	// Look for any []string{...} or single-quoted "tenant_id"
+	// adjacent to a NewCounter*/NewGauge*/NewHistogram*/NewSummary*
+	// constructor. Cheap approximation: any line containing
+	// "\"tenant_id\"" must be inside a comment.
+	for i, line := range splitLines(src) {
+		if !strings.Contains(line, "\"tenant_id\"") {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		// Allow slog.Warn(..., "tenant_id", ...) — that's a log
+		// field, not a Prometheus label. The cheap check is that
+		// `slog.Warn` or `Logger` appears on the same line.
+		if strings.Contains(line, "slog.") || strings.Contains(line, "Logger") {
+			continue
+		}
+		t.Fatalf("metrics.go:%d uses tenant_id outside slog/comment, which violates the cardinality policy:\n\t%s", i+1, trimmed)
+	}
+}
+
+func splitLines(s string) []string {
+	out := []string{}
+	cur := strings.Builder{}
+	for _, r := range s {
+		if r == '\n' {
+			out = append(out, cur.String())
+			cur.Reset()
+			continue
+		}
+		cur.WriteRune(r)
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
 }

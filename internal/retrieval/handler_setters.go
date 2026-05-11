@@ -41,7 +41,21 @@ type QueryAnalyticsEvent struct {
 	BackendTimings map[string]int64
 	ExperimentName string
 	ExperimentArm  string
+	// Source tags the call site (Round-11 Task 9). One of
+	// QueryAnalyticsSource{User, CacheWarm, Batch}. Empty defaults
+	// to "user" downstream.
+	Source string
 }
+
+// Source enum mirrored from internal/admin so callers can pass
+// constants without importing the admin package (which would form
+// a cycle: retrieval -> admin -> retrieval). Values are pinned
+// here and asserted equal via TestQueryAnalyticsSourceConstants.
+const (
+	QueryAnalyticsSourceUser      = "user"
+	QueryAnalyticsSourceCacheWarm = "cache_warm"
+	QueryAnalyticsSourceBatch     = "batch"
+)
 
 // SetABTestRouter swaps in (or replaces) the ABTestRouter the
 // retrieval handler consults on each request. Pass a nil router
@@ -124,9 +138,13 @@ func (h *Handler) recordQueryAnalytics(
 	start time.Time,
 	backendTimings map[string]int64,
 	route *ABTestRouteResult,
+	source string,
 ) {
 	if h.cfg.QueryAnalytics == nil {
 		return
+	}
+	if source == "" {
+		source = QueryAnalyticsSourceUser
 	}
 	evt := QueryAnalyticsEvent{
 		TenantID:       tenantID,
@@ -136,6 +154,7 @@ func (h *Handler) recordQueryAnalytics(
 		CacheHit:       cacheHit,
 		LatencyMS:      int(time.Since(start).Milliseconds()),
 		BackendTimings: backendTimings,
+		Source:         source,
 	}
 	if route != nil {
 		evt.ExperimentName = route.ExperimentName

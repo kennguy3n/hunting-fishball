@@ -714,6 +714,7 @@ func run() error {
 			HitCount: e.HitCount, CacheHit: e.CacheHit, LatencyMS: e.LatencyMS,
 			BackendTimings: e.BackendTimings,
 			ExperimentName: e.ExperimentName, ExperimentArm: e.ExperimentArm,
+			Source: e.Source,
 		})
 	})
 	if qaHandler, qerr := admin.NewQueryAnalyticsHandler(queryAnalyticsStore); qerr == nil {

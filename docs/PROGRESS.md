@@ -435,6 +435,113 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-11: **Round 11: Next 20 tasks — fuzz fix, e2e depth,
+  hook observability, batch diversity, graceful degradation, docs
+  audit**.
+  - **Task 1**: `Makefile` `fuzz` target enumerates each fuzz
+    target individually (one `go test -fuzz='^FuzzName$'` per
+    invocation) so Go's "fuzz pattern must match exactly one
+    target" rule never fires on the nightly job. Validated by
+    `make fuzz`. (Carryover from commit a0cf6229.)
+  - **Task 2**: `tests/e2e/round10_test.go` (build tag `e2e`)
+    exercises the five Round-10 wiring hooks
+    (`LatencyBudgetLookup`, `CacheTTLLookup`,
+    `SyncHistoryRecorder`, `ChunkScorer`, `QueryExpander`)
+    end-to-end and asserts tenant isolation.
+  - **Task 3**: `tests/regression/round910_manifest.go` +
+    `_test.go` catalogue the Round 9/10 Devin Review fixes
+    (fuzz multi-match, OpenAPI GET→POST for isolation-check,
+    scheduler lifecycle drain). Mirrors the Round-7/8 manifest
+    pattern; meta-tests assert every named regression test
+    exists.
+  - **Task 4**: `internal/pipeline/chunk_quality_hook.go` now
+    increments `context_engine_chunk_quality_errors_total` and
+    emits a structured `slog.Warn` on every recorder failure;
+    test in `internal/pipeline/round10_hooks_test.go`.
+  - **Task 5**: Stage-4 hot-path GORM hooks
+    (`scoreAndRecordBlocks`, `recordSyncStart`,
+    `FinishBackfillRun`) wrapped in `runWithHookTimeout`
+    (configurable via `CONTEXT_ENGINE_HOOK_TIMEOUT`, default
+    500ms). New `HookTimeoutsTotal{hook}` counter.
+  - **Task 6**: `internal/retrieval/batch_handler.go` propagates
+    `Diversity` (lambda) from the batch request to every
+    sub-request. Test
+    `TestBatch_DiversityFieldThreadedToSubRequests`.
+  - **Task 7**: `internal/retrieval/stream_handler.go` threads
+    the per-backend explain trace through every SSE event when
+    the caller sets `explain: true`. Test
+    `TestStreamHandler_ExplainTraceEmitted`.
+  - **Task 8**: `internal/shard/generator.go` filters
+    pre-generated chunks by the policy snapshot's chunk-ACL
+    after the policy gate; chunks carry a `Tags` field that
+    the ACL evaluator consumes. Test
+    `TestGenerator_FiltersByChunkACL`.
+  - **Task 9**: `internal/admin/query_analytics.go` adds a
+    `source` enum field (`user` | `cache_warm` | `batch`);
+    migration `033_query_analytics_source.sql` (+ rollback).
+    The retrieval handler tags every event with the correct
+    source per call site.
+  - **Task 10**: `cmd/api/readyz.go` enriches the response body
+    with `latencies` map (`postgres_ms`, `redis_ms`,
+    `qdrant_ms`) so operators can distinguish "up but slow"
+    from "up and healthy". Test
+    `TestApiReadyz_LatencyFieldsPresent`.
+  - **Task 11**: `deploy/alerts.yaml` gains four new alerts
+    (`ChunkQualityScoreDropped`, `CacheHitRateLow`,
+    `CredentialHealthDegraded`, `GORMStoreLatencyHigh`) plus
+    four supporting metrics
+    (`context_engine_chunk_quality_score_avg`,
+    `context_engine_cache_hit_rate`,
+    `context_engine_credential_invalid_sources`,
+    `context_engine_gorm_query_duration_seconds`). Validated
+    by `make alerts-check`.
+  - **Task 12**: cardinality policy documented at the top of
+    `internal/observability/metrics.go`: no metric may use
+    `tenant_id` as a label. Enforced by
+    `TestMetrics_NoTenantIDLabel`.
+  - **Task 13**: `internal/errors/catalog.go` adds 10 admin
+    error codes (`CodeMissingTenant`, `CodeInvalidRequestBody`,
+    `CodeChunkQualityFailed`, …) with HTTP status mappings;
+    new test `TestCatalog_AllCodesUniqueAndValid`.
+  - **Task 14**: `migrations/migration_order_test.go` enforces
+    three structural invariants on the migrations directory:
+    no duplicate numeric prefixes, monotonic numbering from
+    `001`, every forward migration has a matching
+    `rollback/NNN_*.down.sql`.
+  - **Task 15**: `tests/integration/audit_completeness_test.go`
+    (build tag `integration`) catalogues every mutable admin
+    endpoint with its expected `audit.Action`; meta-tests
+    enforce coverage and that every documented action
+    constant resolves.
+  - **Task 16**: `docs/CUTOVER.md` gains a "Round 6–11
+    additions" section documenting the new feature flags,
+    rollback procedure, capacity test, cardinality policy,
+    and alert rules.
+  - **Task 17**: `docs/openapi.yaml` replaces
+    `additionalProperties: true` stubs with typed schemas
+    for `DashboardResponse`, `HealthResponse`, `Capabilities`,
+    `PipelineHealthReport`, `AuditListResponse`,
+    `DLQListResponse`, `PolicyDraft`, `PolicyDraftList`,
+    `SourceList`. Endpoints
+    `/v1/health`, `/v1/admin/audit`, `/v1/admin/sources`,
+    `/v1/admin/dlq`, `/v1/admin/policy/drafts`,
+    `/v1/admin/pipeline/health` now reference the typed
+    schemas in their `200` response.
+  - **Task 18**: `internal/retrieval/graceful_degradation.go`
+    wraps `LatencyBudgetLookup`, `CacheTTLLookup`, and
+    `PinLookup` calls in a 200ms timeout + panic-recovery
+    wrapper. Failures increment
+    `context_engine_gorm_store_lookup_errors_total{store}`
+    and emit a `slog.Warn` with `tenant_id`. The retrieval
+    handler degrades to defaults rather than 500. Tests in
+    `internal/retrieval/graceful_degradation_test.go`.
+  - **Task 19**: `tests/e2e/round11_test.go` (build tag `e2e`)
+    smoke-tests batch diversity, SSE explain, query analytics
+    source, migration ordering, and the graceful-degradation
+    path under a hanging budget store.
+  - **Task 20**: this doc + `README.md` + `ARCHITECTURE.md` +
+    `PHASES.md` refreshed for the Round-11 additions.
+
 - 2026-05-11: **Round 10: Next 20 tasks — wiring + e2e for the
   Round-7..9 stores, fuzz expansion, OpenAPI / runbook gates, CI
   lane audit, and doc refresh**.

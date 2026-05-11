@@ -24,6 +24,12 @@ type ChunkScope struct {
 	URI          string
 	PrivacyLabel string
 	Connector    string
+
+	// Tags is the chunk's tag set, drawn from source metadata.
+	// Used by the per-chunk ACL gate (Round-11 Task 8) to honour
+	// chunk_acl rows with TagPrefix matchers at shard
+	// pre-generation time. Empty when the chunk has no tags.
+	Tags []string
 }
 
 // ChunkSource enumerates the chunks visible under a given (tenant,
@@ -133,6 +139,16 @@ func (g *Generator) Generate(ctx context.Context, req GenerateRequest) (*Generat
 			continue
 		}
 		if !aclAllows(snap, ch) {
+			continue
+		}
+		// Round-11 Task 8: consult chunk_acl (per-chunk tag
+		// rules) AFTER the source-level allow/deny list so a
+		// single chunk inside an otherwise-allowed source can
+		// be denied (or vice-versa). The retrieval-time gate
+		// reapplies this check, but filtering at the shard
+		// generator avoids materialising chunks the live path
+		// would later strip.
+		if !chunkACLAllows(snap, ch) {
 			continue
 		}
 		eligibleIDs = append(eligibleIDs, ch.ChunkID)
@@ -256,4 +272,26 @@ func aclAllows(snap policy.PolicySnapshot, ch ChunkScope) bool {
 		Path:        ch.URI,
 	})
 	return verdict.Allowed
+}
+
+// chunkACLAllows asks the PolicySnapshot's per-chunk ACL whether
+// the chunk fits the shard scope (Round-11 Task 8). Mirrors the
+// retrieval handler's chunk-level gate so the shard pre-generator
+// never ships a chunk the live read path would later block.
+//
+// Returns true when:
+//   - snap.ChunkACL is nil (no per-chunk rules wired), OR
+//   - snap.ChunkACL has no rules touching the chunk (default allow), OR
+//   - a matching rule returned ChunkACLDecisionAllow.
+//
+// Returns false when a matching rule explicitly denies the chunk.
+func chunkACLAllows(snap policy.PolicySnapshot, ch ChunkScope) bool {
+	if snap.ChunkACL == nil {
+		return true
+	}
+	decision := snap.ChunkACL.Evaluate(policy.ChunkACLAttrs{
+		ChunkID: ch.ChunkID,
+		Tags:    ch.Tags,
+	})
+	return decision != policy.ChunkACLDecisionDeny
 }

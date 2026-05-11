@@ -101,6 +101,11 @@ func (w *CacheWarmer) Warm(ctx context.Context, tuples []WarmTuple) WarmSummary 
 			TopK:        t.TopK,
 			Channels:    append([]string{}, t.Channels...),
 			PrivacyMode: t.PrivacyMode,
+			// Round-11 Devin Review fix: tag the request so the
+			// analytics recorder inside RetrieveWithSnapshotCached
+			// surfaces warm-up traffic as `source="cache_warm"` and
+			// operators can distinguish it from organic traffic.
+			Source: QueryAnalyticsSourceCacheWarm,
 		}
 		// Must be the cache-aware variant. See package doc — calling
 		// RetrieveWithSnapshot here would skip the cache.Set bookend

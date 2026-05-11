@@ -156,3 +156,84 @@ During each step watch the following dashboards / alerts:
 If any of the alerts trip, follow the rollback section. Keep the
 legacy Python stack warm for two weeks after Step 6 before
 decommissioning hardware.
+
+## 7. Round 6–11 additions (post-Phase-3)
+
+Rounds 6 through 11 added a number of operational features that
+post-date this document's original Phase-3 framing. The cutover
+plan above is still correct — these are additive overlays.
+
+### 7.1 New feature flags (all default to *off* / safe)
+
+| Variable                                  | Default | Effect                                                    |
+| ----------------------------------------- | ------- | --------------------------------------------------------- |
+| `CONTEXT_ENGINE_PRIORITY_BUFFER_ENABLED`  | `0`     | Enable Round-6 priority buffer for hot-tenant fairness.   |
+| `CONTEXT_ENGINE_DEDUP_ENABLED`            | `0`     | Round-7 content-hash dedup at Stage 4 of the pipeline.    |
+| `CONTEXT_ENGINE_CHUNK_ACL_ENABLED`        | `0`     | Round-8 per-chunk ACL gating + shard pre-gen filtering.   |
+| `CONTEXT_ENGINE_SSE_STREAMING_ENABLED`    | `0`     | Round-8 Server-Sent Events streaming for /v1/retrieve.    |
+| `CONTEXT_ENGINE_CHUNK_SCORING_ENABLED`    | `0`     | Round-10 chunk-quality scoring hook (writes `chunk_quality`). |
+| `CONTEXT_ENGINE_QUERY_EXPANSION_ENABLED`  | `0`     | Round-10 synonym-driven BM25 expansion.                   |
+| `CONTEXT_ENGINE_HOOK_TIMEOUT`             | `500ms` | Round-11 timeout guard for Stage-4 GORM hooks.            |
+| (`gracefulLookupTimeout` constant)        | `200ms` | Round-11 LatencyBudget/CacheTTL/Pin lookup timeout — no env override by design. |
+
+The Round 9 GORM-backed stores (latency budget, cache TTL, pin
+list, query analytics, sync history, chunk quality) are wired
+unconditionally. Round 11's graceful-degradation wrappers ensure
+a sick store can never block the retrieve hot path beyond the
+200ms deadline.
+
+### 7.2 Updated rollback procedure
+
+The rollback procedure now covers 33 migrations (the original
+Phase-3 set + Rounds 6–11 additions). `make migrate-rollback`
+walks `migrations/rollback/NNN_*.down.sql` in reverse order:
+
+```bash
+make migrate-rollback             # rolls back the most recent migration
+make migrate-rollback STEPS=5     # rolls back the last 5 migrations
+```
+
+Migration ordering is enforced statically by
+`migrations/migration_order_test.go` (Round-11 Task 14):
+
+- No two forward migrations share a numeric prefix.
+- Prefixes are strictly monotonically increasing from `001`.
+- Every forward migration has a matching `rollback/NNN_*.down.sql`.
+
+A merge that violates any of these invariants fails CI before it
+can reach `main`.
+
+### 7.3 Capacity test
+
+The Round-8 capacity harness (`tests/capacity/`) is the official
+load-test entry point. Run it via:
+
+```bash
+make capacity-test
+```
+
+The harness fans out concurrent retrievals across N tenants with
+configurable mix of cache-warm vs organic traffic, asserts
+end-to-end P95 stays under the targets in section 1, and writes a
+JSON report to `tests/capacity/last_run.json`.
+
+### 7.4 Cardinality policy (Round-11 Task 12)
+
+No Prometheus metric may use `tenant_id` as a label. Tenant
+identity goes into `slog.With("tenant_id", ...)` log fields
+instead. The policy is enforced by
+`TestMetrics_NoTenantIDLabel`; violating it fails `make test`.
+This keeps the Prometheus cardinality bounded on a multi-tenant
+cluster.
+
+### 7.5 New alert rules (Round-11 Task 11)
+
+Four new PrometheusRule entries were added in `deploy/alerts.yaml`:
+
+- `ChunkQualityScoreDropped` — avg quality < 0.5 over 15m.
+- `CacheHitRateLow` — `context_engine_cache_hit_rate` < 0.3 over 15m.
+- `CredentialHealthDegraded` — any source has `credential_valid=false` for > 1h.
+- `GORMStoreLatencyHigh` — GORM query P95 > 200ms over 5m.
+
+Validate locally with `make alerts-check`.
+

@@ -143,3 +143,39 @@ func TestRecordingRulesManifest_Valid(t *testing.T) {
 		}
 	}
 }
+
+// TestAlertsManifest_Round11Alerts — Round-11 Task 11.
+//
+// Asserts every Round-11 alert is present in alerts.yaml so a
+// future refactor doesn't drop them silently. The test does not
+// assert exact thresholds; structural validation lives in
+// TestAlertsManifest_Valid.
+func TestAlertsManifest_Round11Alerts(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join(".", "alerts.yaml"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var m manifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		t.Fatalf("yaml: %v", err)
+	}
+	required := map[string]bool{
+		"ChunkQualityScoreDropped": false,
+		"CacheHitRateLow":          false,
+		"CredentialHealthDegraded": false,
+		"GORMStoreLatencyHigh":     false,
+	}
+	for _, g := range m.Spec.Groups {
+		for _, r := range g.Rules {
+			if _, ok := required[r.Alert]; ok {
+				required[r.Alert] = true
+			}
+		}
+	}
+	for name, found := range required {
+		if !found {
+			t.Errorf("required Round-11 alert missing: %s", name)
+		}
+	}
+}

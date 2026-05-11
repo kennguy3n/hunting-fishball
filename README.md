@@ -354,6 +354,66 @@ The full set of public + admin endpoints is documented in
   rollback coverage; `make migrate-rollback` applies them in
   reverse order.
 
+**Round 11 additions:**
+
+- The `Makefile` `fuzz` target now enumerates each fuzz target
+  individually (one `go test -fuzz='^FuzzName$'` invocation
+  per target) so Go's "pattern must match exactly one target"
+  rule cannot fire on the nightly job.
+- The pipeline's Stage-4 hot-path GORM hooks
+  (`scoreAndRecordBlocks`, `recordSyncStart`,
+  `FinishBackfillRun`) are wrapped in `runWithHookTimeout`,
+  configurable via `CONTEXT_ENGINE_HOOK_TIMEOUT` (default
+  500ms). A new `HookTimeoutsTotal{hook}` counter tracks
+  expirations. The chunk-quality hook additionally increments
+  `context_engine_chunk_quality_errors_total` and emits a
+  structured `slog.Warn` on recorder failures.
+- The batch retrieval handler now threads the request's
+  `Diversity` (MMR lambda) into every sub-request — previously
+  the field was silently dropped on the batch path. The SSE
+  streaming handler now emits the per-backend explain trace
+  inside every event when `explain: true`.
+- The shard pre-generator consults the policy snapshot's
+  chunk-ACL after the policy gate, filtering out chunks the
+  shard's audience cannot read.
+- `query_analytics` adds a `source` column
+  (`user` | `cache_warm` | `batch`) so operators can
+  distinguish organic traffic from warm-up and batch calls.
+  Migration `033_query_analytics_source.sql` (+ rollback)
+  ships with the change.
+- `/readyz` now returns per-backend latency in a
+  `latencies` map (`postgres_ms`, `redis_ms`, `qdrant_ms`),
+  distinguishing "up-but-slow" from "up-and-healthy".
+- Four new Prometheus alerts:
+  `ChunkQualityScoreDropped`, `CacheHitRateLow`,
+  `CredentialHealthDegraded`, `GORMStoreLatencyHigh`.
+  Validate with `make alerts-check`.
+- Prometheus cardinality policy is now enforced by test: no
+  metric may use `tenant_id` as a label. Tenant identity goes
+  into `slog.With("tenant_id", ...)` log fields only.
+- 10 new structured admin error codes in
+  `internal/errors/catalog.go` (replaces ad-hoc
+  `gin.H{"error": ...}` returns).
+- `migrations/migration_order_test.go` enforces no duplicate
+  prefixes, monotonic numbering from `001`, and rollback
+  parity. Replaces the weaker rollback file check.
+- `internal/retrieval/graceful_degradation.go` wraps every
+  GORM lookup on the retrieve hot path (latency budget,
+  cache TTL, pin list) in a 200ms timeout + panic recovery
+  envelope. Failures bump
+  `context_engine_gorm_store_lookup_errors_total{store}` and
+  the handler degrades to defaults rather than 500.
+- `docs/openapi.yaml` replaces `additionalProperties: true`
+  stubs with typed schemas for the most-used endpoints
+  (`/v1/health`, `/v1/admin/audit`, `/v1/admin/sources`,
+  `/v1/admin/dlq`, `/v1/admin/policy/drafts`,
+  `/v1/admin/pipeline/health`, `Capabilities`,
+  `DashboardResponse`).
+- New tests: `tests/e2e/round10_test.go` (Round-10 hook e2e),
+  `tests/e2e/round11_test.go` (Round-11 e2e), and
+  `tests/regression/round910_manifest.go` (PR #18/#19
+  Devin Review fixes catalogue).
+
 **Round 10 additions:**
 
 - The retrieval handler now reads the tenant's

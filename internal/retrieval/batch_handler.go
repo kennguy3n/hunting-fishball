@@ -125,6 +125,11 @@ func (h *Handler) runOne(ctx context.Context, tenantID string, index int, sub Re
 	if sub.Query == "" {
 		return BatchResultItem{Index: index, Error: "query is required"}
 	}
+	// Round-11 Task 9: tag every batch sub-request so the query
+	// analytics recorder can distinguish batch sub-requests from
+	// organic /v1/retrieve traffic. The field is internal (json:"-")
+	// so the wire payload remains identical.
+	sub.Source = QueryAnalyticsSourceBatch
 	channelID := firstNonEmpty(sub.Channels)
 	snapshot, err := h.cfg.PolicyResolver.Resolve(ctx, tenantID, channelID)
 	if err != nil {
@@ -138,6 +143,13 @@ func (h *Handler) runOne(ctx context.Context, tenantID string, index int, sub Re
 	// query was paying the full fan-out cost on every batch slot.
 	// RetrieveWithSnapshotCached re-uses the live snapshot's cache
 	// slot so a sub-ms cache hit is possible per slot.
+	//
+	// Analytics: RetrieveWithSnapshotCached records the query
+	// analytics event itself (Round-11 Devin Review fix), reading
+	// sub.Source above and resolving topK/DefaultTopK consistently
+	// with the request that actually ran — the batch handler no
+	// longer records explicitly, which used to mis-report topK as
+	// `len(resp.Hits)` when the caller omitted top_k.
 	resp, rerr := h.RetrieveWithSnapshotCached(ctx, tenantID, sub, snapshot)
 	if rerr != nil {
 		if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {

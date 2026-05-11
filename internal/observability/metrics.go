@@ -5,6 +5,31 @@
 // All collectors live on the package-level Registry, which is exported
 // via Handler() so cmd/api and cmd/ingest can mount it under
 // `/metrics` without further setup.
+//
+// ----------------------------------------------------------------
+// Cardinality policy (Round-11 Task 12)
+// ----------------------------------------------------------------
+//
+// Prometheus label values multiply across every dimension. A label
+// that takes an unbounded value (notably tenant_id on a multi-tenant
+// fleet) explodes the series count and brings down the TSDB. To
+// keep cardinality bounded we follow three rules:
+//
+//  1. NEVER add `tenant_id` as a Prometheus label. Per-tenant
+//     breakdowns live in the structured logs (Loki / Splunk index
+//     the `tenant_id` slog field without the cardinality blow-up).
+//  2. NEVER add user IDs, query strings, or other free-form
+//     identifiers as labels.
+//  3. Bounded enumerations (stage, backend, status, breaker state)
+//     are fine. Adding a new label of this kind must come with a
+//     short comment naming the closed enumeration.
+//
+// The grep-based test in metrics_test.go's
+// `TestMetrics_NoTenantIDLabel` pins the first rule mechanically —
+// the test fails CI if any registration site lists "tenant_id" in
+// its label slice. New metrics with high-cardinality intent should
+// route to structured logs instead (see ObserveBudgetViolation for
+// the precedent).
 package observability
 
 import (
@@ -255,6 +280,116 @@ var (
 			Help: "Retrieval requests that consulted the cache and fell through to the fan-out pipeline.",
 		},
 	)
+
+	// ChunkQualityErrorsTotal counts ChunkQualityRecorder.Record
+	// failures observed on the Stage-4 pre-write hook (Round-11
+	// Task 4). The hook is best-effort — failures must not block
+	// chunk ingestion — but operators need a cluster-wide signal so a
+	// silently broken recorder doesn't blank the chunk_quality table
+	// without notice. No tenant_id label per the cardinality policy at
+	// the top of this file; the slog.Warn emitted alongside carries
+	// the tenant_id / chunk_id for triage.
+	ChunkQualityErrorsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_chunk_quality_errors_total",
+			Help: "ChunkQualityRecorder.Record failures from the Stage-4 pre-write hook. Per-tenant breakdowns live in structured logs.",
+		},
+	)
+
+	// HookTimeoutsTotal counts coordinator-side Stage-4 hook calls
+	// (sync_history Start/Finish, chunk_quality Record) that were
+	// dropped because the per-call context.WithTimeout fired before
+	// the GORM store wrote (Round-11 Task 5). The `hook` label is a
+	// bounded enumeration: sync_history_start / sync_history_finish /
+	// chunk_quality_record. The timeout is configurable via
+	// CONTEXT_ENGINE_HOOK_TIMEOUT.
+	HookTimeoutsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_hook_timeouts_total",
+			Help: "Stage-4 coordinator hook calls dropped because the per-call context deadline fired.",
+		},
+		[]string{"hook"},
+	)
+
+	// HookPanicsTotal counts coordinator-side Stage-4 hook calls
+	// that panicked inside the runWithHookTimeout-spawned goroutine
+	// (Round-11 Devin Review Phase-3 follow-up). Distinct from
+	// HookTimeoutsTotal so operators can alert separately on a slow
+	// store (timeout) versus a crashing store (panic — usually a
+	// nil-pointer deref in the GORM driver). The `hook` label uses
+	// the same bounded enumeration as HookTimeoutsTotal:
+	// sync_history_start / sync_history_finish / chunk_quality_record.
+	// The panic itself is converted to a returned error so the
+	// ingest process keeps running.
+	HookPanicsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_hook_panics_total",
+			Help: "Stage-4 coordinator hook calls that panicked inside the spawned goroutine. Distinct from hook_timeouts_total so operators can alert on slow vs crashing stores separately.",
+		},
+		[]string{"hook"},
+	)
+
+	// GORMStoreLookupErrorsTotal counts retrieval-handler GORM store
+	// lookup failures observed on the hot path (Round-11 Task 18). The
+	// retrieval handler degrades to defaults when its LatencyBudget /
+	// CacheTTL / Pin / QueryAnalytics lookups fail; this counter is
+	// the operator signal. The `store` label is a bounded enumeration:
+	// latency_budget / cache_ttl / pin_lookup / query_analytics.
+	GORMStoreLookupErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_gorm_store_lookup_errors_total",
+			Help: "GORM-backed lookup failures on the retrieval hot path. The handler degrades to defaults when these fire.",
+		},
+		[]string{"store"},
+	)
+
+	// ChunkQualityScoreAvg is the rolling average chunk quality
+	// score across the cluster (Round-11 Task 11). The pipeline
+	// updates the gauge after every scoreAndRecordBlocks call —
+	// the alert ChunkQualityScoreDropped watches the cluster-wide
+	// floor. No tenant_id label per the cardinality policy.
+	ChunkQualityScoreAvg = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "context_engine_chunk_quality_score_avg",
+			Help: "Cluster-wide rolling average of ChunkScorer.Score(...).Overall. The ChunkQualityScoreDropped alert fires below 0.5.",
+		},
+	)
+
+	// CacheHitRate is the rolling cache-hit fraction the retrieval
+	// handler updates after every Set/Get (Round-11 Task 11). The
+	// alert CacheHitRateLow watches the cluster-wide floor.
+	CacheHitRate = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "context_engine_cache_hit_rate",
+			Help: "Rolling cache-hit fraction in [0,1]. The CacheHitRateLow alert fires below 0.3.",
+		},
+	)
+
+	// CredentialInvalidSources counts how many sources currently
+	// have credential_valid=false (Round-11 Task 11). The
+	// credential health worker writes this gauge once per scan.
+	// Alert CredentialHealthDegraded fires when the gauge is > 0
+	// for more than 1h.
+	CredentialInvalidSources = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "context_engine_credential_invalid_sources",
+			Help: "Number of sources where credential_valid=false. The CredentialHealthDegraded alert watches a sustained non-zero value.",
+		},
+	)
+
+	// GORMQueryDuration is the histogram of GORM-backed store query
+	// latency (Round-11 Task 11). The `store` label is a bounded
+	// enumeration matching the store names in
+	// GORMStoreLookupErrorsTotal. Alert GORMStoreLatencyHigh fires
+	// when the p95 exceeds 200ms.
+	GORMQueryDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "context_engine_gorm_query_duration_seconds",
+			Help:    "Wall-clock duration of GORM-backed store queries.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"store"},
+	)
 )
 
 // SetGRPCCircuitBreakerState records the current breaker state for
@@ -284,6 +419,14 @@ func init() {
 		QdrantPoolIdleConnections,
 		CacheHitsTotal,
 		CacheMissesTotal,
+		ChunkQualityErrorsTotal,
+		HookTimeoutsTotal,
+		HookPanicsTotal,
+		GORMStoreLookupErrorsTotal,
+		ChunkQualityScoreAvg,
+		CacheHitRate,
+		CredentialInvalidSources,
+		GORMQueryDuration,
 	)
 }
 
@@ -336,6 +479,14 @@ func ResetForTest() {
 	Registry.Unregister(QdrantPoolIdleConnections)
 	Registry.Unregister(CacheHitsTotal)
 	Registry.Unregister(CacheMissesTotal)
+	Registry.Unregister(ChunkQualityErrorsTotal)
+	Registry.Unregister(HookTimeoutsTotal)
+	Registry.Unregister(HookPanicsTotal)
+	Registry.Unregister(GORMStoreLookupErrorsTotal)
+	Registry.Unregister(ChunkQualityScoreAvg)
+	Registry.Unregister(CacheHitRate)
+	Registry.Unregister(CredentialInvalidSources)
+	Registry.Unregister(GORMQueryDuration)
 	APIRequestsTotal.Reset()
 	APIRequestDurationSeconds.Reset()
 	KafkaConsumerLag.Reset()
@@ -349,6 +500,13 @@ func ResetForTest() {
 	CredentialsExpiring.Reset()
 	IndexAutoReindexesTotal.Reset()
 	GRPCCircuitBreakerState.Reset()
+	HookTimeoutsTotal.Reset()
+	HookPanicsTotal.Reset()
+	GORMStoreLookupErrorsTotal.Reset()
+	ChunkQualityScoreAvg.Set(0)
+	CacheHitRate.Set(0)
+	CredentialInvalidSources.Set(0)
+	GORMQueryDuration.Reset()
 	PostgresPoolOpenConnections.Set(0)
 	RedisPoolActiveConnections.Set(0)
 	QdrantPoolIdleConnections.Set(0)
@@ -374,6 +532,14 @@ func ResetForTest() {
 		QdrantPoolIdleConnections,
 		CacheHitsTotal,
 		CacheMissesTotal,
+		ChunkQualityErrorsTotal,
+		HookTimeoutsTotal,
+		HookPanicsTotal,
+		GORMStoreLookupErrorsTotal,
+		ChunkQualityScoreAvg,
+		CacheHitRate,
+		CredentialInvalidSources,
+		GORMQueryDuration,
 	)
 }
 
@@ -407,6 +573,41 @@ func ObserveBudgetViolation(tenantID string) {
 // given stage label (one of "fetch", "parse", "embed", "store").
 func ObserveStageDuration(stage string, seconds float64) {
 	PipelineStageDurationSeconds.WithLabelValues(stage).Observe(seconds)
+}
+
+// ObserveChunkQualityError increments the chunk-quality-error
+// counter and emits a structured log entry carrying tenant_id and
+// chunk_id — Round-11 Task 4. Called by Coordinator.scoreAndRecordBlocks
+// on every recorder write failure.
+func ObserveChunkQualityError(tenantID, chunkID string, err error) {
+	ChunkQualityErrorsTotal.Inc()
+	if tenantID != "" || chunkID != "" {
+		slog.Warn("chunk quality recorder error", "tenant_id", tenantID, "chunk_id", chunkID, "error", err)
+	}
+}
+
+// ObserveHookTimeout increments the per-hook timeout counter —
+// Round-11 Task 5. `hook` is a bounded enumeration: sync_history_start /
+// sync_history_finish / chunk_quality_record.
+func ObserveHookTimeout(hook string) {
+	HookTimeoutsTotal.WithLabelValues(hook).Inc()
+}
+
+// ObserveHookPanic increments the per-hook panic counter —
+// Round-11 Devin Review Phase-3 follow-up. Called by
+// runWithHookTimeout's recover defer so operators can alert on a
+// crashing GORM driver separately from a slow one. `hook` is the
+// same bounded enumeration as ObserveHookTimeout.
+func ObserveHookPanic(hook string) {
+	HookPanicsTotal.WithLabelValues(hook).Inc()
+}
+
+// ObserveGORMStoreLookupError increments the per-store lookup
+// error counter — Round-11 Task 18. `store` is a bounded
+// enumeration: latency_budget / cache_ttl / pin_lookup /
+// query_analytics.
+func ObserveGORMStoreLookupError(store string) {
+	GORMStoreLookupErrorsTotal.WithLabelValues(store).Inc()
 }
 
 // ObserveBackendDuration records the per-backend retrieval

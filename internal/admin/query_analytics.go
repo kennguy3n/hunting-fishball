@@ -31,19 +31,43 @@ import (
 // QueryAnalyticsRow is the persisted shape. GORM's column tags map
 // to the migration in migrations/024_query_analytics.sql.
 type QueryAnalyticsRow struct {
-	ID             string    `gorm:"type:char(26);primaryKey;column:id" json:"id"`
-	TenantID       string    `gorm:"type:char(26);not null;column:tenant_id" json:"tenant_id"`
-	QueryHash      string    `gorm:"type:varchar(64);not null;column:query_hash" json:"query_hash"`
-	QueryText      string    `gorm:"type:text;not null;column:query_text" json:"query_text"`
-	TopK           int       `gorm:"not null;column:top_k" json:"top_k"`
-	HitCount       int       `gorm:"not null;column:hit_count" json:"hit_count"`
-	CacheHit       bool      `gorm:"not null;column:cache_hit" json:"cache_hit"`
-	LatencyMS      int       `gorm:"not null;column:latency_ms" json:"latency_ms"`
-	BackendTimings JSONMap   `gorm:"type:jsonb;not null;default:'{}';column:backend_timings" json:"backend_timings"`
-	ExperimentName string    `gorm:"type:varchar(64);column:experiment_name" json:"experiment_name,omitempty"`
-	ExperimentArm  string    `gorm:"type:varchar(16);column:experiment_arm" json:"experiment_arm,omitempty"`
-	CreatedAt      time.Time `gorm:"not null;default:now();column:created_at" json:"created_at"`
+	ID             string  `gorm:"type:char(26);primaryKey;column:id" json:"id"`
+	TenantID       string  `gorm:"type:char(26);not null;column:tenant_id" json:"tenant_id"`
+	QueryHash      string  `gorm:"type:varchar(64);not null;column:query_hash" json:"query_hash"`
+	QueryText      string  `gorm:"type:text;not null;column:query_text" json:"query_text"`
+	TopK           int     `gorm:"not null;column:top_k" json:"top_k"`
+	HitCount       int     `gorm:"not null;column:hit_count" json:"hit_count"`
+	CacheHit       bool    `gorm:"not null;column:cache_hit" json:"cache_hit"`
+	LatencyMS      int     `gorm:"not null;column:latency_ms" json:"latency_ms"`
+	BackendTimings JSONMap `gorm:"type:jsonb;not null;default:'{}';column:backend_timings" json:"backend_timings"`
+	ExperimentName string  `gorm:"type:varchar(64);column:experiment_name" json:"experiment_name,omitempty"`
+	ExperimentArm  string  `gorm:"type:varchar(16);column:experiment_arm" json:"experiment_arm,omitempty"`
+	// Source distinguishes organic /v1/retrieve traffic from
+	// non-user calls (Round-11 Task 9). One of QueryAnalyticsSource*
+	// constants below. Backed by migration
+	// migrations/033_query_analytics_source.sql which defaults to
+	// "user" so pre-Round-11 rows keep their semantics.
+	Source    string    `gorm:"type:varchar(16);not null;default:'user';column:source" json:"source"`
+	CreatedAt time.Time `gorm:"not null;default:now();column:created_at" json:"created_at"`
 }
+
+// QueryAnalyticsSource* enumerate the recognised values for the
+// `source` column. The application layer (this package + the
+// retrieval handler) is the source of truth for the enum; the
+// migration column is plain varchar.
+const (
+	// QueryAnalyticsSourceUser is the default — a tenant-issued
+	// /v1/retrieve call. Pre-Round-11 rows are backfilled to this.
+	QueryAnalyticsSourceUser = "user"
+	// QueryAnalyticsSourceCacheWarm is emitted by the cache-warmer
+	// jobs (Round-8 Task 3) so operators can subtract warm-up
+	// traffic from the organic top-N rollup.
+	QueryAnalyticsSourceCacheWarm = "cache_warm"
+	// QueryAnalyticsSourceBatch is emitted from /v1/retrieve/batch
+	// sub-requests so the rate-limit and budget alerts can fold
+	// batches into a single logical event.
+	QueryAnalyticsSourceBatch = "batch"
+)
 
 // TableName pins the table name; without this GORM would guess
 // "query_analytics_rows".
@@ -61,7 +85,12 @@ type QueryAnalyticsEvent struct {
 	BackendTimings map[string]int64
 	ExperimentName string
 	ExperimentArm  string
-	At             time.Time
+	// Source distinguishes the call site (Round-11 Task 9). One of
+	// QueryAnalyticsSource{User, CacheWarm, Batch}. An empty value
+	// is treated as QueryAnalyticsSourceUser so legacy callers
+	// continue to populate the "user" bucket without code changes.
+	Source string
+	At     time.Time
 }
 
 // QueryHash returns a stable sha256 prefix of the query text. Used
@@ -332,6 +361,13 @@ func (r *QueryAnalyticsRecorder) Record(ctx context.Context, evt QueryAnalyticsE
 	if _, err := json.Marshal(timings); err != nil {
 		timings = JSONMap{}
 	}
+	source := evt.Source
+	switch source {
+	case QueryAnalyticsSourceUser, QueryAnalyticsSourceCacheWarm, QueryAnalyticsSourceBatch:
+		// known value, keep as-is.
+	default:
+		source = QueryAnalyticsSourceUser
+	}
 	row := &QueryAnalyticsRow{
 		ID:             ulid.Make().String(),
 		TenantID:       evt.TenantID,
@@ -344,6 +380,7 @@ func (r *QueryAnalyticsRecorder) Record(ctx context.Context, evt QueryAnalyticsE
 		BackendTimings: timings,
 		ExperimentName: evt.ExperimentName,
 		ExperimentArm:  evt.ExperimentArm,
+		Source:         source,
 		CreatedAt:      at,
 	}
 	if err := r.store.Record(ctx, row); err != nil {

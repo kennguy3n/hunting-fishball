@@ -2037,3 +2037,73 @@ time.
   `deploy/alerts.yaml`) and `fast-rollback-parity` runs the
   `migrations/rollback/...` tests that enforce every forward
   migration has a matching down-script.
+
+### Tech choices added in Round 11
+
+- **Stage-4 hook timeout guard.** Every Stage-4 GORM hook
+  (`scoreAndRecordBlocks`, `recordSyncStart`,
+  `FinishBackfillRun`) is wrapped in `runWithHookTimeout`,
+  which spawns a goroutine to invoke the hook and uses
+  `context.WithTimeout` to bail at the configured deadline.
+  The default is 500ms (overridable via
+  `CONTEXT_ENGINE_HOOK_TIMEOUT`). The wrapper is fail-open:
+  on timeout the pipeline keeps draining. Expirations bump
+  `HookTimeoutsTotal{hook}` so operators have a rolling
+  signal of which hook is sick.
+
+- **Batch retrieval diversity threading.** The batch handler
+  copies the request's `Diversity` (MMR lambda) into every
+  `Handler.Retrieve` call so a per-batch lambda is honoured
+  rather than silently dropped. The SSE streaming handler
+  similarly threads the per-backend explain trace through
+  every event when the caller sets `explain: true`.
+
+- **Prometheus cardinality policy.** No metric may use
+  `tenant_id` as a label. Tenant identity is a log field
+  (`slog.With("tenant_id", ...)`) only. Enforced by a
+  grep-based test against the source of
+  `internal/observability/metrics.go`; CI rejects any new
+  metric registration that violates the rule. This caps
+  Prometheus's series cardinality at the number of
+  service-level metrics, not the per-tenant cross-product.
+
+- **GORM graceful degradation pattern.** Three lookup
+  call-sites on the retrieve hot path
+  (`LatencyBudgetLookup`, `CacheTTLLookup`, `PinLookup`) are
+  wrapped in goroutine-based `safe*` helpers in
+  `internal/retrieval/graceful_degradation.go`. Each helper
+  invokes the lookup in a goroutine, watches for a 200ms
+  `context.WithTimeout` deadline, and recovers from
+  panics. On timeout/panic the wrapper logs a
+  `slog.Warn{tenant_id, store}`, increments
+  `context_engine_gorm_store_lookup_errors_total{store}`,
+  and returns a documented fallback so the retrieval handler
+  succeeds on defaults rather than returning 500. The 200ms
+  budget is intentionally fixed (no env override) so the
+  hot-path SLO never drifts.
+
+- **Migration ordering test.** `migrations/migration_order_test.go`
+  asserts three structural invariants on the migrations
+  directory: no duplicate numeric prefixes (catches merge
+  conflicts), strictly monotonic numbering from `001`
+  (catches deleted migrations), and rollback parity (every
+  forward migration has a matching
+  `rollback/NNN_*.down.sql`). Replaces the weaker presence
+  check in `rollback_test.go`.
+
+- **Query analytics source tagging.** Every retrieval event
+  now carries a `source` enum (`user` | `cache_warm` |
+  `batch`). The retrieve handler defaults to `user`; the
+  batch handler tags `batch`; the cache-warm worker tags
+  `cache_warm`. Operators querying `query_analytics` can
+  now distinguish organic traffic from warm-up and batch
+  traffic without filtering by `query_text`. Migration
+  `033_query_analytics_source.sql` adds the column with
+  default `'user'` so historical rows remain queryable.
+
+- **Health probe latency enrichment.** `/readyz` returns a
+  `latencies` map (`postgres_ms`, `redis_ms`, `qdrant_ms`)
+  measured via a single timed ping per backend. This is the
+  hook external monitoring uses to distinguish "up-but-slow"
+  from "up-and-healthy" — a backend that returns 200 in
+  300ms while p95 is normally 5ms is degraded, not healthy.

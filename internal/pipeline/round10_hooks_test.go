@@ -284,3 +284,234 @@ func longText(n int) string {
 	}
 	return string(b)
 }
+
+// failingChunkQualityRecorder always returns a write error. Used
+// by Round-11 Task 4 to assert the observability counter
+// increments without blocking the pipeline.
+type failingChunkQualityRecorder struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *failingChunkQualityRecorder) Record(_ context.Context, _ ChunkQualityReport) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	return errors.New("synthetic recorder error")
+}
+
+// TestCoordinator_ChunkQualityHook_ErrorObservability — Round-11 Task 4.
+//
+// Asserts that Record() failures increment
+// observability.ChunkQualityErrorsTotal AND do not propagate back
+// to the pipeline (the document still completes Stage 4).
+func TestCoordinator_ChunkQualityHook_ErrorObservability(t *testing.T) {
+	t.Parallel()
+	observability_ResetForTest(t)
+	failer := &failingChunkQualityRecorder{}
+	store := &fakeStore{}
+	cfg := newFastConfig(
+		fakeFetch{fn: func(_ context.Context, evt IngestEvent) (*Document, error) {
+			return &Document{TenantID: evt.TenantID, SourceID: evt.SourceID, DocumentID: evt.DocumentID, Content: []byte("x"), ContentHash: "h"}, nil
+		}},
+		fakeParse{fn: func(_ context.Context, _ *Document) ([]Block, error) {
+			return []Block{
+				{BlockID: "b-1", Text: "alpha"},
+				{BlockID: "b-2", Text: "beta"},
+			}, nil
+		}},
+		fakeEmbed{fn: func(_ context.Context, _ string, blocks []Block) ([][]float32, string, error) {
+			out := make([][]float32, len(blocks))
+			for i := range blocks {
+				out[i] = []float32{0.5, 0.5, 0}
+			}
+			return out, "m", nil
+		}},
+		store,
+	)
+	cfg.ChunkScorer = NewChunkScorer()
+	cfg.ChunkQuality = failer
+
+	c, err := NewCoordinator(cfg)
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	if err := c.Submit(ctx, IngestEvent{Kind: EventDocumentChanged, TenantID: "t-err", SourceID: "src-err", DocumentID: "doc-err"}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	c.CloseInputs()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Recorder was called once per block.
+	failer.mu.Lock()
+	if failer.calls != 2 {
+		t.Fatalf("recorder calls=%d want 2", failer.calls)
+	}
+	failer.mu.Unlock()
+
+	// Counter incremented twice (once per block).
+	got := chunkQualityErrorCount()
+	if got < 2 {
+		t.Fatalf("chunk_quality_errors_total=%d want >=2", got)
+	}
+
+	// The pipeline still wrote the document to the store, which
+	// is the load-bearing invariant.
+	if storeCalls := storeCallCount(store); storeCalls < 1 {
+		t.Fatalf("storeCalls=%d want >=1 (chunk-quality failures must not block Stage 4)", storeCalls)
+	}
+}
+
+// TestCoordinator_ChunkQualityHook_TimeoutGuard — Round-11 Task 5.
+//
+// Injects a recorder that blocks indefinitely; the configured
+// hook timeout (set via CONTEXT_ENGINE_HOOK_TIMEOUT for the test)
+// must fire so the pipeline does not stall.
+func TestCoordinator_ChunkQualityHook_TimeoutGuard(t *testing.T) {
+	observability_ResetForTest(t)
+	t.Setenv("CONTEXT_ENGINE_HOOK_TIMEOUT", "10ms")
+	ResetHookTimeoutForTest()
+	t.Cleanup(ResetHookTimeoutForTest)
+
+	slow := &slowChunkQualityRecorder{}
+	store := &fakeStore{}
+	cfg := newFastConfig(
+		fakeFetch{fn: func(_ context.Context, evt IngestEvent) (*Document, error) {
+			return &Document{TenantID: evt.TenantID, SourceID: evt.SourceID, DocumentID: evt.DocumentID, Content: []byte("x"), ContentHash: "h"}, nil
+		}},
+		fakeParse{fn: func(_ context.Context, _ *Document) ([]Block, error) {
+			return []Block{{BlockID: "b-slow", Text: "hello"}}, nil
+		}},
+		fakeEmbed{fn: func(_ context.Context, _ string, blocks []Block) ([][]float32, string, error) {
+			return [][]float32{{1, 0, 0}}, "m", nil
+		}},
+		store,
+	)
+	cfg.ChunkScorer = NewChunkScorer()
+	cfg.ChunkQuality = slow
+
+	c, err := NewCoordinator(cfg)
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	if err := c.Submit(ctx, IngestEvent{Kind: EventDocumentChanged, TenantID: "t-slow", SourceID: "src-slow", DocumentID: "doc-slow"}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	c.CloseInputs()
+
+	// If the timeout guard is missing the pipeline blocks here
+	// forever; t.Fatal at the per-test deadline rather than the
+	// suite-wide deadline keeps the failure mode readable.
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// The pipeline must have written the chunk despite the
+	// slow recorder.
+	if storeCalls := storeCallCount(store); storeCalls < 1 {
+		t.Fatalf("storeCalls=%d want >=1 (slow recorder must not block Stage 4)", storeCalls)
+	}
+
+	if got := hookTimeoutCount("chunk_quality_record"); got < 1 {
+		t.Fatalf("hook_timeouts_total{hook=chunk_quality_record}=%d want >=1", got)
+	}
+}
+
+// slowChunkQualityRecorder blocks until its context is cancelled,
+// simulating a stuck Postgres write.
+type slowChunkQualityRecorder struct{}
+
+func (s *slowChunkQualityRecorder) Record(ctx context.Context, _ ChunkQualityReport) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// slowSyncHistory blocks until its context is cancelled.
+type slowSyncHistory struct{}
+
+func (s *slowSyncHistory) Start(ctx context.Context, _ string, _ string, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (s *slowSyncHistory) Finish(ctx context.Context, _ string, _ string, _ string, _ SyncStatus, _ int, _ int) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestCoordinator_SyncHistory_TimeoutGuard — Round-11 Task 5.
+//
+// A backfill kickoff event with a slow SyncHistory recorder must
+// not block the Stage-1 dispatcher beyond CONTEXT_ENGINE_HOOK_TIMEOUT.
+func TestCoordinator_SyncHistory_TimeoutGuard(t *testing.T) {
+	observability_ResetForTest(t)
+	t.Setenv("CONTEXT_ENGINE_HOOK_TIMEOUT", "10ms")
+	ResetHookTimeoutForTest()
+	t.Cleanup(ResetHookTimeoutForTest)
+
+	slow := &slowSyncHistory{}
+	store := &fakeStore{}
+	cfg := newFastConfig(
+		fakeFetch{fn: func(_ context.Context, evt IngestEvent) (*Document, error) {
+			return &Document{TenantID: evt.TenantID, SourceID: evt.SourceID, DocumentID: evt.DocumentID, Content: []byte("x"), ContentHash: "h"}, nil
+		}},
+		fakeParse{fn: func(_ context.Context, _ *Document) ([]Block, error) {
+			return []Block{{BlockID: "b-1", Text: "a"}}, nil
+		}},
+		fakeEmbed{fn: func(_ context.Context, _ string, blocks []Block) ([][]float32, string, error) {
+			return [][]float32{{1, 0, 0}}, "m", nil
+		}},
+		store,
+	)
+	cfg.SyncHistory = slow
+
+	c, err := NewCoordinator(cfg)
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+
+	// Kickoff event with SyncMode=backfill triggers recordSyncStart.
+	kickoff := IngestEvent{
+		Kind:       EventReindex,
+		TenantID:   "t-slow",
+		SourceID:   "src-slow",
+		DocumentID: KickoffDocumentID("src-slow"),
+		SyncMode:   SyncModeBackfill,
+	}
+	if err := c.Submit(ctx, kickoff); err != nil {
+		t.Fatalf("Submit kickoff: %v", err)
+	}
+	c.CloseInputs()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := hookTimeoutCount("sync_history_start"); got < 1 {
+		t.Fatalf("hook_timeouts_total{hook=sync_history_start}=%d want >=1", got)
+	}
+}
+
+func storeCallCount(store *fakeStore) int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return len(store.stored)
+}
+
+func observability_ResetForTest(t *testing.T) {
+	// Lazy import to avoid a package-level dep cycle.
+	t.Helper()
+	obsResetForTest()
+}

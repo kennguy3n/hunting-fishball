@@ -294,6 +294,14 @@ type RetrieveRequest struct {
 	// applies either the control or the variant retrieval config.
 	ExperimentName      string `json:"experiment_name,omitempty"`
 	ExperimentBucketKey string `json:"experiment_bucket_key,omitempty"`
+
+	// Source tags the call site for the query analytics recorder
+	// (Round-11 Task 9). Set internally by the various entry
+	// points (the gin /v1/retrieve handler defaults to "user",
+	// /v1/retrieve/batch sets "batch", cache-warm jobs set
+	// "cache_warm"). NOT user-settable over the wire — the json
+	// tag is "-" so any field on the inbound payload is ignored.
+	Source string `json:"-"`
 }
 
 // RetrieveHit is one entry in the response.
@@ -477,7 +485,11 @@ func (h *Handler) retrieve(c *gin.Context) {
 	// context with that timeout and substitute it on c.Request so
 	// every downstream c.Request.Context() call inherits it.
 	if h.cfg.LatencyBudget != nil {
-		if budget, ok := h.cfg.LatencyBudget(c.Request.Context(), tenantID); ok && budget > 0 {
+		// Round-11 Task 18: degrade gracefully if the per-tenant
+		// budget lookup is slow/unreachable. safeLatencyBudgetLookup
+		// returns ok=false on timeout/panic so the request keeps
+		// its caller-supplied deadline.
+		if budget, ok := safeLatencyBudgetLookup(c.Request.Context(), h.cfg.LatencyBudget, tenantID); ok && budget > 0 {
 			ctx, cancel := context.WithTimeout(c.Request.Context(), budget)
 			defer cancel()
 			c.Request = c.Request.WithContext(ctx)
@@ -526,7 +538,21 @@ func (h *Handler) retrieve(c *gin.Context) {
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
 			h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
-			h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, true, reqStart, nil, route)
+			// Round-11 Devin Review fix: project resp.Timings into
+			// the recorder's keyed map so the gin cache-hit row
+			// carries the same backend_timings schema as the
+			// cache-miss path (line 660) and the cache-aware entry
+			// point (RetrieveWithSnapshotCached, line 868). Passing
+			// nil here would re-introduce the cross-path schema
+			// drift that TestBackendTimingsSchemaParity (and the
+			// alignment work in commit 51b656a) explicitly guards
+			// against — dashboards joining query_analytics rows on
+			// backend_timings.<backend> would silently miss the gin
+			// cache-hit slice. The map is zero-valued by design (the
+			// cache stores the response shape but not the original
+			// pipeline timing); what matters is that the *key set*
+			// matches across all four call sites.
+			h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, true, reqStart, timingsToMap(resp.Timings), route, req.Source)
 			c.JSON(http.StatusOK, resp)
 
 			return
@@ -611,7 +637,8 @@ func (h *Handler) retrieve(c *gin.Context) {
 	// configured slots in the response and are written into the
 	// semantic cache alongside the dynamic hits.
 	if h.cfg.PinLookup != nil {
-		pinHits := h.cfg.PinLookup(c.Request.Context(), tenantID, req.Query)
+		// Round-11 Task 18: safe lookup returns nil on timeout/panic.
+		pinHits := safePinLookup(c.Request.Context(), h.cfg.PinLookup, tenantID, req.Query)
 		if len(pinHits) > 0 {
 			pins := make([]Pin, 0, len(pinHits))
 			for _, p := range pinHits {
@@ -636,13 +663,29 @@ func (h *Handler) retrieve(c *gin.Context) {
 	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
 		ttl := h.cfg.CacheTTL
 		if h.cfg.CacheTTLLookup != nil {
-			ttl = h.cfg.CacheTTLLookup(c.Request.Context(), tenantID, ttl)
+			// Round-11 Task 18: safe lookup falls back to the previous
+			// TTL value on timeout/panic.
+			ttl = safeCacheTTLLookup(c.Request.Context(), h.cfg.CacheTTLLookup, tenantID, ttl)
 		}
 		h.writeCacheOnMiss(c.Request.Context(), tenantID, channelID, vec, scopeHash, resp, ttl)
 	}
 
 	h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
-	h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, false, reqStart, backendTimingsMillis(backendTimings), route)
+	// Round-11 Devin Review fix: project resp.Timings into the
+	// recorder's keyed map so the gin cache-miss row carries the
+	// same backend_timings schema as the other three call sites
+	// (gin cache-hit line 555, RetrieveWithSnapshotCached cache-hit
+	// / cache-miss). Using backendTimingsMillis(backendTimings)
+	// here would emit only keys for backends that actually fired
+	// during fan-out, so a deployment that configures only Vector
+	// would write {"vector": 12} while the other paths write
+	// {"vector":0,"bm25":0,"graph":0,"memory":0} — same JSONB
+	// column, two different shapes. resp.Timings carries the same
+	// per-backend numbers via runPipelineFromVec, and
+	// timingsToMap pads zeros for unconfigured backends so the
+	// key set is stable. See TestGinHandler_CacheMiss_RecordsBackendTimings
+	// for the regression guard.
+	h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, false, reqStart, timingsToMap(resp.Timings), route, req.Source)
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -658,6 +701,41 @@ func backendTimingsMillis(in map[string]time.Duration) map[string]int64 {
 		out[k] = v.Milliseconds()
 	}
 	return out
+}
+
+// timingsToMap projects the public RetrieveTimings struct into
+// the keyed map the QueryAnalytics recorder expects.
+// RetrieveWithSnapshotCached no longer has access to the raw
+// per-backend time.Duration map the gin handler builds during
+// fan-out (backendTimingsMillis), but the response it returns
+// carries the same data in the RetrieveTimings struct. This helper
+// is the bridge — used on both the cache-hit path (zero-valued
+// timings, because the cache stores the response shape but not
+// the original pipeline timing) and the cache-miss path (real
+// per-backend timings from runPipelineFromVec). Keeping the
+// schema consistent across both paths is required so dashboards
+// can join cache_hit + non-cache_hit rows on the same
+// backend_timings keys.
+//
+// The key set MUST stay aligned with backendTimingsMillis — both
+// functions write into the same query_analytics.backend_timings
+// JSONB column, and dashboards aggregate per-backend latency by
+// joining rows on these keys. The canonical key names are the
+// Source* constants from merger.go ("vector", "bm25", "graph",
+// "memory"). MergeMs and RerankMs are deliberately excluded
+// because they are pipeline-stage timings, not per-backend
+// timings — backendTimingsMillis does not emit them either, and
+// adding them on only this path would re-introduce the same
+// schema-drift the alignment is meant to prevent. See
+// TestBackendTimingsSchemaParity in round11_review_test.go for
+// the regression guard.
+func timingsToMap(t RetrieveTimings) map[string]int64 {
+	return map[string]int64{
+		SourceVector: t.VectorMs,
+		SourceBM25:   t.BM25Ms,
+		SourceGraph:  t.GraphMs,
+		SourceMemory: t.MemoryMs,
+	}
 }
 
 // applyDeviceFirst computes the on-device-first hint and writes it
@@ -771,6 +849,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	if req.Query == "" {
 		return RetrieveResponse{}, errors.New("retrieval: query is required")
 	}
+	reqStart := time.Now()
 	// Round-6 Task 10: route through the configured A/B test (if
 	// any) BEFORE topK resolution so the variant's `top_k`
 	// override flows into both the cache scope hash and the
@@ -804,6 +883,17 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
 			h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+			// Round-11 Devin Review fix: record analytics from the
+			// cache-aware entry point so non-gin callers (batch
+			// handler, CacheWarmer) participate in query_analytics.
+			// req.Source is set by the caller (batch -> "batch",
+			// CacheWarmer -> "cache_warm"); empty string defaults
+			// to "user" downstream. Project resp.Timings into the
+			// recorder's keyed map so cache-hit rows carry the same
+			// backend_timings schema as cache-miss rows (zero-valued
+			// here, by design — the cache stores the response shape
+			// but not the original pipeline timing).
+			h.recordQueryAnalytics(ctx, tenantID, req.Query, len(resp.Hits), topK, true, reqStart, timingsToMap(resp.Timings), route, req.Source)
 			return resp, nil
 		}
 		observability.ObserveCacheMiss()
@@ -817,11 +907,20 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
 		ttl := h.cfg.CacheTTL
 		if h.cfg.CacheTTLLookup != nil {
-			ttl = h.cfg.CacheTTLLookup(ctx, tenantID, ttl)
+			// Round-11 Task 18: safe lookup falls back to the previous
+			// TTL value on timeout/panic.
+			ttl = safeCacheTTLLookup(ctx, h.cfg.CacheTTLLookup, tenantID, ttl)
 		}
 		h.writeCacheOnMiss(ctx, tenantID, channelID, vec, scopeHash, resp, ttl)
 	}
 	h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+	// Round-11 Devin Review fix: see cache-hit branch above for the
+	// rationale; this records the cache-miss path. Project the
+	// per-backend timing struct that runPipelineFromVec just
+	// populated into the keyed map the recorder stores so batch +
+	// cache-warm analytics carry per-backend latency rather than
+	// the previous empty backend_timings.
+	h.recordQueryAnalytics(ctx, tenantID, req.Query, len(resp.Hits), topK, false, reqStart, timingsToMap(resp.Timings), route, req.Source)
 	return resp, nil
 }
 

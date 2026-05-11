@@ -60,6 +60,21 @@ const (
 	CodeSyncHistoryFailed    Code = "ERR_SYNC_HISTORY_FAILED"
 	CodePinnedResultsFailed  Code = "ERR_PINNED_RESULTS_FAILED"
 	CodePipelineHealthFailed Code = "ERR_PIPELINE_HEALTH_FAILED"
+
+	// Round-11 Task 13: admin handler audit additions. The common
+	// gin.H{"error": "missing tenant context"} pattern landed in
+	// dozens of handlers; the catalog now owns the canonical code
+	// so downstream alerting can match on it uniformly.
+	CodeMissingTenant         Code = "ERR_MISSING_TENANT"
+	CodeInvalidRequestBody    Code = "ERR_INVALID_REQUEST_BODY"
+	CodeChunkQualityFailed    Code = "ERR_CHUNK_QUALITY_FAILED"
+	CodePolicyHistoryFailed   Code = "ERR_POLICY_HISTORY_FAILED"
+	CodeABTestResultsFailed   Code = "ERR_ABTEST_RESULTS_FAILED"
+	CodeDashboardListFailed   Code = "ERR_DASHBOARD_LIST_FAILED"
+	CodeSimulatorPersistFail  Code = "ERR_SIMULATOR_PERSIST_FAILED"
+	CodeSimulatorEvalFail     Code = "ERR_SIMULATOR_EVAL_FAILED"
+	CodeSimulatorDraftMissing Code = "ERR_SIMULATOR_DRAFT_MISSING"
+	CodeSyncStreamFailed      Code = "ERR_SYNC_STREAM_FAILED"
 )
 
 // Entry is one entry in the catalogue.
@@ -95,6 +110,18 @@ var DefaultCatalog = map[Code]Entry{
 	CodeSyncHistoryFailed:    {http.StatusInternalServerError, "sync history query failed", "check Postgres connectivity"},
 	CodePinnedResultsFailed:  {http.StatusInternalServerError, "pinned results update failed", "check Postgres connectivity"},
 	CodePipelineHealthFailed: {http.StatusInternalServerError, "pipeline health snapshot failed", "check ingest service health"},
+
+	// Round-11 Task 13: admin handler audit additions.
+	CodeMissingTenant:         {http.StatusUnauthorized, "missing tenant context", ""},
+	CodeInvalidRequestBody:    {http.StatusBadRequest, "invalid request body", "verify the JSON envelope and required fields"},
+	CodeChunkQualityFailed:    {http.StatusInternalServerError, "chunk quality query failed", "check Postgres connectivity"},
+	CodePolicyHistoryFailed:   {http.StatusInternalServerError, "policy history query failed", "check Postgres connectivity"},
+	CodeABTestResultsFailed:   {http.StatusInternalServerError, "ab-test results aggregation failed", "check Postgres connectivity"},
+	CodeDashboardListFailed:   {http.StatusInternalServerError, "dashboard list failed", "check Postgres connectivity"},
+	CodeSimulatorPersistFail:  {http.StatusInternalServerError, "simulator draft persist failed", "check Postgres connectivity"},
+	CodeSimulatorEvalFail:     {http.StatusInternalServerError, "simulator evaluation failed", "retry; if it persists, inspect the draft snapshot"},
+	CodeSimulatorDraftMissing: {http.StatusNotFound, "simulator draft not found", ""},
+	CodeSyncStreamFailed:      {http.StatusInternalServerError, "sync progress stream failed", "retry; if persistent, check ingest service health"},
 }
 
 // Error is the typed application error. Handlers create it via

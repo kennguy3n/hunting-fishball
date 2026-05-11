@@ -175,3 +175,55 @@ func TestQueryAnalytics_Handler_InvalidTime(t *testing.T) {
 		t.Fatalf("expected 400; got %d", w.Code)
 	}
 }
+
+// TestQueryAnalyticsRecorder_SourceFieldDefaults — Round-11 Task 9.
+//
+// Asserts that:
+//   - QueryAnalyticsEvent.Source maps to QueryAnalyticsRow.Source.
+//   - Empty source backfills to "user".
+//   - An unrecognised source string is normalised to "user".
+//   - The known constants (cache_warm, batch) round-trip unchanged.
+func TestQueryAnalyticsRecorder_SourceFieldDefaults(t *testing.T) {
+	t.Parallel()
+	store := admin.NewInMemoryQueryAnalyticsStore()
+	rec, err := admin.NewQueryAnalyticsRecorder(store)
+	if err != nil {
+		t.Fatalf("recorder: %v", err)
+	}
+	base := time.Now().UTC()
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"", admin.QueryAnalyticsSourceUser},
+		{admin.QueryAnalyticsSourceUser, admin.QueryAnalyticsSourceUser},
+		{admin.QueryAnalyticsSourceCacheWarm, admin.QueryAnalyticsSourceCacheWarm},
+		{admin.QueryAnalyticsSourceBatch, admin.QueryAnalyticsSourceBatch},
+		{"unknown-thing", admin.QueryAnalyticsSourceUser},
+	}
+	for i, c := range cases {
+		rec.Record(context.Background(), admin.QueryAnalyticsEvent{
+			TenantID:  "ta",
+			QueryText: "q",
+			Source:    c.input,
+			At:        base.Add(time.Duration(i) * time.Second),
+		})
+	}
+	rows, err := store.List(context.Background(), admin.QueryAnalyticsQuery{TenantID: "ta", Limit: 100})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != len(cases) {
+		t.Fatalf("got %d rows, want %d", len(rows), len(cases))
+	}
+	// rows come back DESC by created_at — reverse to match input order.
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		got[len(rows)-1-i] = r.Source
+	}
+	for i, c := range cases {
+		if got[i] != c.want {
+			t.Fatalf("case %d (input=%q): got source=%q, want %q", i, c.input, got[i], c.want)
+		}
+	}
+}

@@ -441,3 +441,91 @@ func TestCacheWarmOnMiss_SyncByDefault(t *testing.T) {
 		t.Fatalf("sync path returned too fast; elapsed=%v (expected ≥ ~200ms)", elapsed)
 	}
 }
+
+// trackingDiversifier records every Diversify invocation so the
+// Round-11 Task 6 batch-handler test can assert each sub-request
+// actually had its Diversity (lambda) threaded into the
+// post-rerank pipeline.
+type trackingDiversifier struct {
+	mu       sync.Mutex
+	calls    []float32
+	delegate retrieval.Diversifier
+}
+
+func (t *trackingDiversifier) Diversify(ctx context.Context, matches []*retrieval.Match, lambda float32, topK int) []*retrieval.Match {
+	t.mu.Lock()
+	t.calls = append(t.calls, lambda)
+	t.mu.Unlock()
+	if t.delegate != nil {
+		return t.delegate.Diversify(ctx, matches, lambda, topK)
+	}
+	return matches
+}
+
+func (t *trackingDiversifier) Calls() []float32 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]float32, len(t.calls))
+	copy(out, t.calls)
+	return out
+}
+
+// TestBatch_DiversityFieldThreadedToSubRequests — Round-11 Task 6.
+//
+// Confirms that BatchRequest.Requests[i].Diversity is honoured per
+// slot. Each sub-request is dispatched through Handler.RunBatch ->
+// runOne -> RetrieveWithSnapshotCached -> runPipelineFromVec, which
+// invokes the configured Diversifier when Diversity>0. The tracking
+// diversifier records the lambda passed to it; we assert each
+// non-zero sub-request appears in the call log.
+func TestBatch_DiversityFieldThreadedToSubRequests(t *testing.T) {
+	t.Parallel()
+	td := &trackingDiversifier{}
+	vs := &slowVectorStore{hits: []storage.QdrantHit{
+		{ID: "a:b:1", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}},
+		{ID: "a:b:2", Score: 0.8, Payload: map[string]any{"tenant_id": "tenant-a"}},
+	}}
+	h, err := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore: vs,
+		Embedder:    &fakeEmbedder{vec: []float32{1, 2}},
+		Diversifier: td,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	r := newRouter(t, h, "tenant-a")
+
+	body, _ := json.Marshal(retrieval.BatchRequest{Requests: []retrieval.RetrieveRequest{
+		{Query: "q1", Diversity: 0.7},
+		{Query: "q2", Diversity: 0.3},
+		{Query: "q3"}, // Diversity=0 — Diversifier MUST NOT be invoked.
+	}})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/v1/retrieve/batch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+
+	got := td.Calls()
+	// Diversifier invoked exactly twice (for the two non-zero
+	// sub-requests) with the supplied lambdas. Order is unstable
+	// because the batch fans out concurrently — assert on the
+	// set, not the slice.
+	wantSet := map[float32]bool{0.7: false, 0.3: false}
+	for _, v := range got {
+		if _, ok := wantSet[v]; !ok {
+			t.Fatalf("unexpected lambda observed: %v (got=%v)", v, got)
+		}
+		wantSet[v] = true
+	}
+	if len(got) != 2 {
+		t.Fatalf("diversifier calls=%v want exactly 2 (one per non-zero Diversity slot)", got)
+	}
+	for k, seen := range wantSet {
+		if !seen {
+			t.Fatalf("lambda %v missing from diversifier calls=%v", k, got)
+		}
+	}
+}
