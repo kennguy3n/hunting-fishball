@@ -139,6 +139,18 @@ phase.
 > notifications + backpressure metrics extend Phase 8
 > observability/operability; shard pre-generation extends
 > Phase 5. See PROGRESS.md for the per-task list.
+>
+> **Round 7** (2026-05-11) layers another 20 features —
+> primarily operational hardening: query analytics + A/B
+> results + retrieval pinning + cache warming + per-tenant
+> latency/cache budgets extend Phase 3 retrieval; chunk quality
+> scoring + sync conflict resolution + sync history extend
+> Phase 1 pipeline; notification retry/DLQ + credential health
+> + bulk source ops + audit export + pipeline health dashboard
+> + per-migration rollback scripts (015–031) extend Phase 8
+> operability. Full Round-6 + Round-7 wiring into `cmd/api` and
+> `cmd/ingest` ships in the same round. See PROGRESS.md for the
+> per-task list.
 
 ---
 

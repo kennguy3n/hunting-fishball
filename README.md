@@ -317,6 +317,43 @@ The full set of public + admin endpoints is documented in
 - API versioning middleware emits `X-API-Version` on every
   response and rejects unsupported versions with 406.
 
+**Round 7 additions:**
+
+- `GET /v1/admin/analytics/queries` — retrieval query analytics
+  with time-range, tenant, and top-N filters.
+- `GET /v1/admin/notifications/delivery-log` — notification
+  delivery attempts log (retry status, response code,
+  `next_retry_at`).
+- `GET /v1/admin/retrieval/experiments/:name/results` — A/B test
+  results aggregator (per-arm latency, hit count, cache hit rate).
+- `GET /v1/admin/sources/:id/credential-health` — connector
+  credential validity (set by the periodic credential health
+  worker).
+- `POST /v1/admin/retrieval/warm-cache` — pre-warm the semantic
+  cache for a list of `(tenant, query)` tuples; supports
+  `auto_top_n` mode reading from `query_analytics`.
+- `POST /v1/admin/sources/bulk` — bulk pause / resume /
+  disconnect with per-source error isolation.
+- `GET/PUT /v1/admin/tenants/:id/latency-budget` — per-tenant
+  retrieval P95 budget.
+- `GET /v1/admin/chunks/quality-report` — per-source chunk
+  quality distribution (length, language, embedding magnitude,
+  duplicate ratio).
+- `GET /v1/admin/audit/export?format=csv|jsonl` — streamed audit
+  trail export (chunked transfer encoding).
+- `GET/PUT /v1/admin/tenants/:id/cache-config` — per-tenant
+  semantic cache TTL.
+- `GET /v1/admin/sources/:id/sync-history` — historical sync
+  runs with status / duration / docs processed / docs failed.
+- `POST/GET/DELETE /v1/admin/retrieval/pins` — pinned retrieval
+  results.
+- `GET /v1/admin/pipeline/health` — per-stage pipeline health
+  dashboard (throughput, P50/P95 latency, retry, queue depth,
+  DLQ totals).
+- `migrations/rollback/015..031_*.down.sql` — full per-migration
+  rollback coverage; `make migrate-rollback` applies them in
+  reverse order.
+
 ---
 
 ## Quick start

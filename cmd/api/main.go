@@ -266,7 +266,7 @@ func run() error {
 	r.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	r.GET("/readyz", apiReadyzHandler(db, sharedRedis, qdrant))
 
-	apiMiddlewares := []gin.HandlerFunc{authPlaceholder, observability.GinLoggerMiddleware("api")}
+	apiMiddlewares := []gin.HandlerFunc{authPlaceholder, observability.GinLoggerMiddleware("api"), observability.APIVersionMiddleware(observability.APIVersionConfig{})}
 
 	// Phase 8 / Task 8: optional public-API rate limit. Active when
 	// CONTEXT_ENGINE_API_RATE_LIMIT (requests-per-second per tenant)
@@ -536,6 +536,158 @@ func run() error {
 		return fmt.Errorf("models handler: %w", err)
 	}
 	modelHandler.Register(api)
+
+	// Round-6 + Round-7 admin handlers. Each handler defaults to
+	// an in-memory store when there's no GORM-backed equivalent
+	// in production yet, so the API binary boots without external
+	// dependencies while still exposing the full surface for
+	// integration tests.
+	abtestStore := admin.NewInMemoryABTestStore()
+	if abtestHandler, aerr := admin.NewABTestHandler(abtestStore, auditRepo); aerr == nil {
+		abtestHandler.Register(api)
+	}
+	abtestRouter := admin.NewABTestRouter(abtestStore)
+	retrievalHandler.SetABTestRouter(retrieval.ABTestRouterAdapter{Router: abtestRouter})
+
+	// Round-7 Task 4 + Task 6: the A/B-test results aggregator must
+	// read from the *same* query-analytics store the recorder writes
+	// to, otherwise GET /v1/admin/retrieval/experiments/:name/results
+	// always returns zero arms. Hoist the store construction here so
+	// the aggregator and the recorder share one instance.
+	queryAnalyticsStore := admin.NewInMemoryQueryAnalyticsStore()
+
+	if abtestResults, aerr := admin.NewABTestResultsAggregator(queryAnalyticsStore); aerr == nil {
+		if arHandler, herr := admin.NewABTestResultsHandler(abtestResults); herr == nil {
+			arHandler.Register(api)
+		}
+	}
+
+	if tmplStore := admin.NewInMemoryConnectorTemplateStore(); tmplStore != nil {
+		if tmplHandler, terr := admin.NewConnectorTemplateHandler(tmplStore, auditRepo); terr == nil {
+			tmplHandler.Register(api)
+		}
+	}
+
+	notifStore := admin.NewInMemoryNotificationStore()
+	if notifHandler, nerr := admin.NewNotificationHandler(notifStore, auditRepo); nerr == nil {
+		notifHandler.Register(api)
+	}
+	notifDelivery := &admin.WebhookDelivery{Client: http.DefaultClient}
+	notifDispatcher, _ := admin.NewNotificationDispatcher(notifStore, notifDelivery)
+	notifDeliveryLog := admin.NewInMemoryNotificationDeliveryLog()
+	notifDispatcher.SetDeliveryLog(notifDeliveryLog)
+	if dlogHandler, derr := admin.NewNotificationDeliveryLogHandler(notifDeliveryLog); derr == nil {
+		dlogHandler.Register(api)
+	}
+	_ = notifDispatcher
+
+	if ecHandler, eerr := admin.NewEmbeddingConfigHandler(admin.NewEmbeddingConfigRepository(db), auditRepo); eerr == nil {
+		ecHandler.Register(api)
+	}
+
+	if rsHandler, rerr := admin.NewRetryStatsHandler(pipeline.NewRetryAnalytics()); rerr == nil {
+		rsHandler.Register(api)
+	}
+
+	if synHandler, serr := admin.NewSynonymsHandler(retrieval.NewInMemorySynonymStore(), auditRepo); serr == nil {
+		synHandler.Register(api)
+	}
+
+	// Round-7 Task 4: retrieval query analytics. The retrieval
+	// handler exposes a function-shaped hook to keep the import
+	// graph one-way (admin imports retrieval, never reverse). The
+	// `queryAnalyticsStore` is declared above so the A/B-test
+	// results aggregator shares the same in-memory backing store.
+	queryAnalyticsRec, _ := admin.NewQueryAnalyticsRecorder(queryAnalyticsStore)
+	retrievalHandler.SetQueryAnalyticsRecorder(func(ctx context.Context, e retrieval.QueryAnalyticsEvent) {
+		queryAnalyticsRec.Record(ctx, admin.QueryAnalyticsEvent{
+			TenantID: e.TenantID, QueryText: e.QueryText, TopK: e.TopK,
+			HitCount: e.HitCount, CacheHit: e.CacheHit, LatencyMS: e.LatencyMS,
+			BackendTimings: e.BackendTimings,
+			ExperimentName: e.ExperimentName, ExperimentArm: e.ExperimentArm,
+		})
+	})
+	if qaHandler, qerr := admin.NewQueryAnalyticsHandler(queryAnalyticsStore); qerr == nil {
+		qaHandler.Register(api)
+	}
+
+	// Round-7 Task 7: credential health worker + endpoint.
+	credHealth := admin.NewInMemoryCredentialHealthStore()
+	if chHandler, cerr := admin.NewCredentialHealthHandler(credHealth); cerr == nil {
+		chHandler.Register(api)
+	}
+
+	// Round-7 Task 9: retrieval cache warming endpoint. The
+	// executor is a thin closure around retrievalHandler so the
+	// admin package stays free of an import on the retrieval
+	// package and the inverse cycle is broken.
+	cacheWarmer, _ := retrieval.NewCacheWarmer(retrievalHandler, liveResolver)
+	cacheWarmExec := admin.CacheWarmExecutorFunc(func(ctx context.Context, tuples []admin.CacheWarmTuple) admin.CacheWarmSummary {
+		rtuples := make([]retrieval.WarmTuple, 0, len(tuples))
+		for _, t := range tuples {
+			rtuples = append(rtuples, retrieval.WarmTuple{TenantID: t.TenantID, Query: t.Query, TopK: t.TopK, Channels: t.Channels, PrivacyMode: t.PrivacyMode})
+		}
+		rsum := cacheWarmer.Warm(ctx, rtuples)
+		out := admin.CacheWarmSummary{Total: rsum.Total, Succeeded: rsum.Succeeded, Failed: rsum.Failed}
+		for _, r := range rsum.Results {
+			errMsg := ""
+			if r.Err != nil {
+				errMsg = r.Err.Error()
+			}
+			out.Results = append(out.Results, admin.CacheWarmResult{
+				Query:   r.Tuple.Query,
+				Hits:    r.Hits,
+				Latency: r.Latency,
+				Error:   errMsg,
+			})
+		}
+		return out
+	})
+	if cwHandler, werr := admin.NewCacheWarmHandler(admin.CacheWarmHandlerConfig{Warmer: cacheWarmExec, Analytics: queryAnalyticsStore, AutoTopN: 10, Audit: auditRepo}); werr == nil {
+		cwHandler.Register(api)
+	}
+
+	// Round-7 Task 10: bulk source operations.
+	if bulkHandler, berr := admin.NewBulkSourceHandler(sourceRepo, auditRepo); berr == nil {
+		bulkHandler.Register(api)
+	}
+
+	// Round-7 Task 11: per-tenant latency budget.
+	if lbHandler, lerr := admin.NewLatencyBudgetHandler(admin.NewInMemoryLatencyBudgetStore(), auditRepo); lerr == nil {
+		lbHandler.Register(api)
+	}
+
+	// Round-7 Task 12: chunk quality report.
+	if cqHandler, cerr := admin.NewChunkQualityHandler(admin.NewInMemoryChunkQualityStore()); cerr == nil {
+		cqHandler.Register(api)
+	}
+
+	// Round-7 Task 14: audit export.
+	if aeHandler, aerr := admin.NewAuditExportHandler(auditRepo, auditRepo); aerr == nil {
+		aeHandler.Register(api)
+	}
+
+	// Round-7 Task 15: per-tenant cache TTL.
+	if ccHandler, cerr := admin.NewCacheConfigHandler(admin.NewInMemoryCacheTTLStore(), auditRepo); cerr == nil {
+		ccHandler.Register(api)
+	}
+
+	// Round-7 Task 16: sync history.
+	if shHandler, serr := admin.NewSyncHistoryHandler(admin.NewInMemorySyncHistoryRecorder()); serr == nil {
+		shHandler.Register(api)
+	}
+
+	// Round-7 Task 17: pinned retrieval results.
+	if prHandler, perr := admin.NewPinnedResultsHandler(admin.NewInMemoryPinnedResultStore(nil), auditRepo); perr == nil {
+		prHandler.Register(api)
+	}
+
+	// Round-7 Task 18: pipeline health dashboard.
+	if phAgg, perr := admin.NewPipelineHealthAggregator(observability.Registry); perr == nil {
+		if phHandler, herr := admin.NewPipelineHealthHandler(phAgg); herr == nil {
+			phHandler.Register(api)
+		}
+	}
 
 	// Phase 6 / Tasks 14 + 17: B2C client SDK surface. Mounts
 	// /v1/health, /v1/capabilities, and /v1/sync/schedule.

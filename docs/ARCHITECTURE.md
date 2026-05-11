@@ -1520,6 +1520,114 @@ implements it.
   `GET /v1/admin/pipeline/retry-stats` exposes a JSON snapshot
   used by dashboards and runbook automation.
 
+### Tech choices added in Round 7
+
+Round 7 layers operational hardening on top of Round 6: every
+new feature reuses an existing storage/admin surface and most
+hang off the same Postgres migrations chain (024 → 031). The
+import graph stays one-way (admin imports retrieval; retrieval
+never imports admin) thanks to a pair of new setters on
+`*retrieval.Handler` that let the wiring layer attach the
+admin-owned ABTestRouter and QueryAnalyticsRecorder after
+construction.
+
+- **Retrieval query analytics**
+  (`internal/admin/query_analytics.go`,
+  `migrations/024_query_analytics.sql`). Every successful
+  Retrieve emits a `QueryAnalyticsEvent` containing the truncated
+  query text, query hash, top-k, per-backend timings, hit count,
+  cache-hit flag, and (when set) experiment name/arm.
+  `GET /v1/admin/analytics/queries` supports time-range,
+  tenant, and top-N filters; the top-N path feeds the cache
+  warmer (Task 9).
+- **Notification dispatcher retry + dead-letter**
+  (`internal/admin/notification.go`,
+  `internal/admin/notification_delivery_log.go`,
+  `migrations/025_notification_delivery_log.sql`).
+  `WebhookDelivery.Send` now retries with 1s/5s/15s
+  exponential backoff; every attempt is persisted to
+  `notification_delivery_log` and surfaced via
+  `GET /v1/admin/notifications/delivery-log`.
+- **A/B test results aggregator**
+  (`internal/admin/abtest_results.go`). Reads `query_analytics`
+  rows tagged with an experiment + arm and groups them per arm
+  to compute avg/p50/p95 latency, hit count, and cache-hit rate.
+  Endpoint: `GET /v1/admin/retrieval/experiments/:name/results`.
+- **Credential health worker**
+  (`internal/admin/credential_health.go`,
+  `migrations/026_credential_valid.sql`). Periodically calls
+  `connector.Validate()` for every active source, persists a
+  boolean `credential_valid` on `source_health`, and emits a
+  `source.credential_invalid` audit event on failure. Endpoint:
+  `GET /v1/admin/sources/:id/credential-health`.
+- **Retrieval cache warming**
+  (`internal/retrieval/cache_warmer.go`,
+  `internal/admin/cache_warm_handler.go`). Replays a list of
+  `(tenant, query)` tuples through the retrieval handler to
+  populate the Redis semantic cache; optional `auto_top_n` mode
+  pulls the tuples from `query_analytics`. Endpoint:
+  `POST /v1/admin/retrieval/warm-cache`.
+- **Bulk source operations**
+  (`internal/admin/bulk_source_handler.go`). Fan-out
+  pause/resume/disconnect with per-source error isolation —
+  one failure does not abort the batch. Each per-source action
+  emits its own audit event. Endpoint:
+  `POST /v1/admin/sources/bulk`.
+- **Per-tenant latency budgets**
+  (`internal/admin/latency_budget.go`,
+  `migrations/027_latency_budgets.sql`). Stores per-tenant
+  `max_latency_ms` and seeds the retrieval handler's request
+  default when the request omits the field. Endpoints:
+  `GET/PUT /v1/admin/tenants/:id/latency-budget`.
+- **Chunk quality scoring**
+  (`internal/pipeline/chunk_scorer.go`,
+  `internal/admin/chunk_quality_handler.go`,
+  `migrations/028_chunk_quality.sql`). Stage-4 pre-write hook
+  scores each chunk on text length, language detection
+  confidence, embedding magnitude, and duplicate ratio.
+  Aggregated per source via
+  `GET /v1/admin/chunks/quality-report`.
+- **Source sync conflict resolver**
+  (`internal/pipeline/conflict_resolver.go`). Last-writer-wins
+  policy keyed on a monotonic `content_version` per
+  (tenant, document); stale writes are dropped, emitting a
+  `chunk.conflict_resolved` audit event with the resolution
+  strategy.
+- **Audit trail export**
+  (`internal/admin/audit_export.go`). Streams matching audit
+  rows as CSV or JSON Lines using chunked transfer encoding so
+  multi-million-row exports finish without buffering. Endpoint:
+  `GET /v1/admin/audit/export?format=csv|jsonl&since=&until=&...`.
+- **Per-tenant cache TTL**
+  (`internal/admin/cache_config.go`,
+  `migrations/029_cache_config.sql`). Stores per-tenant
+  semantic-cache TTL; the Redis writer falls back to the global
+  default when no row exists. Endpoints:
+  `GET/PUT /v1/admin/tenants/:id/cache-config`.
+- **Connector sync history**
+  (`internal/admin/sync_history.go`,
+  `migrations/030_sync_history.sql`). Pipeline consumer records
+  start/end/status/docs_processed/docs_failed per sync run.
+  Endpoint: `GET /v1/admin/sources/:id/sync-history?limit=N`.
+- **Retrieval result pinning**
+  (`internal/admin/pinned_results.go`,
+  `internal/retrieval/pin_apply.go`,
+  `migrations/031_pinned_results.sql`). Admins pin specific
+  chunk IDs to fixed positions for an exact-match query. The
+  retrieval handler invokes `ApplyPins` after the policy filter
+  and before MMR diversity, deduplicating any hit that already
+  appears in the pin list. Endpoints:
+  `POST/GET/DELETE /v1/admin/retrieval/pins`.
+- **Pipeline stage health dashboard**
+  (`internal/admin/pipeline_health.go`). Reads the in-process
+  Prometheus registry and aggregates per-stage throughput,
+  P50/P95 latency, retry rate, queue depth, and DLQ totals.
+  Endpoint: `GET /v1/admin/pipeline/health`.
+- **Rollback scripts 015–031**
+  (`migrations/rollback/*.down.sql`). Every numeric prefix
+  under `migrations/` now has a matching `down.sql`;
+  `migrations/rollback/rollback_test.go` locks the contract.
+
 ---
 
 ## 10. Deployment & Scaling

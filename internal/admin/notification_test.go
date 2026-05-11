@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kennguy3n/hunting-fishball/internal/admin"
 )
@@ -73,14 +75,14 @@ type fakeDelivery struct {
 	fails bool
 }
 
-func (f *fakeDelivery) Send(_ context.Context, target string, _ admin.NotificationChannel, _ []byte) error {
+func (f *fakeDelivery) Send(_ context.Context, target string, _ admin.NotificationChannel, _ []byte) (admin.DeliveryResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fails {
-		return errors.New("upstream broken")
+		return admin.DeliveryResult{Attempts: 1}, errors.New("upstream broken")
 	}
 	f.hits = append(f.hits, target)
-	return nil
+	return admin.DeliveryResult{StatusCode: 200, Attempts: 1}, nil
 }
 
 func (f *fakeDelivery) snapshot() []string {
@@ -136,8 +138,15 @@ func TestWebhookDelivery_HTTP(t *testing.T) {
 	}))
 	defer srv.Close()
 	d := &admin.WebhookDelivery{}
-	if err := d.Send(context.Background(), srv.URL, admin.NotificationChannelWebhook, []byte(`{"x":1}`)); err != nil {
+	res, err := d.Send(context.Background(), srv.URL, admin.NotificationChannelWebhook, []byte(`{"x":1}`))
+	if err != nil {
 		t.Fatalf("send: %v", err)
+	}
+	if res.StatusCode != 200 {
+		t.Fatalf("expected 200; got %d", res.StatusCode)
+	}
+	if res.Attempts != 1 {
+		t.Fatalf("expected 1 attempt; got %d", res.Attempts)
 	}
 	select {
 	case b := <-got:
@@ -146,6 +155,211 @@ func TestWebhookDelivery_HTTP(t *testing.T) {
 		}
 	default:
 		t.Fatalf("server never received request")
+	}
+}
+
+// TestWebhookDelivery_ShortCircuits4xx is the regression test for
+// the retry-on-deterministic-4xx bug surfaced by Devin Review on
+// PR #16. Pre-fix, any response with StatusCode >= 400 triggered
+// the default 1s/5s/15s backoff cliff — a 400/401/403/404/422
+// from a misconfigured webhook target burned 21s per subscriber
+// before dead-lettering, even though every attempt sent the same
+// request body and was guaranteed to fail identically.
+//
+// Post-fix, 4xx other than 429 returns after exactly one attempt
+// and without sleeping; 5xx and 429 still retry through the
+// configured backoff.
+func TestWebhookDelivery_ShortCircuits4xx(t *testing.T) {
+	t.Parallel()
+
+	t.Run("4xx_returns_after_one_attempt_without_sleeping", func(t *testing.T) {
+		t.Parallel()
+		for _, code := range []int{
+			http.StatusBadRequest,          // 400
+			http.StatusUnauthorized,        // 401
+			http.StatusForbidden,           // 403
+			http.StatusNotFound,            // 404
+			http.StatusUnprocessableEntity, // 422
+		} {
+			code := code
+			t.Run(http.StatusText(code), func(t *testing.T) {
+				t.Parallel()
+				var hits int32
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					atomic.AddInt32(&hits, 1)
+					http.Error(w, "no", code)
+				}))
+				t.Cleanup(srv.Close)
+				var slept int32
+				d := &admin.WebhookDelivery{
+					Sleep: func(time.Duration) { atomic.AddInt32(&slept, 1) },
+				}
+				res, err := d.Send(context.Background(), srv.URL, admin.NotificationChannelWebhook, []byte(`{}`))
+				if err == nil {
+					t.Fatalf("expected error on %d; got nil", code)
+				}
+				if res.StatusCode != code {
+					t.Fatalf("expected status %d; got %d", code, res.StatusCode)
+				}
+				if res.Attempts != 1 {
+					t.Fatalf("expected exactly 1 attempt (deterministic 4xx); got %d", res.Attempts)
+				}
+				if got := atomic.LoadInt32(&hits); got != 1 {
+					t.Fatalf("expected exactly 1 HTTP hit; got %d", got)
+				}
+				if got := atomic.LoadInt32(&slept); got != 0 {
+					t.Fatalf("expected zero backoff sleeps on deterministic 4xx; got %d", got)
+				}
+			})
+		}
+	})
+
+	t.Run("5xx_still_retries", func(t *testing.T) {
+		t.Parallel()
+		var hits int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+		var slept int32
+		d := &admin.WebhookDelivery{
+			Backoff: []time.Duration{0, 0, 0},
+			Sleep:   func(time.Duration) { atomic.AddInt32(&slept, 1) },
+		}
+		res, err := d.Send(context.Background(), srv.URL, admin.NotificationChannelWebhook, []byte(`{}`))
+		if err == nil {
+			t.Fatalf("expected error on 500; got nil")
+		}
+		if res.Attempts != 4 {
+			t.Fatalf("expected 4 attempts (1 + len(backoff)); got %d", res.Attempts)
+		}
+		if got := atomic.LoadInt32(&hits); got != 4 {
+			t.Fatalf("expected 4 HTTP hits; got %d", got)
+		}
+		if got := atomic.LoadInt32(&slept); got != 3 {
+			t.Fatalf("expected 3 backoff sleeps; got %d", got)
+		}
+	})
+
+	t.Run("429_still_retries", func(t *testing.T) {
+		t.Parallel()
+		var hits int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+		}))
+		t.Cleanup(srv.Close)
+		d := &admin.WebhookDelivery{
+			Backoff: []time.Duration{0, 0},
+			Sleep:   func(time.Duration) {},
+		}
+		res, err := d.Send(context.Background(), srv.URL, admin.NotificationChannelWebhook, []byte(`{}`))
+		if err == nil {
+			t.Fatalf("expected error on 429; got nil")
+		}
+		if res.Attempts != 3 {
+			t.Fatalf("expected 3 attempts (1 + len(backoff)) on 429; got %d", res.Attempts)
+		}
+		if got := atomic.LoadInt32(&hits); got != 3 {
+			t.Fatalf("expected 3 HTTP hits on 429 retry path; got %d", got)
+		}
+	})
+}
+
+// TestNotificationDispatcher_ConcurrentDispatch exercises the
+// concurrent-Dispatch pattern that surfaced the previous race on
+// WebhookDelivery.LastStatusCode / LastAttempts. Multiple
+// goroutines share one *WebhookDelivery and one dispatcher;
+// `go test -race` must not report a data race, and every
+// goroutine must observe a status code matching the response it
+// actually received.
+func TestNotificationDispatcher_ConcurrentDispatch(t *testing.T) {
+	t.Parallel()
+
+	// httptest server alternates 200/500 by tenant so each
+	// goroutine sees a deterministic distinct outcome.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte(`"tenant_id":"odd"`)) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	store := admin.NewInMemoryNotificationStore()
+	for _, tn := range []string{"odd", "even"} {
+		if err := store.Create(&admin.NotificationPreference{
+			TenantID:  tn,
+			EventType: "ev",
+			Channel:   admin.NotificationChannelWebhook,
+			Target:    srv.URL,
+			Enabled:   true,
+		}); err != nil {
+			t.Fatalf("seed pref: %v", err)
+		}
+	}
+
+	wh := &admin.WebhookDelivery{
+		Client:  http.DefaultClient,
+		Backoff: nil,
+		// Single attempt — we are stressing concurrent state,
+		// not retry behavior.
+		Sleep: func(time.Duration) {},
+	}
+	// Override the package default backoff for this test to a
+	// single zero-duration retry slot via an empty slice. We
+	// want the dispatcher's Send call to make exactly one HTTP
+	// hit per goroutine.
+	wh.Backoff = []time.Duration{}
+
+	disp, err := admin.NewNotificationDispatcher(store, wh)
+	if err != nil {
+		t.Fatalf("dispatcher: %v", err)
+	}
+	log := admin.NewInMemoryNotificationDeliveryLog()
+	disp.SetDeliveryLog(log)
+
+	var wg sync.WaitGroup
+	const N = 32
+	for i := 0; i < N; i++ {
+		tn := "odd"
+		if i%2 == 0 {
+			tn = "even"
+		}
+		wg.Add(1)
+		go func(tn string) {
+			defer wg.Done()
+			_ = disp.Dispatch(context.Background(), tn, "ev", map[string]any{"i": tn})
+		}(tn)
+	}
+	wg.Wait()
+
+	// Every Dispatch records exactly one row, so totals must
+	// match. Per-row Attempt is always 1; ResponseCode is 200
+	// for "even" tenants and 500 for "odd" tenants.
+	oddRows, _ := log.List(context.Background(), "odd", 1000)
+	evenRows, _ := log.List(context.Background(), "even", 1000)
+	if len(oddRows)+len(evenRows) != N {
+		t.Fatalf("expected %d rows total; got odd=%d even=%d", N, len(oddRows), len(evenRows))
+	}
+	for _, r := range oddRows {
+		if r.ResponseCode != http.StatusInternalServerError {
+			t.Fatalf("odd tenant row has wrong status: %+v", r)
+		}
+		if r.Attempt != 1 {
+			t.Fatalf("odd row should be 1 attempt; got %d", r.Attempt)
+		}
+	}
+	for _, r := range evenRows {
+		if r.ResponseCode != http.StatusOK {
+			t.Fatalf("even tenant row has wrong status: %+v", r)
+		}
+		if r.Attempt != 1 {
+			t.Fatalf("even row should be 1 attempt; got %d", r.Attempt)
+		}
 	}
 }
 

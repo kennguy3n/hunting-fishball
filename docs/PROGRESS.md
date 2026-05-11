@@ -435,6 +435,86 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-11: **Round 7: Next 20 tasks — analytics, wiring, hardening, rollbacks**.
+  - **Task 1**: Rollback scripts for migrations 015–031 — every numeric prefix
+    under `migrations/` now has a matching `migrations/rollback/NNN_*.down.sql`;
+    `rollback_test.go` enforces the contract.
+  - **Task 2**: Full Round-6 wiring into `cmd/api/main.go` — `APIVersionMiddleware`,
+    `ABTestHandler`+`ABTestResultsHandler`, `ConnectorTemplateHandler`,
+    `NotificationHandler`+`NotificationDeliveryLogHandler`,
+    `EmbeddingConfigHandler`, `RetryStatsHandler`, `SynonymsHandler`,
+    `QueryAnalyticsHandler`, `CredentialHealthHandler`, `CacheWarmHandler`,
+    `BulkSourceHandler`, plus every Round-7 admin handler (latency budget,
+    chunk quality, audit export, cache config, sync history, pinned results,
+    pipeline health). New `Handler.SetABTestRouter` /
+    `Handler.SetQueryAnalyticsRecorder` setters keep the admin↔retrieval
+    import graph one-way.
+  - **Task 3**: Round-6 ingest wiring in `cmd/ingest/main.go` — semantic dedup
+    behind `CONTEXT_ENGINE_DEDUP_ENABLED`, priority buffer behind
+    `CONTEXT_ENGINE_PRIORITY_ENABLED`, embedding config resolver, retry
+    analytics aggregator constructed alongside the coordinator.
+  - **Task 4**: Retrieval query analytics —
+    `internal/admin/query_analytics.go`, `migrations/024_query_analytics.sql`,
+    `GET /v1/admin/analytics/queries` with `top` mode, recorded after every
+    successful retrieve via the new handler hook.
+  - **Task 5**: Notification dispatcher retry + dead-letter — exponential
+    backoff (1s/5s/15s) inside `WebhookDelivery.Send`,
+    `notification_delivery_log` table (`migrations/025_*.sql`),
+    `GET /v1/admin/notifications/delivery-log`.
+  - **Task 6**: A/B test results endpoint — `internal/admin/abtest_results.go`
+    aggregates `query_analytics` rows per arm,
+    `GET /v1/admin/retrieval/experiments/:name/results` returns
+    P50/P95 latency, hit count, cache hit rate per arm.
+  - **Task 7**: Credential health worker —
+    `internal/admin/credential_health.go`, `migrations/026_credential_valid.sql`,
+    `GET /v1/admin/sources/:id/credential-health`, emits
+    `source.credential_invalid` audit events.
+  - **Task 8**: GraphRAG e2e — `tests/e2e/graphrag_test.go` (build tag `e2e`)
+    exercises Stage 3b extraction → FalkorDB writes → retrieval-time graph
+    lookup → deletion prune.
+  - **Task 9**: Retrieval cache warming —
+    `internal/retrieval/cache_warmer.go` +
+    `internal/admin/cache_warm_handler.go`,
+    `POST /v1/admin/retrieval/warm-cache` with optional auto-top-N from
+    query analytics.
+  - **Task 10**: Bulk source operations —
+    `internal/admin/bulk_source_handler.go`,
+    `POST /v1/admin/sources/bulk` with concurrent fan-out and per-source
+    isolation; emits one audit row per source.
+  - **Task 11**: Per-tenant retrieval latency budget —
+    `internal/admin/latency_budget.go`, `migrations/027_latency_budgets.sql`,
+    `GET/PUT /v1/admin/tenants/:id/latency-budget`.
+  - **Task 12**: Chunk quality scoring —
+    `internal/pipeline/chunk_scorer.go`, `migrations/028_chunk_quality.sql`,
+    `GET /v1/admin/chunks/quality-report` aggregated per source.
+  - **Task 13**: Source sync conflict resolution —
+    `internal/pipeline/conflict_resolver.go` with last-writer-wins and
+    monotonic `content_version`; emits `chunk.conflict_resolved` audit events.
+  - **Task 14**: Audit trail export — `internal/admin/audit_export.go`,
+    `GET /v1/admin/audit/export?format=csv|jsonl&...` streamed with chunked
+    transfer encoding.
+  - **Task 15**: Per-tenant cache TTL —
+    `internal/admin/cache_config.go`, `migrations/029_cache_config.sql`,
+    `GET/PUT /v1/admin/tenants/:id/cache-config`.
+  - **Task 16**: Connector sync history —
+    `internal/admin/sync_history.go`, `migrations/030_sync_history.sql`,
+    `GET /v1/admin/sources/:id/sync-history?limit=N`.
+  - **Task 17**: Retrieval result pinning —
+    `internal/admin/pinned_results.go` (CRUD) +
+    `internal/retrieval/pin_apply.go` (merge), `migrations/031_pinned_results.sql`,
+    `POST/GET/DELETE /v1/admin/retrieval/pins`.
+  - **Task 18**: Pipeline stage health dashboard —
+    `internal/admin/pipeline_health.go`, `GET /v1/admin/pipeline/health`
+    reads Prometheus histograms and counters for throughput, P50/P95
+    latency, retry, queue depth, DLQ totals.
+  - **Task 19**: Comprehensive Round-7 e2e test — `tests/e2e/round7_test.go`
+    covers query analytics, notification delivery, A/B results, credential
+    health, bulk source ops, cache warming, chunk quality, audit export,
+    sync history, latency budget, cache TTL, and pinned results.
+  - **Task 20**: Documentation updated — Round-7 sections added to
+    PROGRESS.md, PHASES.md, ARCHITECTURE.md, README.md; directory trees
+    refreshed; checkbox audit passed.
+
 - 2026-05-10: **Round 6: Next 20 tasks — retrieval diversity, semantic dedup,
   query expansion, chunk ACL, streaming, and more**.
   - **Task 1**: Retrieval result diversity (MMR) — `internal/retrieval/diversifier.go`,
