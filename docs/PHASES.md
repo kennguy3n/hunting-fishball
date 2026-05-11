@@ -140,6 +140,31 @@ phase.
 > observability/operability; shard pre-generation extends
 > Phase 5. See PROGRESS.md for the per-task list.
 >
+> **Round 11** (2026-05-11) layers another 20 tasks focused on
+> bug fixes, observability completeness, and graceful
+> degradation. Highlights: the `Makefile` `fuzz` target now
+> enumerates each fuzz target individually (carryover from
+> commit a0cf6229); the Stage-4 GORM hooks are wrapped in a
+> per-call timeout (`CONTEXT_ENGINE_HOOK_TIMEOUT`, default
+> 500ms) so a slow Postgres write cannot stall the pipeline;
+> the batch retrieve handler threads `Diversity` through
+> sub-requests and the SSE streamer threads the explain trace
+> per event; `shard.Generator` filters chunks by the policy
+> snapshot's chunk-ACL; `query_analytics` adds a `source`
+> column (`user`/`cache_warm`/`batch`) with migration 033;
+> `/readyz` returns per-backend latency
+> (`postgres_ms`/`redis_ms`/`qdrant_ms`); four new alerts
+> (`ChunkQualityScoreDropped`, `CacheHitRateLow`,
+> `CredentialHealthDegraded`, `GORMStoreLatencyHigh`) ship
+> in `deploy/alerts.yaml`; Prometheus cardinality is now
+> capped by test (no `tenant_id` labels); 10 new structured
+> admin error codes replace ad-hoc `gin.H{"error"…}`
+> returns; `migrations/migration_order_test.go` enforces
+> prefix discipline; the retrieval handler's GORM lookups
+> degrade gracefully (200ms timeout + panic recovery +
+> fallback to defaults) rather than 500ing on a sick store.
+> See PROGRESS.md for the per-task list.
+
 > **Round 10** (2026-05-11) layers another 20 tasks that
 > *wire* the components shipped in Rounds 7–9 into the API +
 > ingest binaries and add the integration / e2e gates that

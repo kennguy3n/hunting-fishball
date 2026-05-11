@@ -177,7 +177,95 @@ components:
           items: { $ref: '#/components/schemas/SyncProgressItem' }
     DashboardResponse:
       type: object
-      additionalProperties: true
+      # Round-11 Task 17: typed schema replaces the
+      # additionalProperties stub. Matches admin.DashboardResponse
+      # in internal/admin/dashboard_handler.go.
+      properties:
+        tenant_id: { type: string }
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              source_id: { type: string }
+              connector: { type: string }
+              status: { type: string }
+              last_synced_at: { type: string, format: date-time }
+              chunk_count: { type: integer }
+              error_count: { type: integer }
+              credential_valid: { type: boolean }
+        pipeline:
+          $ref: '#/components/schemas/PipelineHealthReport'
+        cache:
+          type: object
+          properties:
+            hit_rate: { type: number, format: float }
+            miss_count: { type: integer }
+            hit_count: { type: integer }
+    HealthResponse:
+      type: object
+      # Round-11 Task 17: matches b2c.HealthResponse.
+      properties:
+        status: { type: string, example: ok }
+        time: { type: string, format: date-time }
+        version: { type: string }
+    PipelineStageHealth:
+      type: object
+      # Round-11 Task 17: matches admin.PipelineStageHealth.
+      properties:
+        stage: { type: string, enum: [fetch, parse, embed, store] }
+        throughput: { type: number, format: float }
+        avg_latency_ms: { type: number, format: float }
+        p95_latency_ms: { type: number, format: float }
+        retries: { type: number, format: float }
+        queue_depth: { type: number, format: float }
+        dlq_total: { type: number, format: float }
+    PipelineHealthReport:
+      type: object
+      # Round-11 Task 17: matches admin.PipelineHealthReport.
+      properties:
+        stages:
+          type: array
+          items: { $ref: '#/components/schemas/PipelineStageHealth' }
+    AuditListResponse:
+      type: object
+      # Round-11 Task 17: shape returned by /v1/admin/audit.
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditLog' }
+        next_page_token: { type: string }
+    DLQListResponse:
+      type: object
+      # Round-11 Task 17.
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DLQEntry' }
+        next_page_token: { type: string }
+    PolicyDraft:
+      type: object
+      # Round-11 Task 17.
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        author: { type: string }
+        body: { type: object, additionalProperties: true }
+        status: { type: string, enum: [draft, promoted, rejected] }
+        created_at: { type: string, format: date-time }
+    PolicyDraftList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PolicyDraft' }
+    SourceList:
+      type: object
+      # Round-11 Task 17.
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Source' }
     ReindexRequest:
       type: object
       required: [tenant_id, source_id]
@@ -187,7 +275,18 @@ components:
         namespace_id: { type: string }
     Capabilities:
       type: object
-      additionalProperties: true
+      # Round-11 Task 17: typed schema matching b2c.Capabilities.
+      properties:
+        enabled_backends:
+          type: array
+          items: { type: string, enum: [vector, bm25, graph, memory] }
+        privacy_modes:
+          type: array
+          items: { type: string, enum: [no-ai, local-only, local-api, hybrid, remote] }
+        local_shard_sync: { type: boolean }
+        privacy_strip: { type: boolean }
+        device_first: { type: boolean }
+        server_version: { type: string }
 paths:
   /healthz:
     get:
@@ -211,7 +310,9 @@ paths:
       parameters:
         - $ref: '#/components/parameters/TenantHeader'
       responses:
-        '200': { description: OK }
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/HealthResponse' } } }
   /v1/capabilities:
     get:
       summary: B2C capabilities (enabled backends, privacy modes, feature flags).
@@ -382,7 +483,9 @@ paths:
           name: page_token
           schema: { type: string }
       responses:
-        '200': { description: OK }
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AuditListResponse' } } }
   /v1/admin/audit/{id}:
     get:
       summary: Admin audit log lookup by id.
@@ -393,7 +496,9 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: OK }
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AuditLog' } } }
         '404': { description: Not found }
   /v1/admin/sources:
     post:
@@ -413,7 +518,9 @@ paths:
       parameters:
         - $ref: '#/components/parameters/TenantHeader'
       responses:
-        '200': { description: OK }
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/SourceList' } } }
   /v1/admin/sources/{id}:
     get:
       summary: Fetch a source.
@@ -482,7 +589,9 @@ paths:
       parameters:
         - $ref: '#/components/parameters/TenantHeader'
       responses:
-        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/DLQEntry' } } } } }
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/DLQListResponse' } } }
   /v1/admin/dlq/{id}:
     get:
       summary: Get a single DLQ entry.
@@ -524,11 +633,17 @@ paths:
       summary: Create a policy draft.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' }, { $ref: '#/components/parameters/ActorHeader' } ]
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '201': { description: Created } }
+      responses:
+        '201':
+          description: Created
+          content: { application/json: { schema: { $ref: '#/components/schemas/PolicyDraft' } } }
     get:
       summary: List policy drafts.
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/PolicyDraftList' } } }
   /v1/admin/policy/drafts/{id}:
     get:
       summary: Get a policy draft.
@@ -862,7 +977,10 @@ paths:
     get:
       summary: Pipeline health dashboard (queue depth, retries, latency).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
-      responses: { '200': { description: OK } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/PipelineHealthReport' } } }
 
   # ----------------------------------------------------------------
   # Round-9 Task 18: openapi audit. The endpoints below were
