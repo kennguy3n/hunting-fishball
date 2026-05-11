@@ -1035,6 +1035,12 @@ func (h *Handler) runPipelineFromVec(ctx context.Context, tenantID string, req R
 		}
 		resp.Hits = append(resp.Hits, hit)
 	}
+	// Per-backend contributions are emitted by every explain path
+	// (gin single-request, batch sub-request, snapshot) so callers
+	// see a consistent payload regardless of entry point.
+	if req.Explain {
+		resp.BackendContributions = computeBackendContributions(pres.Allowed)
+	}
 	return resp, nil
 }
 

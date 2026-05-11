@@ -37,9 +37,12 @@ spec:
           # Fast-burn: the 1h and 5m windows BOTH show p95
           # latency above the SLO threshold. Translates to
           # ~30d budget consumed in ~2h at 14.4x burn rate.
+          # The 1h window ensures the regression is sustained;
+          # the 5m window ensures it is still happening right
+          # now. Both must hold to page.
           expr: |
             (
-              context_engine_retrieval_p95_latency_seconds > 0.5
+              avg_over_time(context_engine_retrieval_p95_latency_seconds[1h]) > 0.5
               and
               avg_over_time(context_engine_retrieval_p95_latency_seconds[5m]) > 0.5
             )
@@ -93,9 +96,13 @@ spec:
       interval: 30s
       rules:
         - alert: PipelineThroughputBudgetBurnFast
+          # Fast-burn: the 1h trend and the latest 5m window
+          # BOTH show the slowest pipeline stage below 10
+          # docs/min. The 1h window confirms a sustained
+          # regression; the 5m window confirms it is current.
           expr: |
             (
-              min(context_engine_pipeline_throughput_per_minute) < 10
+              min(avg_over_time(context_engine_pipeline_throughput_per_minute[1h])) < 10
               and
               min(avg_over_time(context_engine_pipeline_throughput_per_minute[5m])) < 10
             )

@@ -75,11 +75,12 @@ type StageCircuitBreakerConfig struct {
 // concurrent use; the coordinator's stage goroutines hit a single
 // breaker per stage.
 type StageCircuitBreaker struct {
-	cfg    StageCircuitBreakerConfig
-	mu     sync.Mutex
-	state  StageBreakerState
-	fails  int
-	openAt time.Time
+	cfg           StageCircuitBreakerConfig
+	mu            sync.Mutex
+	state         StageBreakerState
+	fails         int
+	openAt        time.Time
+	probeInFlight bool
 }
 
 // NewStageCircuitBreaker validates and constructs the breaker.
@@ -110,15 +111,25 @@ func (b *StageCircuitBreaker) State() StageBreakerState {
 // the caller must short-circuit. The caller MUST report the
 // outcome via OnSuccess or OnFailure so the breaker can update
 // its state.
+//
+// In the half-open state exactly one probe is permitted at a
+// time. Concurrent callers that arrive while a probe is in
+// flight short-circuit so the stage isn't slammed by a thundering
+// herd before the breaker has decided whether to close or re-open.
 func (b *StageCircuitBreaker) Allow() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.state == StageBreakerOpen {
 		if b.cfg.NowFn().Sub(b.openAt) >= b.cfg.OpenFor {
 			b.state = StageBreakerHalfOpen
+			b.probeInFlight = true
 			observability.StageBreakerStatesTotal.WithLabelValues(b.cfg.Stage, "half-open").Inc()
 			return nil
 		}
+		observability.StageBreakerShortCircuitsTotal.WithLabelValues(b.cfg.Stage).Inc()
+		return ErrStageBreakerOpen
+	}
+	if b.state == StageBreakerHalfOpen && b.probeInFlight {
 		observability.StageBreakerShortCircuitsTotal.WithLabelValues(b.cfg.Stage).Inc()
 		return ErrStageBreakerOpen
 	}
@@ -130,6 +141,7 @@ func (b *StageCircuitBreaker) OnSuccess() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.fails = 0
+	b.probeInFlight = false
 	if b.state != StageBreakerClosed {
 		b.state = StageBreakerClosed
 		observability.StageBreakerStatesTotal.WithLabelValues(b.cfg.Stage, "closed").Inc()
@@ -145,6 +157,7 @@ func (b *StageCircuitBreaker) OnFailure() {
 	if b.state == StageBreakerHalfOpen {
 		b.state = StageBreakerOpen
 		b.openAt = b.cfg.NowFn()
+		b.probeInFlight = false
 		observability.StageBreakerStatesTotal.WithLabelValues(b.cfg.Stage, "open").Inc()
 		return
 	}

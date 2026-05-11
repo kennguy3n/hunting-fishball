@@ -3,6 +3,8 @@ package pipeline_test
 import (
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,5 +109,110 @@ func TestStageBreaker_HalfOpenFailureReopens(t *testing.T) {
 	b.OnFailure()
 	if b.State() != pipeline.StageBreakerOpen {
 		t.Fatalf("expected re-open, got %s", b.State())
+	}
+}
+
+// TestStageBreaker_HalfOpenAllowsSingleProbe verifies the
+// invariant that exactly one Allow() call returns nil while the
+// breaker is half-open. Concurrent callers must short-circuit so
+// the failing stage isn't slammed by a thundering herd before the
+// probe outcome is recorded.
+func TestStageBreaker_HalfOpenAllowsSingleProbe(t *testing.T) {
+	t.Parallel()
+	clock := time.Now().UTC()
+	b, err := pipeline.NewStageCircuitBreaker(pipeline.StageCircuitBreakerConfig{
+		Stage:     "embed",
+		Threshold: 1,
+		OpenFor:   100 * time.Millisecond,
+		NowFn:     func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatalf("NewStageCircuitBreaker: %v", err)
+	}
+	b.OnFailure()
+	if b.State() != pipeline.StageBreakerOpen {
+		t.Fatalf("expected open after first failure")
+	}
+	clock = clock.Add(200 * time.Millisecond)
+
+	const concurrency = 64
+	var (
+		allowed      int64
+		shortCircs   int64
+		startBarrier sync.WaitGroup
+		done         sync.WaitGroup
+	)
+	startBarrier.Add(1)
+	done.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer done.Done()
+			startBarrier.Wait()
+			if err := b.Allow(); err == nil {
+				atomic.AddInt64(&allowed, 1)
+			} else if errors.Is(err, pipeline.ErrStageBreakerOpen) {
+				atomic.AddInt64(&shortCircs, 1)
+			} else {
+				t.Errorf("unexpected error from Allow: %v", err)
+			}
+		}()
+	}
+	startBarrier.Done()
+	done.Wait()
+
+	if got := atomic.LoadInt64(&allowed); got != 1 {
+		t.Fatalf("expected exactly 1 Allow to succeed during half-open probe, got %d", got)
+	}
+	if got := atomic.LoadInt64(&shortCircs); got != concurrency-1 {
+		t.Fatalf("expected %d short-circuits, got %d", concurrency-1, got)
+	}
+	if b.State() != pipeline.StageBreakerHalfOpen {
+		t.Fatalf("expected breaker to remain half-open until probe completes, got %s", b.State())
+	}
+
+	// Probe succeeds → breaker closes and subsequent callers
+	// flow normally again.
+	b.OnSuccess()
+	if b.State() != pipeline.StageBreakerClosed {
+		t.Fatalf("expected closed after probe success, got %s", b.State())
+	}
+	if err := b.Allow(); err != nil {
+		t.Fatalf("post-close Allow: %v", err)
+	}
+}
+
+// TestStageBreaker_HalfOpenProbeFailureReleasesGate verifies that
+// a failed probe transitions back to Open AND clears the
+// probe-in-flight gate so a subsequent half-open transition (after
+// the next cooldown) can issue a fresh probe.
+func TestStageBreaker_HalfOpenProbeFailureReleasesGate(t *testing.T) {
+	t.Parallel()
+	clock := time.Now().UTC()
+	b, err := pipeline.NewStageCircuitBreaker(pipeline.StageCircuitBreakerConfig{
+		Stage:     "parse",
+		Threshold: 1,
+		OpenFor:   100 * time.Millisecond,
+		NowFn:     func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatalf("NewStageCircuitBreaker: %v", err)
+	}
+	// Trip → cooldown → half-open probe fails → re-open.
+	b.OnFailure()
+	clock = clock.Add(200 * time.Millisecond)
+	if err := b.Allow(); err != nil {
+		t.Fatalf("first probe Allow: %v", err)
+	}
+	b.OnFailure()
+	if b.State() != pipeline.StageBreakerOpen {
+		t.Fatalf("expected re-open, got %s", b.State())
+	}
+	// Next cooldown should grant a fresh probe.
+	clock = clock.Add(200 * time.Millisecond)
+	if err := b.Allow(); err != nil {
+		t.Fatalf("second probe Allow: %v", err)
+	}
+	if b.State() != pipeline.StageBreakerHalfOpen {
+		t.Fatalf("expected half-open for second probe, got %s", b.State())
 	}
 }
