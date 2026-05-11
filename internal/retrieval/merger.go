@@ -260,3 +260,48 @@ func appendUnique(slice []string, v string) []string {
 
 	return append(slice, v)
 }
+
+// Dedup is a defensive post-merge pass that collapses any
+// duplicate chunk IDs in the merged stream — Round-9 Task 6. The
+// RRF Merge() already collapses by ID within a single Merge call,
+// but downstream code that concatenates Merge outputs (e.g. the
+// pinned-results adapter splicing in operator pins, or any future
+// re-merge across query expansions) can reintroduce duplicates.
+//
+// Dedup keeps the higher-scored entry for each ID and folds the
+// loser's Sources into the survivor so the provenance field still
+// names every contributing backend. The relative order of unique
+// IDs in the input is preserved; survivors stay at their first
+// observed position.
+func Dedup(matches []*Match) []*Match {
+	if len(matches) <= 1 {
+		return matches
+	}
+	indexByID := make(map[string]int, len(matches))
+	out := make([]*Match, 0, len(matches))
+	for _, m := range matches {
+		if m == nil || m.ID == "" {
+			out = append(out, m)
+			continue
+		}
+		if idx, ok := indexByID[m.ID]; ok {
+			winner := out[idx]
+			// Fold the loser's Sources into the winner.
+			for _, s := range m.Sources {
+				winner.Sources = appendUnique(winner.Sources, s)
+			}
+			if m.Score > winner.Score {
+				// The later occurrence outscores the earlier
+				// one — replace the survivor's score-derived
+				// fields but keep its position in the output.
+				preservedSources := winner.Sources
+				out[idx] = m
+				out[idx].Sources = preservedSources
+			}
+			continue
+		}
+		indexByID[m.ID] = len(out)
+		out = append(out, m)
+	}
+	return out
+}

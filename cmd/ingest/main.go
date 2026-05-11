@@ -240,7 +240,7 @@ func run() error {
 		defer func() { _ = graphRAGCloser.Close() }()
 	}
 
-	coord, err := pipeline.NewCoordinator(pipeline.CoordinatorConfig{
+	coordCfg := pipeline.CoordinatorConfig{
 		Fetch:          fetcher,
 		Parse:          parser,
 		Embed:          embedder,
@@ -249,7 +249,10 @@ func run() error {
 		GraphRAG:       graphRAG,
 		PriorityBuffer: priorityBuffer,
 		RetryAnalytics: retryAnalytics,
-	})
+	}
+	// Round-9 Task 8: per-stage timeouts.
+	coordCfg.LoadStageTimeoutsFromEnv(os.Getenv)
+	coord, err := pipeline.NewCoordinator(coordCfg)
 	if err != nil {
 		return fmt.Errorf("coordinator: %w", err)
 	}

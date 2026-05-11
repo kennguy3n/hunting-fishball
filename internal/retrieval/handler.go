@@ -174,6 +174,14 @@ type HandlerConfig struct {
 	// (Round-8 Task 16). When set, the handler injects pins
 	// after policy filtering and before MMR diversity.
 	PinLookup PinLookup
+
+	// CacheWarmOnMiss, when true, writes the cache asynchronously
+	// on the cache-miss path so the HTTP response is not paying
+	// the Redis RTT — Round-9 Task 9. The goroutine uses
+	// context.WithoutCancel so request-scoped cancellation
+	// after the response is flushed doesn't drop the write. Set
+	// CONTEXT_ENGINE_CACHE_WARM_ON_MISS=true to enable.
+	CacheWarmOnMiss bool
 }
 
 // ShardVersionLookup is the narrow port the retrieval handler uses
@@ -503,6 +511,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 	if h.cfg.Cache != nil {
 		cached, cerr := h.cfg.Cache.Get(c.Request.Context(), tenantID, channelID, vec, scopeHash)
 		if cerr == nil && cached != nil {
+			observability.ObserveCacheHit()
 			filtered, blockedByPrivacy := filterCachedByPrivacyMode(cached, h.cfg.PolicyFilter, privacyMode)
 			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
@@ -522,6 +531,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 			return
 		}
+		observability.ObserveCacheMiss()
 	}
 
 	// Round-6 Task 4: optional synonym expansion before fan-out.
@@ -533,6 +543,10 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 	mergeStart := time.Now()
 	merged := h.cfg.Merger.Merge(streams...)
+	// Round-9 Task 6: defensive cross-backend dedup. RRF already
+	// collapses by ID inside Merge, but later transforms (pin
+	// splice, retry merges) can reintroduce duplicates.
+	merged = Dedup(merged)
 	mergeMs := time.Since(mergeStart).Milliseconds()
 	observability.ObserveBackendDuration("merge", time.Since(mergeStart).Seconds())
 
@@ -616,12 +630,15 @@ func (h *Handler) retrieve(c *gin.Context) {
 	// swallowed — failing to write a cache entry must not fail the
 	// retrieval. Round-8 Task 10: when CacheTTLLookup is wired, the
 	// per-tenant override takes precedence over the default.
+	// Round-9 Task 9: when CacheWarmOnMiss is set, write the cache
+	// in a fire-and-forget goroutine so Redis RTT doesn't pad the
+	// HTTP response latency.
 	if h.cfg.Cache != nil && len(resp.Hits) > 0 {
 		ttl := h.cfg.CacheTTL
 		if h.cfg.CacheTTLLookup != nil {
 			ttl = h.cfg.CacheTTLLookup(c.Request.Context(), tenantID, ttl)
 		}
-		_ = h.cfg.Cache.Set(c.Request.Context(), tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), ttl)
+		h.writeCacheOnMiss(c.Request.Context(), tenantID, channelID, vec, scopeHash, resp, ttl)
 	}
 
 	h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
@@ -777,6 +794,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	if h.cfg.Cache != nil {
 		cached, cerr := h.cfg.Cache.Get(ctx, tenantID, channelID, vec, scopeHash)
 		if cerr == nil && cached != nil {
+			observability.ObserveCacheHit()
 			filtered, blockedByPrivacy := filterCachedByPrivacyMode(cached, h.cfg.PolicyFilter, privacyMode)
 			filtered, blockedByACL, blockedByRecipient := filterCachedBySnapshot(filtered, snapshot, req.SkillID)
 			resp := responseFromCache(filtered, privacyMode, topK)
@@ -788,6 +806,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 			h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
 			return resp, nil
 		}
+		observability.ObserveCacheMiss()
 	}
 
 	resp, perr := h.runPipelineFromVec(ctx, tenantID, req, snapshot, vec, topK, privacyMode)
@@ -800,7 +819,7 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 		if h.cfg.CacheTTLLookup != nil {
 			ttl = h.cfg.CacheTTLLookup(ctx, tenantID, ttl)
 		}
-		_ = h.cfg.Cache.Set(ctx, tenantID, channelID, vec, scopeHash, cachedFromResponse(resp), ttl)
+		h.writeCacheOnMiss(ctx, tenantID, channelID, vec, scopeHash, resp, ttl)
 	}
 	h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
 	return resp, nil
@@ -846,7 +865,22 @@ func (h *Handler) runPipelineFromVec(ctx context.Context, tenantID string, req R
 
 	mergeStart := time.Now()
 	merged := h.cfg.Merger.Merge(streams...)
+	// Round-9 Task 6: defensive cross-backend dedup before rerank.
+	merged = Dedup(merged)
 	mergeMs := time.Since(mergeStart).Milliseconds()
+
+	// Round-9 Task 7: snapshot the post-merge / pre-rerank score
+	// for each match so the explain projection can surface the
+	// reranker's delta in the batch and snapshot paths the same
+	// way the gin handler does. Cheap when req.Explain is false.
+	var preRerankByID map[string]float32
+	if req.Explain {
+		preRerankByID = make(map[string]float32, len(merged))
+		for _, m := range merged {
+			preRerankByID[m.ID] = m.Score
+		}
+	}
+
 	rerankStart := time.Now()
 	reranked, rerr := h.cfg.Reranker.Rerank(ctx, req.Query, merged)
 	rerankMs := time.Since(rerankStart).Milliseconds()
@@ -879,6 +913,9 @@ func (h *Handler) runPipelineFromVec(ctx context.Context, tenantID string, req R
 	for _, m := range pres.Allowed {
 		hit := hitFromMatch(m)
 		hit.PrivacyStrip = BuildPrivacyStrip(m, snapshot)
+		if req.Explain {
+			hit.Explain = BuildExplain(m, preRerankByID[m.ID])
+		}
 		resp.Hits = append(resp.Hits, hit)
 	}
 	return resp, nil
@@ -1361,4 +1398,26 @@ func buildFilter(req RetrieveRequest) map[string]any {
 	}
 
 	return map[string]any{"must": conds}
+}
+
+// writeCacheOnMiss is the cache-miss writer used by the gin handler
+// and RetrieveWithSnapshotCached. When CacheWarmOnMiss is enabled
+// (Round-9 Task 9) the cache write happens in a fire-and-forget
+// goroutine — the request returns to the caller without paying the
+// Redis RTT. The goroutine uses context.WithoutCancel so a request
+// cancelled after the response was flushed still completes the
+// warm. The default path is synchronous (pre-Round-9 behaviour).
+func (h *Handler) writeCacheOnMiss(ctx context.Context, tenantID, channelID string, vec []float32, scopeHash string, resp RetrieveResponse, ttl time.Duration) {
+	if h.cfg.Cache == nil {
+		return
+	}
+	cached := cachedFromResponse(resp)
+	if !h.cfg.CacheWarmOnMiss {
+		_ = h.cfg.Cache.Set(ctx, tenantID, channelID, vec, scopeHash, cached, ttl)
+		return
+	}
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		_ = h.cfg.Cache.Set(bg, tenantID, channelID, vec, scopeHash, cached, ttl)
+	}()
 }

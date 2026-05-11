@@ -153,7 +153,16 @@ func run() error {
 	// which fans configured webhook/email subscribers out on every
 	// audit Create. Failures inside Dispatch are swallowed so they
 	// can never block the audit write.
-	notifStore := admin.NewInMemoryNotificationStore()
+	// Round-9 Task 1: GORM-backed NotificationStore. The store
+	// auto-migrates so the notification_preferences table is created
+	// even if the SQL migration hasn't been replayed.
+	notifStore, err := admin.NewNotificationStoreGORM(db)
+	if err != nil {
+		return fmt.Errorf("notification store: %w", err)
+	}
+	if err := notifStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("notification_preferences migrate: %w", err)
+	}
 	notifDelivery := &admin.WebhookDelivery{Client: http.DefaultClient}
 	notifDispatcher, err := admin.NewNotificationDispatcher(notifStore, notifDelivery)
 	if err != nil {
@@ -298,6 +307,11 @@ func run() error {
 		}
 		defer func() { _ = memConn.Close() }()
 		handlerCfg.Memory = &memoryAdapter{c: memoryv1.NewMemoryServiceClient(memConn)}
+	}
+
+	// Round-9 Task 9: optional async cache warm-on-miss.
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("CONTEXT_ENGINE_CACHE_WARM_ON_MISS"))); v == "1" || v == "true" {
+		handlerCfg.CacheWarmOnMiss = true
 	}
 
 	retrievalHandler, err := retrieval.NewHandler(handlerCfg)
@@ -598,7 +612,19 @@ func run() error {
 	// in production yet, so the API binary boots without external
 	// dependencies while still exposing the full surface for
 	// integration tests.
-	abtestStore := admin.NewInMemoryABTestStore()
+	// Round-9 Task 2: GORM-backed ABTestStore. Both the admin
+	// handler and the retrieval ABTestRouter share the same store
+	// so writes by operators are immediately visible to the
+	// retrieval fan-out.
+	var abtestStore admin.ABTestStore
+	if gormStore, gerr := admin.NewABTestStoreGORM(db); gerr == nil {
+		if merr := gormStore.AutoMigrate(context.Background()); merr != nil {
+			return fmt.Errorf("retrieval_ab_tests migrate: %w", merr)
+		}
+		abtestStore = gormStore
+	} else {
+		return fmt.Errorf("abtest store: %w", gerr)
+	}
 	if abtestHandler, aerr := admin.NewABTestHandler(abtestStore, notifyingAudit); aerr == nil {
 		abtestHandler.Register(api)
 	}
@@ -625,10 +651,16 @@ func run() error {
 		}
 	}
 
-	if tmplStore := admin.NewInMemoryConnectorTemplateStore(); tmplStore != nil {
-		if tmplHandler, terr := admin.NewConnectorTemplateHandler(tmplStore, notifyingAudit); terr == nil {
+	// Round-9 Task 3: GORM-backed ConnectorTemplateStore.
+	if tmplStore, terr := admin.NewConnectorTemplateStoreGORM(db); terr == nil {
+		if merr := tmplStore.AutoMigrate(context.Background()); merr != nil {
+			return fmt.Errorf("connector_templates migrate: %w", merr)
+		}
+		if tmplHandler, herr := admin.NewConnectorTemplateHandler(tmplStore, notifyingAudit); herr == nil {
 			tmplHandler.Register(api)
 		}
+	} else {
+		return fmt.Errorf("connector_template store: %w", terr)
 	}
 
 	if notifHandler, nerr := admin.NewNotificationHandler(notifStore, notifyingAudit); nerr == nil {
@@ -646,7 +678,15 @@ func run() error {
 		rsHandler.Register(api)
 	}
 
-	if synHandler, serr := admin.NewSynonymsHandler(retrieval.NewInMemorySynonymStore(), notifyingAudit); serr == nil {
+	// Round-9 Task 4: GORM-backed SynonymStore.
+	synStore, serr := retrieval.NewSynonymStoreGORM(db)
+	if serr != nil {
+		return fmt.Errorf("synonym store: %w", serr)
+	}
+	if merr := synStore.AutoMigrate(context.Background()); merr != nil {
+		return fmt.Errorf("retrieval_synonyms migrate: %w", merr)
+	}
+	if synHandler, herr := admin.NewSynonymsHandler(synStore, notifyingAudit); herr == nil {
 		synHandler.Register(api)
 	}
 
@@ -739,8 +779,16 @@ func run() error {
 		return time.Duration(b.MaxLatencyMS) * time.Millisecond, true
 	})
 
-	// Round-7 Task 12: chunk quality report.
-	if cqHandler, cerr := admin.NewChunkQualityHandler(admin.NewInMemoryChunkQualityStore()); cerr == nil {
+	// Round-7 Task 12 / Round-9 Task 5: GORM-backed chunk quality
+	// report store.
+	cqStore, cqErr := admin.NewChunkQualityStoreGORM(db)
+	if cqErr != nil {
+		return fmt.Errorf("chunk_quality store: %w", cqErr)
+	}
+	if merr := cqStore.AutoMigrate(context.Background()); merr != nil {
+		return fmt.Errorf("chunk_quality migrate: %w", merr)
+	}
+	if cqHandler, cerr := admin.NewChunkQualityHandler(cqStore); cerr == nil {
 		cqHandler.Register(api)
 	}
 
@@ -838,6 +886,43 @@ func run() error {
 			go falkor.KeepAlive(keepAliveCtx, 30*time.Second)
 		}
 	}
+
+	// Round-9 Task 17: periodic connection-pool health sampler.
+	// Publishes context_engine_postgres_pool_open_connections,
+	// context_engine_redis_pool_active_connections, and
+	// context_engine_qdrant_pool_idle_connections every 30s so
+	// operators can dashboard / alert on pool exhaustion.
+	poolSampler := observability.NewPoolSampler(observability.PoolSamplerConfig{
+		Postgres: observability.PostgresStatsFunc(func() int {
+			sqlDB, derr := db.DB()
+			if derr != nil || sqlDB == nil {
+				return 0
+			}
+			return sqlDB.Stats().OpenConnections
+		}),
+		Redis: observability.RedisStatsFunc(func() int {
+			if sharedRedis == nil {
+				return 0
+			}
+			stats := sharedRedis.PoolStats()
+			if stats == nil {
+				return 0
+			}
+			active := int(stats.TotalConns) - int(stats.IdleConns)
+			if active < 0 {
+				return 0
+			}
+			return active
+		}),
+		Qdrant: observability.QdrantStatsFunc(func() int {
+			if qdrant == nil {
+				return 0
+			}
+			return qdrant.IdleConnCapacity()
+		}),
+		Interval: 30 * time.Second,
+	})
+	go poolSampler.Start(keepAliveCtx)
 
 	srv := &http.Server{Addr: listenAddr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)

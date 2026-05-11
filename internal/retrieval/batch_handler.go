@@ -77,6 +77,18 @@ func (h *Handler) retrieveBatch(c *gin.Context) {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "batch too large", "max": MaxBatchSize})
 		return
 	}
+	// Round-9 Task 7: explain mode flows through the batch fan-out
+	// just like the single-request /v1/retrieve endpoint. The
+	// auth check happens once at the gin layer; sub-requests that
+	// the caller asked to explain are stripped of the flag when
+	// the caller is not authorised so the downstream pipeline
+	// can't leak debug signals.
+	explainAuthorised := IsExplainAuthorized(c, h.cfg.ExplainEnvEnabled)
+	if !explainAuthorised {
+		for i := range req.Requests {
+			req.Requests[i].Explain = false
+		}
+	}
 	resp := h.RunBatch(c.Request.Context(), tenantID, req)
 	c.JSON(http.StatusOK, resp)
 }

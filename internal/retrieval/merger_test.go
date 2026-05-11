@@ -185,3 +185,73 @@ func TestMerger_StableTieBreaking(t *testing.T) {
 		t.Fatalf("tie order: %+v", []string{merged[0].ID, merged[1].ID})
 	}
 }
+
+// TestDedup_OverlappingChunkIDsFromTwoBackends — Round-9 Task 6.
+// The merger already collapses by ID inside Merge, but Dedup is the
+// defensive post-merge pass that runs between Merge and Rerank in
+// the handler. It must collapse duplicate chunk_ids regardless of
+// whether they came from one stream or two, keep the higher-scored
+// entry, and union the Sources lists.
+func TestDedup_OverlappingChunkIDsFromTwoBackends(t *testing.T) {
+	t.Parallel()
+	// Simulate a post-merge stream that, due to some downstream
+	// splice (e.g. pinned-results adapter), reintroduces a
+	// duplicate of "shared" with a lower score from BM25 after the
+	// vector-sourced winner was already emitted.
+	input := []*retrieval.Match{
+		{ID: "shared", Score: 0.8, Sources: []string{retrieval.SourceVector}},
+		{ID: "only-vec", Score: 0.5, Sources: []string{retrieval.SourceVector}},
+		{ID: "shared", Score: 0.3, Sources: []string{retrieval.SourceBM25}},
+		{ID: "only-bm25", Score: 0.2, Sources: []string{retrieval.SourceBM25}},
+	}
+	out := retrieval.Dedup(input)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 unique ids; got %d (%+v)", len(out), out)
+	}
+	// The vector entry was higher-scored, so it must win.
+	var shared *retrieval.Match
+	for _, m := range out {
+		if m.ID == "shared" {
+			shared = m
+			break
+		}
+	}
+	if shared == nil {
+		t.Fatalf("shared id missing from output")
+	}
+	if shared.Score != 0.8 {
+		t.Fatalf("expected higher-scored entry (0.8); got %v", shared.Score)
+	}
+	gotSources := map[string]bool{}
+	for _, s := range shared.Sources {
+		gotSources[s] = true
+	}
+	if !gotSources[retrieval.SourceVector] || !gotSources[retrieval.SourceBM25] {
+		t.Fatalf("expected union of sources {vector,bm25}; got %v", shared.Sources)
+	}
+}
+
+func TestDedup_PreservesOrderForUniqueIDs(t *testing.T) {
+	t.Parallel()
+	input := []*retrieval.Match{
+		{ID: "a", Score: 0.9},
+		{ID: "b", Score: 0.8},
+		{ID: "c", Score: 0.7},
+	}
+	out := retrieval.Dedup(input)
+	if len(out) != 3 || out[0].ID != "a" || out[1].ID != "b" || out[2].ID != "c" {
+		t.Fatalf("unexpected order: %+v", out)
+	}
+}
+
+func TestDedup_EmptyAndSingleton(t *testing.T) {
+	t.Parallel()
+	if got := retrieval.Dedup(nil); got != nil {
+		t.Fatalf("nil in → nil out; got %v", got)
+	}
+	single := []*retrieval.Match{{ID: "a", Score: 1.0}}
+	out := retrieval.Dedup(single)
+	if len(out) != 1 || out[0].ID != "a" {
+		t.Fatalf("singleton roundtrip: %+v", out)
+	}
+}

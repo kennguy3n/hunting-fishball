@@ -354,6 +354,59 @@ The full set of public + admin endpoints is documented in
   rollback coverage; `make migrate-rollback` applies them in
   reverse order.
 
+**Round 9 additions:**
+
+- Final five admin GORM stores landed — `NotificationStore`,
+  `ABTestStore`, `ConnectorTemplateStore`, `SynonymStore`, and
+  `ChunkQualityStore` are now Postgres-backed via GORM. After
+  Round 9 there are no in-memory store fallbacks in
+  `cmd/api/main.go`.
+- New env vars for pipeline & retrieval tuning:
+  `CONTEXT_ENGINE_FETCH_TIMEOUT` / `_PARSE_TIMEOUT` /
+  `_EMBED_TIMEOUT` / `_STORE_TIMEOUT` give each pipeline stage an
+  independent deadline that's reset per retry attempt;
+  `CONTEXT_ENGINE_CACHE_WARM_ON_MISS=true` decouples cache writes
+  from response latency by issuing them on a fire-and-forget
+  goroutine.
+- The RRF merger collapses duplicate `chunk_id`s from multiple
+  retrieval backends before reranking (keeping the highest score).
+- `POST /v1/retrieve/batch` now honours `explain:true` and threads
+  the per-result explain trace through every batch entry.
+- The gRPC sidecar pool publishes
+  `context_engine_grpc_circuit_breaker_state{target}` to
+  Prometheus (`0=closed`, `1=half-open`, `2=open`).
+- Three new connection-pool gauges
+  (`context_engine_postgres_pool_open_connections`,
+  `_redis_pool_active_connections`,
+  `_qdrant_pool_idle_connections`) plus a 30-second sampler
+  goroutine in `cmd/api`.
+- `deploy/recording-rules.yaml` ships pre-computed Prometheus
+  series — retrieval availability, P95 latency, pipeline
+  throughput, error rate, cache hit rate. `make alerts-check`
+  validates both alerts and recording rules.
+- `services/graphrag/test_graphrag.py` — 13 unit tests covering
+  the Python GraphRAG entity/edge extractor.
+- 7 new error codes in `internal/errors/catalog.go`
+  (`ERR_CACHE_WARM_FAILED`, `ERR_BUDGET_INVALID`,
+  `ERR_BUDGET_LOOKUP_FAILED`, `ERR_CACHE_CONFIG_FAILED`,
+  `ERR_SYNC_HISTORY_FAILED`, `ERR_PINNED_RESULTS_FAILED`,
+  `ERR_PIPELINE_HEALTH_FAILED`) wired into the admin error
+  envelope.
+- New e2e tests: `tests/e2e/notification_lifecycle_test.go`
+  drives the full dispatch → retry → dead-letter loop, and
+  `tests/e2e/pipeline_priority_test.go` drives the steady vs.
+  backfill priority buffer and the semantic dedup pass.
+- `tests/regression/round78_manifest.go` catalogues the Devin
+  Review fixes from PRs #16 and #17 with each one's regression
+  test, pinned by a meta-test.
+- `docs/openapi.yaml` extended with the previously-undocumented
+  Round-8 admin endpoints (`/v1/admin/retrieval/pins`,
+  `/v1/admin/analytics/queries`, `/v1/admin/health/indexes`,
+  `/v1/admin/sources/{id}/sync/stream`,
+  `/v1/admin/sources/{id}/rotate-credentials`,
+  `/v1/webhooks/{connector}/{source_id}`, `/v1/admin/dlq/replay`);
+  spec parity is now pinned by `docs/openapi_test.go`.
+
 **Round 8 additions:**
 
 - Stage 4 store worker now consults `pipeline.Deduplicator`

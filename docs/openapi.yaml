@@ -863,3 +863,119 @@ paths:
       summary: Pipeline health dashboard (queue depth, retries, latency).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
       responses: { '200': { description: OK } }
+
+  # ----------------------------------------------------------------
+  # Round-9 Task 18: openapi audit. The endpoints below were
+  # registered by handlers added in Rounds 7 / 8 but never made it
+  # into the spec. Added here for completeness; schemas are
+  # intentionally minimal (additionalProperties: true) to keep the
+  # audit lightweight — a follow-up can promote them to typed
+  # schemas matching the Go response structs.
+  # ----------------------------------------------------------------
+  /v1/admin/sources/{id}/rotate-credentials:
+    post:
+      summary: Rotate connector credentials (Round-4 Task 16).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Rotated }
+        '400': { description: Invalid credentials }
+
+  /v1/admin/retrieval/pins:
+    post:
+      summary: Pin a chunk at a specific position for a query pattern.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses: { '201': { description: Created } }
+    get:
+      summary: List pinned-result entries for the tenant.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/retrieval/pins/{id}:
+    delete:
+      summary: Delete a pinned-result entry.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses: { '204': { description: Deleted } }
+
+  /v1/admin/analytics/queries:
+    get:
+      summary: List recent retrieval queries (analytics rollup).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+  /v1/admin/analytics/queries/top:
+    get:
+      summary: Top-N queries by frequency (used by cache-warm).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+
+  /v1/admin/health/indexes:
+    get:
+      summary: Per-index health (vector + bm25 backends).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses: { '200': { description: OK } }
+
+  /v1/admin/sources/{id}/sync/stream:
+    get:
+      summary: SSE stream of per-source sync progress.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /v1/webhooks/{connector}/{source_id}:
+    post:
+      summary: Inbound webhook router for connector callbacks.
+      parameters:
+        - in: path
+          name: connector
+          required: true
+          schema: { type: string }
+        - in: path
+          name: source_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '202': { description: Accepted }
+        '400': { description: Invalid payload }
+
+  /v1/admin/dlq/replay:
+    post:
+      summary: Batch-replay DLQ entries (Round-7 alias for dlq/batch-replay).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses: { '202': { description: Accepted } }

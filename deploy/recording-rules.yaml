@@ -1,0 +1,125 @@
+# Prometheus recording rules for hunting-fishball / context-engine.
+#
+# Round-9 Task 16: pre-computed series for the most operator-
+# common dashboard queries. Recording rules let Grafana panels
+# render in milliseconds instead of re-evaluating range queries
+# every refresh, and they give us a stable series name to alert
+# on (so the alert query and dashboard query never drift).
+#
+# Naming convention (matches the Prometheus best-practices doc):
+#
+#   level:metric:operations
+#
+# where `level` is the aggregation grain (job, instance, tenant,
+# global), `metric` is the underlying metric, and `operations` is
+# a snake_case description of what was applied. We deliberately
+# pre-name the series with the `context_engine_` prefix so they
+# share the same namespace as the source metrics and Grafana
+# auto-completes them.
+#
+# Every rule below is grounded on a metric that
+# `internal/observability/metrics.go` actually registers. The
+# `make alerts-check` job re-parses this file via the alertcheck
+# binary, and the round78 regression manifest pins the metric
+# names so future renames can't silently empty the series.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: context-engine-recording
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: context-engine
+    app.kubernetes.io/component: recording-rules
+spec:
+  groups:
+    # -------------------------------------------------------------
+    # Retrieval availability (SLI for the public retrieve API).
+    #
+    # Computed as 1 - (5xx + 429 / total) over the 5-minute window
+    # so the SLO dashboard can plot a stable availability line and
+    # the 99.5%-availability alert can trigger off a single
+    # series. We scope the path label to `/v1/retrieve*` so
+    # `/v1/admin/*` errors don't pollute the retrieval SLI.
+    # -------------------------------------------------------------
+    - name: context-engine.retrieval
+      interval: 30s
+      rules:
+        - record: context_engine_retrieval_availability
+          expr: |
+            1 - (
+              sum(rate(context_engine_api_requests_total{path=~"/v1/retrieve.*",status=~"5..|429"}[5m]))
+              /
+              clamp_min(sum(rate(context_engine_api_requests_total{path=~"/v1/retrieve.*"}[5m])), 1)
+            )
+          labels:
+            slo: retrieval-availability
+            window: 5m
+
+        - record: context_engine_retrieval_p95_latency_seconds
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(context_engine_api_request_duration_seconds_bucket{path=~"/v1/retrieve.*"}[5m]))
+            )
+          labels:
+            slo: retrieval-latency
+            window: 5m
+
+    # -------------------------------------------------------------
+    # Pipeline throughput. Operators read this to confirm Kafka
+    # backlogs are draining and to size HPAs against per-minute
+    # rates (which are easier to reason about than per-second).
+    #
+    # Source metric: `context_engine_pipeline_stage_duration_seconds`
+    # is a histogram, so Prometheus auto-generates the
+    # `_count` sub-series we rate() here.
+    # -------------------------------------------------------------
+    - name: context-engine.pipeline
+      interval: 30s
+      rules:
+        - record: context_engine_pipeline_throughput_per_minute
+          expr: |
+            sum by (stage) (
+              rate(context_engine_pipeline_stage_duration_seconds_count[1m])
+            ) * 60
+          labels:
+            window: 1m
+
+        # Pipeline stage error rate is derived from the retry
+        # counter (`context_engine_pipeline_retries_total`)
+        # filtered to the `failed` outcome. A failed retry is
+        # the canonical stage-level failure signal — the
+        # coordinator increments it whenever a stage returns
+        # a terminal error after the retry policy is exhausted.
+        - record: context_engine_pipeline_error_rate_per_minute
+          expr: |
+            sum by (stage) (
+              rate(context_engine_pipeline_retries_total{outcome="failed"}[1m])
+            ) * 60
+          labels:
+            window: 1m
+
+    # -------------------------------------------------------------
+    # Cache hit rate. Drops in this series should correlate with
+    # retrieval P95 spikes; the panel pairs them.
+    #
+    # Source metrics: `context_engine_retrieval_cache_hits_total`
+    # and `context_engine_retrieval_cache_misses_total`, both
+    # incremented from the /v1/retrieve cache short-circuit in
+    # internal/retrieval/handler.go.
+    # -------------------------------------------------------------
+    - name: context-engine.cache
+      interval: 30s
+      rules:
+        - record: context_engine_cache_hit_rate
+          expr: |
+            sum(rate(context_engine_retrieval_cache_hits_total[5m]))
+            /
+            clamp_min(
+              sum(rate(context_engine_retrieval_cache_hits_total[5m]))
+              + sum(rate(context_engine_retrieval_cache_misses_total[5m])),
+              1
+            )
+          labels:
+            window: 5m
