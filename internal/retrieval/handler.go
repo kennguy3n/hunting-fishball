@@ -538,7 +538,21 @@ func (h *Handler) retrieve(c *gin.Context) {
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
 			h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
-			h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, true, reqStart, nil, route, req.Source)
+			// Round-11 Devin Review fix: project resp.Timings into
+			// the recorder's keyed map so the gin cache-hit row
+			// carries the same backend_timings schema as the
+			// cache-miss path (line 660) and the cache-aware entry
+			// point (RetrieveWithSnapshotCached, line 868). Passing
+			// nil here would re-introduce the cross-path schema
+			// drift that TestBackendTimingsSchemaParity (and the
+			// alignment work in commit 51b656a) explicitly guards
+			// against — dashboards joining query_analytics rows on
+			// backend_timings.<backend> would silently miss the gin
+			// cache-hit slice. The map is zero-valued by design (the
+			// cache stores the response shape but not the original
+			// pipeline timing); what matters is that the *key set*
+			// matches across all four call sites.
+			h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, true, reqStart, timingsToMap(resp.Timings), route, req.Source)
 			c.JSON(http.StatusOK, resp)
 
 			return

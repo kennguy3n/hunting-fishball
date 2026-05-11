@@ -653,6 +653,91 @@ func TestRetrieveWithSnapshotCached_RecordsBackendTimingsOnHit(t *testing.T) {
 	}
 }
 
+// TestGinHandler_CacheHit_RecordsBackendTimings is the gin-handler
+// twin of TestRetrieveWithSnapshotCached_RecordsBackendTimingsOnHit.
+// The cache-aware entry point (used by batch + cache-warm) was
+// fixed in commit 5447dc7 / 51b656a to pass timingsToMap(resp.Timings)
+// on its cache-hit branch (handler.go:868). The gin handler's own
+// cache-hit branch (handler.go:541) was still passing nil for
+// backend_timings — which would have re-introduced exactly the
+// cross-path schema drift that TestBackendTimingsSchemaParity
+// (backend_timings_schema_test.go) guards against:
+//
+//   - gin cache-hit row    → backend_timings = {} (nil → empty JSONB)
+//   - cache-aware cache-hit → backend_timings = {"vector":0,"bm25":0,
+//     "graph":0,"memory":0}
+//
+// Dashboards joining query_analytics rows on backend_timings.<backend>
+// would have silently dropped the gin-cache-hit slice. This test
+// pins the gin handler to the same canonical schema by routing a
+// request through the gin engine against a pre-populated cache and
+// asserting the analytics row carries the Source* keys.
+func TestGinHandler_CacheHit_RecordsBackendTimings(t *testing.T) {
+	t.Parallel()
+
+	cached := &storage.CachedResult{
+		Hits: []storage.CachedHit{{ID: "cached-1", Score: 0.99, TenantID: "tenant-a", Title: "from-cache"}},
+	}
+	cache := &fakeCache{getValue: cached}
+	h, err := retrieval.NewHandler(retrieval.HandlerConfig{
+		VectorStore: &fakeVectorStore{},
+		Embedder:    &fakeEmbedder{vec: []float32{1, 2}},
+		Cache:       cache,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	var (
+		mu       sync.Mutex
+		captured []retrieval.QueryAnalyticsEvent
+	)
+	h.SetQueryAnalyticsRecorder(func(_ context.Context, evt retrieval.QueryAnalyticsEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		captured = append(captured, evt)
+	})
+
+	r := newRouter(t, h, "tenant-a")
+	body, _ := json.Marshal(retrieval.RetrieveRequest{Query: "hi"})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/v1/retrieve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body: %s", w.Code, w.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 analytics event from gin cache-hit; got %d", len(captured))
+	}
+	evt := captured[0]
+	if !evt.CacheHit {
+		t.Fatalf("expected cache_hit=true on gin cache-hit; got %+v", evt)
+	}
+	if evt.BackendTimings == nil {
+		t.Fatalf("regression: BackendTimings is nil on the gin cache-hit path. " +
+			"handler.go:541 used to pass nil for backend_timings, while the " +
+			"cache-aware path at handler.go:868 passes timingsToMap(resp.Timings) " +
+			"— the same query_analytics.backend_timings JSONB column ended up " +
+			"with two different shapes depending on caller, and dashboards " +
+			"joining rows on backend_timings.<backend> silently lost the " +
+			"gin-cache-hit slice.")
+	}
+	for _, key := range []string{"vector", "bm25", "graph", "memory"} {
+		if _, ok := evt.BackendTimings[key]; !ok {
+			t.Errorf("BackendTimings missing %q key on gin cache-hit path; got %v", key, mapKeys(evt.BackendTimings))
+		}
+	}
+	for _, key := range []string{"vector_ms", "bm25_ms", "merge_ms", "rerank_ms"} {
+		if _, ok := evt.BackendTimings[key]; ok {
+			t.Errorf("BackendTimings has stale key %q on gin cache-hit path (pre-fix RetrieveTimings JSON tag); want only the Source* canonical keys to match backendTimingsMillis", key)
+		}
+	}
+}
+
 func mapKeys(m map[string]int64) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
