@@ -360,6 +360,15 @@ func (d *NotificationDispatcher) Dispatch(ctx context.Context, tenantID, eventTy
 				at := time.Now().UTC().Add(time.Minute)
 				nextRetry = &at
 			}
+			// Attempt is a worker-cycle counter, not a count of
+			// inner HTTP retries. The first dispatch is logically
+			// one cycle (regardless of how many backoff hops Send
+			// took internally); each subsequent NotificationRetry
+			// Worker tick on this row will increment it by one.
+			// We keep result.Attempts available on the response
+			// side via ResponseCode + ErrorMessage; the inner
+			// retry count is purely diagnostic and is intentionally
+			// not persisted here.
 			_ = d.deliveryLog.Append(ctx, &NotificationDeliveryAttempt{
 				TenantID:     tenantID,
 				PreferenceID: p.ID,
@@ -368,7 +377,7 @@ func (d *NotificationDispatcher) Dispatch(ctx context.Context, tenantID, eventTy
 				Target:       p.Target,
 				Payload:      payloadMap,
 				Status:       status,
-				Attempt:      result.Attempts,
+				Attempt:      1,
 				ResponseCode: result.StatusCode,
 				ErrorMessage: errMsg,
 				NextRetryAt:  nextRetry,

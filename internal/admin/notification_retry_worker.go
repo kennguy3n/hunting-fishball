@@ -97,7 +97,12 @@ func (w *NotificationRetryWorker) retryOne(ctx context.Context, a *NotificationD
 		return
 	}
 	result, derr := w.delivery.Send(ctx, a.Target, a.Channel, body)
-	a.Attempt += result.Attempts
+	// Attempt counts worker cycles (one per Tick on this row),
+	// not inner HTTP retries inside Send. Accumulating
+	// result.Attempts here would conflate the two counters and
+	// push the row past MaxAttempts after a single worker cycle
+	// on a flaky endpoint, defeating the per-row retry budget.
+	a.Attempt++
 	a.ResponseCode = result.StatusCode
 	if derr == nil {
 		a.Status = NotificationDeliveryStatusDelivered

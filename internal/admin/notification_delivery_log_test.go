@@ -84,8 +84,12 @@ func TestNotificationDispatcher_RecordsAttempts(t *testing.T) {
 	if rows[0].Status != admin.NotificationDeliveryStatusFailed {
 		t.Fatalf("expected failed; got %s", rows[0].Status)
 	}
-	if rows[0].Attempt != 2 { // 1 initial + 1 retry
-		t.Fatalf("expected 2 attempts; got %d", rows[0].Attempt)
+	// Attempt is a worker-cycle counter, not a count of inner HTTP
+	// retries inside Send. The dispatcher's first write is always
+	// one logical cycle regardless of how many backoff hops Send
+	// took internally (those are kept on ResponseCode/ErrorMessage).
+	if rows[0].Attempt != 1 {
+		t.Fatalf("expected 1 worker-cycle attempt; got %d", rows[0].Attempt)
 	}
 }
 

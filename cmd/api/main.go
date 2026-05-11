@@ -166,6 +166,43 @@ func run() error {
 	notifDispatcher.SetDeliveryLog(notifDeliveryLog)
 	notifyingAudit := &admin.NotifyingAuditWriter{Inner: auditRepo, Dispatcher: notifDispatcher, Async: true}
 
+	// Round-8 Task 17 finisher: start the NotificationRetryWorker
+	// in a background goroutine. Without this the dispatcher writes
+	// next_retry_at on retryable failures but nothing scans the log
+	// to re-attempt delivery, so failed webhooks would simply rot.
+	// The interval is configurable via the documented
+	// CONTEXT_ENGINE_NOTIFICATION_RETRY_INTERVAL env var; default 1m.
+	notifRetryWorker, err := admin.NewNotificationRetryWorker(admin.NotificationRetryWorkerConfig{
+		Store:    notifDeliveryLog,
+		Delivery: notifDelivery,
+		Logger: func(msg string, kv ...any) {
+			slog.Warn("notification_retry", slog.String("msg", msg), slog.Any("kv", kv))
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("notification retry worker: %w", err)
+	}
+	notifRetryInterval := time.Minute
+	if v := os.Getenv("CONTEXT_ENGINE_NOTIFICATION_RETRY_INTERVAL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			notifRetryInterval = d
+		}
+	}
+	notifRetryCtx, notifRetryCancel := context.WithCancel(context.Background())
+	defer notifRetryCancel()
+	go func() {
+		t := time.NewTicker(notifRetryInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-notifRetryCtx.Done():
+				return
+			case <-t.C:
+				notifRetryWorker.Tick(notifRetryCtx)
+			}
+		}
+	}()
+
 	qdrantPool := 32
 	if v, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_QDRANT_POOL_SIZE")); v > 0 {
 		qdrantPool = v
