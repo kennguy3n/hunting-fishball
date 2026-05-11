@@ -675,6 +675,30 @@ func backendTimingsMillis(in map[string]time.Duration) map[string]int64 {
 	return out
 }
 
+// timingsToMap projects the public RetrieveTimings struct into
+// the keyed map the QueryAnalytics recorder expects.
+// RetrieveWithSnapshotCached no longer has access to the raw
+// per-backend time.Duration map the gin handler builds during
+// fan-out (backendTimingsMillis), but the response it returns
+// carries the same data in the RetrieveTimings struct. This helper
+// is the bridge — used on both the cache-hit path (zero-valued
+// timings, because the cache stores the response shape but not
+// the original pipeline timing) and the cache-miss path (real
+// per-backend timings from runPipelineFromVec). Keeping the
+// schema consistent across both paths is required so dashboards
+// can join cache_hit + non-cache_hit rows on the same
+// backend_timings keys.
+func timingsToMap(t RetrieveTimings) map[string]int64 {
+	return map[string]int64{
+		"vector_ms": t.VectorMs,
+		"bm25_ms":   t.BM25Ms,
+		"graph_ms":  t.GraphMs,
+		"memory_ms": t.MemoryMs,
+		"merge_ms":  t.MergeMs,
+		"rerank_ms": t.RerankMs,
+	}
+}
+
 // applyDeviceFirst computes the on-device-first hint and writes it
 // onto resp. Caller invokes this after the response is otherwise
 // fully populated. Lookup errors are swallowed (log and treat as
@@ -825,8 +849,12 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 			// handler, CacheWarmer) participate in query_analytics.
 			// req.Source is set by the caller (batch -> "batch",
 			// CacheWarmer -> "cache_warm"); empty string defaults
-			// to "user" downstream.
-			h.recordQueryAnalytics(ctx, tenantID, req.Query, len(resp.Hits), topK, true, reqStart, nil, route, req.Source)
+			// to "user" downstream. Project resp.Timings into the
+			// recorder's keyed map so cache-hit rows carry the same
+			// backend_timings schema as cache-miss rows (zero-valued
+			// here, by design — the cache stores the response shape
+			// but not the original pipeline timing).
+			h.recordQueryAnalytics(ctx, tenantID, req.Query, len(resp.Hits), topK, true, reqStart, timingsToMap(resp.Timings), route, req.Source)
 			return resp, nil
 		}
 		observability.ObserveCacheMiss()
@@ -848,8 +876,12 @@ func (h *Handler) RetrieveWithSnapshotCached(ctx context.Context, tenantID strin
 	}
 	h.applyDeviceFirst(ctx, tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
 	// Round-11 Devin Review fix: see cache-hit branch above for the
-	// rationale; this records the cache-miss path.
-	h.recordQueryAnalytics(ctx, tenantID, req.Query, len(resp.Hits), topK, false, reqStart, nil, route, req.Source)
+	// rationale; this records the cache-miss path. Project the
+	// per-backend timing struct that runPipelineFromVec just
+	// populated into the keyed map the recorder stores so batch +
+	// cache-warm analytics carry per-backend latency rather than
+	// the previous empty backend_timings.
+	h.recordQueryAnalytics(ctx, tenantID, req.Query, len(resp.Hits), topK, false, reqStart, timingsToMap(resp.Timings), route, req.Source)
 	return resp, nil
 }
 

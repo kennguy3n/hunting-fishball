@@ -164,7 +164,9 @@ func TestStreamHandler_ExplainTraceEmitted(t *testing.T) {
 		matches: []*retrieval.Match{{ID: "c2", Score: 0.42}, {ID: "c3", Score: 0.31}},
 	}
 	h, err := retrieval.NewStreamHandler(retrieval.StreamHandlerConfig{
-		Backends: []retrieval.StreamBackend{be1, be2}, Merger: stubMerger{},
+		Backends:          []retrieval.StreamBackend{be1, be2},
+		Merger:            stubMerger{},
+		ExplainEnvEnabled: true,
 	})
 	if err != nil {
 		t.Fatalf("ctor: %v", err)

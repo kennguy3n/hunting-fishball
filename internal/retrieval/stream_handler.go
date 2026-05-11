@@ -54,9 +54,18 @@ type StreamMerger interface {
 }
 
 // StreamHandlerConfig wires the streaming handler.
+//
+// ExplainEnvEnabled mirrors the resolved value of the
+// CONTEXT_ENGINE_EXPLAIN_ENABLED feature flag the single-request
+// and batch handlers already consult. The SSE handler must gate
+// the per-event explain trace on IsExplainAuthorized for the same
+// reason: explain leaks scoring internals (per-backend timings,
+// score breakdowns) that are an admin/feature-flagged debug
+// surface, not a public retrieval contract — see explain.go.
 type StreamHandlerConfig struct {
-	Backends []StreamBackend
-	Merger   StreamMerger
+	Backends          []StreamBackend
+	Merger            StreamMerger
+	ExplainEnvEnabled bool
 }
 
 // StreamHandler exposes the SSE endpoint.
@@ -154,6 +163,16 @@ func (h *StreamHandler) stream(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+	// Round-11 Devin Review fix: gate the per-event explain trace
+	// on IsExplainAuthorized, matching handler.go:611 and
+	// batch_handler.go:86. Without this, any authenticated caller
+	// could request explain=true and receive per-backend timings +
+	// score breakdowns the single-request and batch endpoints both
+	// require admin role or the CONTEXT_ENGINE_EXPLAIN_ENABLED flag
+	// to surface.
+	if req.Explain && !IsExplainAuthorized(c, h.cfg.ExplainEnvEnabled) {
+		req.Explain = false
 	}
 
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
