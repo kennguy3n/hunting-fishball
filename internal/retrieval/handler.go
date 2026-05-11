@@ -601,7 +601,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 		if len(pinHits) > 0 {
 			pins := make([]Pin, 0, len(pinHits))
 			for _, p := range pinHits {
-				pins = append(pins, Pin{ChunkID: p.ChunkID, Position: p.Position})
+				pins = append(pins, Pin(p))
 			}
 			resp.Hits = ApplyPins(resp.Hits, pins)
 			if len(resp.Hits) > topK {

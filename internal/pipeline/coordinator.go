@@ -316,7 +316,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 					continue
 				}
-				doc, err := c.runWithRetryFor(gctx, "fetch", se.evt.TenantID+":"+se.evt.DocumentID, func(rc context.Context) (any, error) {
+				doc, err := c.runWithRetry(gctx, "fetch", se.evt.TenantID+":"+se.evt.DocumentID, func(rc context.Context) (any, error) {
 					return c.cfg.Fetch.FetchEvent(rc, se.evt)
 				})
 				if errors.Is(err, ErrUnchanged) {
@@ -361,7 +361,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 					continue
 				}
-				blocks, err := c.runWithRetryFor(gctx, "parse", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
+				blocks, err := c.runWithRetry(gctx, "parse", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
 					return c.cfg.Parse.Parse(rc, it.doc)
 				})
 				if err != nil {
@@ -419,7 +419,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 					em      [][]float32
 					modelID string
 				}
-				out, err := c.runWithRetryFor(gctx, "embed", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
+				out, err := c.runWithRetry(gctx, "embed", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
 					var (
 						em    [][]float32
 						model string
@@ -481,7 +481,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 					return
 				}
 				if it.evt.Kind == EventDocumentDeleted || it.evt.Kind == EventPurge {
-					if _, err := c.runWithRetryFor(gctx, "delete", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
+					if _, err := c.runWithRetry(gctx, "delete", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
 						return nil, c.cfg.Store.Delete(rc, it.evt.TenantID, it.evt.DocumentID)
 					}); err != nil {
 						c.routeDLQ(gctx, it.evt, err)
@@ -489,7 +489,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 						continue
 					}
 				} else {
-					if _, err := c.runWithRetryFor(gctx, "store", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
+					if _, err := c.runWithRetry(gctx, "store", it.evt.TenantID+":"+it.evt.DocumentID, func(rc context.Context) (any, error) {
 						return nil, c.cfg.Store.Store(rc, it.doc, it.blocks, it.embeddings, it.modelID)
 					}); err != nil {
 						c.routeDLQ(gctx, it.evt, err)
@@ -566,18 +566,14 @@ func (c *Coordinator) CloseInputs() {
 	close(c.stage1)
 }
 
-// runWithRetry executes fn with bounded retries on transient errors.
-// Poison messages (ErrPoisonMessage) and ErrUnchanged are returned
-// immediately without retry.
-func (c *Coordinator) runWithRetry(ctx context.Context, stage string, fn func(context.Context) (any, error)) (any, error) {
-	return c.runWithRetryFor(ctx, stage, "", fn)
-}
-
-// runWithRetryFor is the variant that threads a per-document key
-// through to RetryAnalytics so success_after_retry can be computed.
-// docKey may be empty (analytics still updates the per-stage
-// aggregates, but success_after_retry attribution requires a key).
-func (c *Coordinator) runWithRetryFor(ctx context.Context, stage, docKey string, fn func(context.Context) (any, error)) (any, error) {
+// runWithRetry executes fn with bounded retries on transient errors,
+// threading a per-document key through to RetryAnalytics so
+// success_after_retry can be computed. docKey may be empty (the
+// analytics still updates the per-stage aggregates, but the
+// success_after_retry attribution requires a key). Poison messages
+// (ErrPoisonMessage) and ErrUnchanged are returned immediately
+// without retry.
+func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn func(context.Context) (any, error)) (any, error) {
 	ctx, span := observability.StartSpan(ctx, "pipeline."+stage,
 		observability.AttrStage.String(stage),
 	)

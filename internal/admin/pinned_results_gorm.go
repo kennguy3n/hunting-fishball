@@ -104,10 +104,7 @@ func (s *PinnedResultStoreGORM) Create(ctx context.Context, p PinnedResult) (Pin
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now().UTC()
 	}
-	row := pinnedRow{
-		ID: p.ID, TenantID: p.TenantID, QueryPattern: p.QueryPattern,
-		ChunkID: p.ChunkID, Position: p.Position, CreatedAt: p.CreatedAt,
-	}
+	row := pinnedRow(p)
 	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
 		return PinnedResult{}, err
 	}
@@ -130,8 +127,5 @@ func (s *PinnedResultStoreGORM) Delete(ctx context.Context, tenantID, id string)
 }
 
 func toPinnedResult(r pinnedRow) PinnedResult {
-	return PinnedResult{
-		ID: r.ID, TenantID: r.TenantID, QueryPattern: r.QueryPattern,
-		ChunkID: r.ChunkID, Position: r.Position, CreatedAt: r.CreatedAt,
-	}
+	return PinnedResult(r)
 }
