@@ -197,15 +197,24 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 			)
 			continue
 		}
+		// The success path advances next_run_at in one UPDATE and
+		// clears last_error / last_error_at in a separate
+		// best-effort UPDATE. Bundling them risks freezing the
+		// schedule if last_error / last_error_at are ever missing
+		// (e.g. a deploy that lands the code before
+		// 035_sync_schedules_error_fields.sql, or a rollback that
+		// removed the columns): the full UPDATE would fail and
+		// next_run_at would never advance, causing Tick to re-fire
+		// the same row every interval and triggering EmitSync over
+		// and over. The split mirrors recordScheduleError's
+		// best-effort treatment of the error fields.
 		if err := s.cfg.DB.WithContext(ctx).
 			Model(&SyncSchedule{}).
 			Where("id = ?", row.ID).
 			Updates(map[string]any{
-				"next_run_at":   next,
-				"last_run_at":   now,
-				"updated_at":    now,
-				"last_error":    "",
-				"last_error_at": time.Time{},
+				"next_run_at": next,
+				"last_run_at": now,
+				"updated_at":  now,
 			}).Error; err != nil {
 			s.cfg.Logger.Warn("scheduler: advance next_run_at",
 				slog.String("schedule_id", row.ID),
@@ -213,9 +222,32 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 			)
 			observability.SchedulerErrorsTotal.Inc()
 			s.recordScheduleError(ctx, row.ID, err, now)
+			continue
 		}
+		s.clearScheduleError(ctx, row.ID, now)
 	}
 	return nil
+}
+
+// clearScheduleError nulls last_error / last_error_at on the
+// sync_schedules row after a successful tick. Best-effort: a
+// failure here (e.g. the columns are absent on a partially
+// migrated database) is logged but never blocks the critical
+// next_run_at advancement that already landed in the caller.
+func (s *Scheduler) clearScheduleError(ctx context.Context, scheduleID string, now time.Time) {
+	if err := s.cfg.DB.WithContext(ctx).
+		Model(&SyncSchedule{}).
+		Where("id = ?", scheduleID).
+		Updates(map[string]any{
+			"last_error":    "",
+			"last_error_at": time.Time{},
+			"updated_at":    now,
+		}).Error; err != nil {
+		s.cfg.Logger.Warn("scheduler: clear last_error",
+			slog.String("schedule_id", scheduleID),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // recordScheduleError persists last_error / last_error_at on the
