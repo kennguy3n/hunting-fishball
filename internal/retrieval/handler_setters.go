@@ -103,3 +103,35 @@ type PinLookup func(ctx context.Context, tenantID, query string) []PinnedHit
 func (h *Handler) SetPinLookup(fn PinLookup) {
 	h.cfg.PinLookup = fn
 }
+
+// recordQueryAnalytics emits one analytics event per retrieve
+// response. The handler invokes this on every success path
+// (cache hit, full fan-out). nil recorder is a no-op so tests
+// that don't set one stay green.
+func (h *Handler) recordQueryAnalytics(
+	ctx context.Context,
+	tenantID, queryText string,
+	hits, topK int,
+	cacheHit bool,
+	start time.Time,
+	backendTimings map[string]int64,
+	route *ABTestRouteResult,
+) {
+	if h.cfg.QueryAnalytics == nil {
+		return
+	}
+	evt := QueryAnalyticsEvent{
+		TenantID:       tenantID,
+		QueryText:      queryText,
+		TopK:           topK,
+		HitCount:       hits,
+		CacheHit:       cacheHit,
+		LatencyMS:      int(time.Since(start).Milliseconds()),
+		BackendTimings: backendTimings,
+	}
+	if route != nil {
+		evt.ExperimentName = route.ExperimentName
+		evt.ExperimentArm = route.Arm
+	}
+	h.cfg.QueryAnalytics(ctx, evt)
+}

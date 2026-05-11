@@ -408,6 +408,11 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 		return
 	}
+	// Round-7 Task 4 / Round-8 Task 15: record per-retrieval
+	// analytics on every successful response. reqStart is captured
+	// before any work so the latency_ms column reflects total
+	// wall-clock from request entry to response.
+	reqStart := time.Now()
 	// Round-6 Task 10: route the request through the configured
 	// A/B test (if any) BEFORE topK is resolved so the variant's
 	// `top_k` override (when present) flows into the topK cap, the
@@ -512,6 +517,7 @@ func (h *Handler) retrieve(c *gin.Context) {
 				resp.Hits[i].PrivacyStrip = BuildPrivacyStrip(matchFromCachedHit(resp.Hits[i]), snapshot)
 			}
 			h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+			h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, true, reqStart, nil, route)
 			c.JSON(http.StatusOK, resp)
 
 			return
@@ -619,7 +625,22 @@ func (h *Handler) retrieve(c *gin.Context) {
 	}
 
 	h.applyDeviceFirst(c.Request.Context(), tenantID, channelID, privacyMode, req.DeviceTier, snapshot, &resp)
+	h.recordQueryAnalytics(c.Request.Context(), tenantID, req.Query, len(resp.Hits), topK, false, reqStart, backendTimingsMillis(backendTimings), route)
 	c.JSON(http.StatusOK, resp)
+}
+
+// backendTimingsMillis projects the per-backend time.Duration map
+// into the int64 millisecond shape the QueryAnalytics recorder
+// expects.
+func backendTimingsMillis(in map[string]time.Duration) map[string]int64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(in))
+	for k, v := range in {
+		out[k] = v.Milliseconds()
+	}
+	return out
 }
 
 // applyDeviceFirst computes the on-device-first hint and writes it

@@ -354,6 +354,43 @@ The full set of public + admin endpoints is documented in
   rollback coverage; `make migrate-rollback` applies them in
   reverse order.
 
+**Round 8 additions:**
+
+- Stage 4 store worker now consults `pipeline.Deduplicator`
+  before persistence when `CONTEXT_ENGINE_DEDUP_ENABLED=true`.
+- Coordinator `Submit` routes through `pipeline.PriorityBuffer`
+  when `CONTEXT_ENGINE_PRIORITY_ENABLED=true`.
+- Stage 3 embed worker honours per-source embedding-model
+  overrides from `source_embedding_config`.
+- `pipeline.RetryAnalytics` is now wired into `runWithRetry`
+  so `GET /v1/admin/pipeline/retry-stats` reflects real
+  ingest activity.
+- `NotificationDispatcher` is wired into the audit pipeline;
+  webhook / email subscribers fire on matching audit events
+  (e.g. `source.connected`, `policy.promoted`,
+  `source.credential_invalid`).
+- All six in-memory admin stores (query analytics, pinned
+  results, sync history, latency budget, cache config,
+  credential health) are now Postgres-backed via GORM and
+  wired into `cmd/api/main.go`.
+- Credential health is checked periodically by a background
+  worker in `cmd/ingest/main.go`; interval is configurable
+  via `CONTEXT_ENGINE_CREDENTIAL_HEALTH_INTERVAL`
+  (default `1h`).
+- The retrieval handler now applies operator-pinned chunks
+  (`pin_apply.ApplyPins`) after policy filtering and consults
+  per-tenant latency budgets and cache TTL overrides via
+  `Handler.SetLatencyBudgetLookup` / `SetCacheTTLLookup`.
+- Notification deliveries that fail with a retryable code are
+  persisted with `next_retry_at`; a background retry worker
+  re-delivers with linear backoff and dead-letters after 5
+  attempts.
+- New operational runbook at
+  [`docs/runbooks/operational.md`](docs/runbooks/operational.md)
+  covers warming the cache, A/B testing, pipeline health,
+  audit export, latency / TTL management, bulk source ops,
+  chunk quality, and credential health alerts.
+
 ---
 
 ## Quick start

@@ -1793,3 +1793,95 @@ ALTER COLUMN (`007_channel_deny_local`,
 prefix under `migrations/rollback/`** — a reviewer who forgets
 the down-script gets caught at unit-test time, not at incident
 time.
+
+### Tech choices added in Round 8
+
+- **Stage 4 deduplication is now in the hot path.** The
+  coordinator constructs a `pipeline.Deduplicator` from the
+  configured embedding dimension and the
+  `CONTEXT_ENGINE_DEDUP_NEAR_THRESHOLD` cosine cutoff
+  (default `0.97`). The store worker calls `Deduplicator.Drop`
+  on every chunk before persisting to Qdrant/FalkorDB/Postgres;
+  near-duplicate chunks are dropped with an audit-style metric.
+  Gated behind `CONTEXT_ENGINE_DEDUP_ENABLED`.
+
+- **Priority buffer in front of Submit.** When
+  `CONTEXT_ENGINE_PRIORITY_ENABLED=true`, `Coordinator.Submit`
+  routes events through `pipeline.PriorityBuffer`, which
+  drains high-priority (steady-state) events before
+  low-priority (backfill) events. This guarantees that a
+  live-user-triggered ingestion (e.g. a Slack message just
+  posted) is never starved by a long-running backfill.
+
+- **Per-source embedding-model overrides.** The Stage 3 embed
+  worker consults
+  `admin.EmbeddingConfigRepository.Get(sourceID)` and passes
+  the resolved model name to the embedding gRPC service.
+  When no row exists the worker falls back to the default
+  model. This unblocks experiments like “use
+  `text-embedding-3-large` for the GitHub source and
+  `bge-large` for everything else” without forking the
+  pipeline.
+
+- **Retry analytics wired into `runWithRetry`.** Every
+  attempt — success, retry, failure — is recorded on
+  `pipeline.RetryAnalytics`. `GET
+  /v1/admin/pipeline/retry-stats` now returns live data from
+  the ingest binary instead of a static placeholder.
+
+- **Notification dispatcher in the audit pipeline.** The
+  audit repository is wrapped with a
+  `notifyingAuditRepository` that calls
+  `NotificationDispatcher.Dispatch` after every successful
+  audit-log insert. The dispatcher walks the per-tenant
+  notification preferences for the event type, fans the
+  payload out to webhook and email targets, and persists
+  every attempt in `notification_delivery_log` (with
+  `next_retry_at` for retryable failures).
+
+- **All six admin stores are now Postgres-backed.**
+  `QueryAnalyticsStoreGORM`, `PinnedResultStoreGORM`,
+  `SyncHistoryGORM`, `LatencyBudgetGORM`, `CacheTTLGORM`, and
+  `CredentialHealthGORM` use the same GORM patterns as the
+  rest of the admin surface. `cmd/api/main.go` no longer
+  instantiates the in-memory variants; those remain only as
+  test fakes.
+
+- **Retrieval handler hooks for admin-owned state.** Three
+  new setters on `retrieval.Handler` decouple the retrieval
+  pipeline from `cmd/api`'s wiring:
+  - `SetLatencyBudgetLookup` — bounds the request context
+    via `context.WithTimeout(req.Context, budget)` so a
+    per-tenant `max_latency_ms` actually shortens the
+    request deadline.
+  - `SetCacheTTLLookup` — consulted on every
+    `cache.Set(...)` so per-tenant TTL overrides flow
+    through to Redis `EXPIRE`.
+  - `SetPinLookup` — invoked after policy filtering and
+    before caching; pinned chunks are inserted via
+    `pin_apply.ApplyPins` at the configured positions.
+
+- **Notification retry worker.** A new background worker
+  (`admin.NotificationRetryWorker`) scans
+  `notification_delivery_log` for rows whose `next_retry_at`
+  has passed, redelivers them via the configured
+  `NotificationDelivery`, and applies linear backoff. Rows
+  that exhaust `DefaultMaxRetryAttempts` (5) are
+  dead-lettered: `status=failed` with `next_retry_at`
+  cleared.
+
+- **Credential health worker.** `cmd/ingest/main.go`
+  registers a background goroutine that ticks every
+  `CONTEXT_ENGINE_CREDENTIAL_HEALTH_INTERVAL` (default `1h`).
+  Each tick lists every active source, invokes
+  `connector.Validate()`, persists the outcome to
+  `source_health.credential_*`, and emits the audit event
+  `source.credential_invalid` on failure (which then fans out
+  through the notification dispatcher).
+
+- **CI fast-lane gains alerts-check and rollback-parity.**
+  `.github/workflows/ci.yml` adds two PR-blocking jobs:
+  `fast-alerts` runs `make alerts-check` (validates
+  `deploy/alerts.yaml`) and `fast-rollback-parity` runs the
+  `migrations/rollback/...` tests that enforce every forward
+  migration has a matching down-script.
