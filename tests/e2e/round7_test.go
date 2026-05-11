@@ -284,8 +284,15 @@ func TestRound7_BulkSourceOps(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
 	}
-	if repo.updated["s1"] != admin.SourceStatusPaused {
-		t.Fatalf("expected pause on s1; got %v", repo.updated)
+	repo.mu.Lock()
+	gotStatus := repo.updated["s1"]
+	updatedCopy := make(map[string]admin.SourceStatus, len(repo.updated))
+	for k, v := range repo.updated {
+		updatedCopy[k] = v
+	}
+	repo.mu.Unlock()
+	if gotStatus != admin.SourceStatusPaused {
+		t.Fatalf("expected pause on s1; got %v", updatedCopy)
 	}
 	if len(auditW.actions()) != 2 {
 		t.Fatalf("expected 2 audit rows; got %d", len(auditW.actions()))
@@ -293,10 +300,13 @@ func TestRound7_BulkSourceOps(t *testing.T) {
 }
 
 type round7BulkRepo struct {
+	mu      sync.Mutex
 	updated map[string]admin.SourceStatus
 }
 
 func (r *round7BulkRepo) Update(_ context.Context, tenantID, id string, patch admin.UpdatePatch) (*admin.Source, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if patch.Status != nil {
 		r.updated[id] = *patch.Status
 	}
@@ -304,6 +314,8 @@ func (r *round7BulkRepo) Update(_ context.Context, tenantID, id string, patch ad
 }
 
 func (r *round7BulkRepo) MarkRemoving(_ context.Context, tenantID, id string) (*admin.Source, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.updated[id] = admin.SourceStatusRemoving
 	return &admin.Source{ID: id, TenantID: tenantID}, nil
 }

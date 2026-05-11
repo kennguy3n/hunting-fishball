@@ -549,7 +549,14 @@ func run() error {
 	abtestRouter := admin.NewABTestRouter(abtestStore)
 	retrievalHandler.SetABTestRouter(retrieval.ABTestRouterAdapter{Router: abtestRouter})
 
-	if abtestResults, aerr := admin.NewABTestResultsAggregator(admin.NewInMemoryQueryAnalyticsStore()); aerr == nil {
+	// Round-7 Task 4 + Task 6: the A/B-test results aggregator must
+	// read from the *same* query-analytics store the recorder writes
+	// to, otherwise GET /v1/admin/retrieval/experiments/:name/results
+	// always returns zero arms. Hoist the store construction here so
+	// the aggregator and the recorder share one instance.
+	queryAnalyticsStore := admin.NewInMemoryQueryAnalyticsStore()
+
+	if abtestResults, aerr := admin.NewABTestResultsAggregator(queryAnalyticsStore); aerr == nil {
 		if arHandler, herr := admin.NewABTestResultsHandler(abtestResults); herr == nil {
 			arHandler.Register(api)
 		}
@@ -588,8 +595,9 @@ func run() error {
 
 	// Round-7 Task 4: retrieval query analytics. The retrieval
 	// handler exposes a function-shaped hook to keep the import
-	// graph one-way (admin imports retrieval, never reverse).
-	queryAnalyticsStore := admin.NewInMemoryQueryAnalyticsStore()
+	// graph one-way (admin imports retrieval, never reverse). The
+	// `queryAnalyticsStore` is declared above so the A/B-test
+	// results aggregator shares the same in-memory backing store.
 	queryAnalyticsRec, _ := admin.NewQueryAnalyticsRecorder(queryAnalyticsStore)
 	retrievalHandler.SetQueryAnalyticsRecorder(func(ctx context.Context, e retrieval.QueryAnalyticsEvent) {
 		queryAnalyticsRec.Record(ctx, admin.QueryAnalyticsEvent{

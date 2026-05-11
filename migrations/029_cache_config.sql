@@ -4,10 +4,10 @@
 -- global default) when populating cache entries.
 
 CREATE TABLE IF NOT EXISTS tenant_cache_config (
-    tenant_id   CHAR(26)    NOT NULL,
-    ttl_seconds INTEGER     NOT NULL DEFAULT 300,
-    notes       TEXT        NOT NULL DEFAULT '',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tenant_id  CHAR(26)    NOT NULL,
+    ttl_ms     INTEGER     NOT NULL DEFAULT 0,
+    notes      TEXT        NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id)
 );
