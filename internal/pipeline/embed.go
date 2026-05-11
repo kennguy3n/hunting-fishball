@@ -45,6 +45,20 @@ type EmbedConfig struct {
 	// preferred model. Empty leaves the choice to the embedding
 	// service.
 	ModelID string
+
+	// ConfigResolver, when non-nil, is consulted before every
+	// EmbedBlocksForSource call to look up a per-source model
+	// override (Round-6 Task 1 / Round-8 Task 3). The resolver
+	// returns ("", 0) when no row exists and the embed stage falls
+	// back to ModelID.
+	ConfigResolver EmbeddingConfigResolver
+}
+
+// EmbeddingConfigResolver is the narrow port the embed stage uses
+// to look up per-source model overrides. The production wiring
+// passes admin.EmbeddingConfigRepository; tests inject a fake.
+type EmbeddingConfigResolver interface {
+	ResolveEmbeddingModel(ctx context.Context, tenantID, sourceID string) (model string, dimensions int)
 }
 
 // RemoteEmbedder is the abstraction over remote embedding APIs (OpenAI,
@@ -98,21 +112,35 @@ func NewEmbedder(cfg EmbedConfig) (*Embedder, error) {
 // Returns the per-block embedding plus the model id the service
 // reported (so Stage 4 can persist it as part of the chunk metadata).
 func (e *Embedder) EmbedBlocks(ctx context.Context, tenantID string, blocks []Block) ([][]float32, string, error) {
+	return e.EmbedBlocksForSource(ctx, tenantID, "", blocks)
+}
+
+// EmbedBlocksForSource is the per-source variant: when ConfigResolver
+// is set, the resolver picks the model for (tenantID, sourceID); the
+// chosen model overrides cfg.ModelID for this call only. Falls back
+// to cfg.ModelID when the resolver returns "" / is nil.
+func (e *Embedder) EmbedBlocksForSource(ctx context.Context, tenantID, sourceID string, blocks []Block) ([][]float32, string, error) {
 	chunks := make([]string, len(blocks))
 	for i, b := range blocks {
 		chunks[i] = b.Text
 	}
+	modelID := e.cfg.ModelID
+	if e.cfg.ConfigResolver != nil && sourceID != "" {
+		if m, _ := e.cfg.ConfigResolver.ResolveEmbeddingModel(ctx, tenantID, sourceID); m != "" {
+			modelID = m
+		}
+	}
 
-	return e.embed(ctx, tenantID, chunks)
+	return e.embedWithModel(ctx, tenantID, chunks, modelID)
 }
 
 // EmbedTexts runs Stage 3 over a flat slice of texts (used by the
 // retrieval API to embed the user query).
 func (e *Embedder) EmbedTexts(ctx context.Context, tenantID string, chunks []string) ([][]float32, string, error) {
-	return e.embed(ctx, tenantID, chunks)
+	return e.embedWithModel(ctx, tenantID, chunks, e.cfg.ModelID)
 }
 
-func (e *Embedder) embed(ctx context.Context, tenantID string, chunks []string) ([][]float32, string, error) {
+func (e *Embedder) embedWithModel(ctx context.Context, tenantID string, chunks []string, modelID string) ([][]float32, string, error) {
 	if len(chunks) == 0 {
 		return nil, "", nil
 	}
@@ -134,7 +162,7 @@ func (e *Embedder) embed(ctx context.Context, tenantID string, chunks []string) 
 			end = len(chunks)
 		}
 		batch := chunks[start:end]
-		em, m, err := e.callLocal(ctx, tenantID, batch)
+		em, m, err := e.callLocal(ctx, tenantID, batch, modelID)
 		if err != nil {
 			return nil, "", err
 		}
@@ -147,12 +175,14 @@ func (e *Embedder) embed(ctx context.Context, tenantID string, chunks []string) 
 	return out, model, nil
 }
 
-// callLocal does one gRPC call with retry / timeout.
-func (e *Embedder) callLocal(ctx context.Context, tenantID string, batch []string) ([][]float32, string, error) {
+// callLocal does one gRPC call with retry / timeout. modelID is the
+// per-call override (cfg.ModelID by default; per-source resolver may
+// substitute).
+func (e *Embedder) callLocal(ctx context.Context, tenantID string, batch []string, modelID string) ([][]float32, string, error) {
 	req := &embeddingv1.ComputeEmbeddingsRequest{
 		TenantId: tenantID,
 		Chunks:   batch,
-		ModelId:  e.cfg.ModelID,
+		ModelId:  modelID,
 	}
 	var lastErr error
 	backoff := e.cfg.InitialBackoff

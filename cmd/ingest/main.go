@@ -123,6 +123,11 @@ func run() error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 
+	// Audit repository — shared by the dedup audit sink, the
+	// Round-8 credential-health worker, and the Stage-4 sync
+	// history recorder.
+	auditRepo := audit.NewRepository(db)
+
 	// ---- Vector store
 	qdrant, err := storage.NewQdrantClient(storage.QdrantConfig{
 		BaseURL:    qdrantURL,
@@ -151,19 +156,41 @@ func run() error {
 		return fmt.Errorf("dial embed: %w", err)
 	}
 	defer func() { _ = embedConn.Close() }()
+	// Embedding config resolver (Round-6 Task 1 / Round-8 Task 3):
+	// per-source embedding model selection. The resolver reads the
+	// source_embedding_config table; the embed stage falls back to
+	// the default model when no row exists.
+	embedCfgRepo := admin.NewEmbeddingConfigRepository(db)
 	embedder, err := pipeline.NewEmbedder(pipeline.EmbedConfig{
-		Local: embeddingv1.NewEmbeddingServiceClient(embedConn),
+		Local:          embeddingv1.NewEmbeddingServiceClient(embedConn),
+		ConfigResolver: embedCfgRepo,
 	})
 	if err != nil {
 		return fmt.Errorf("embedder: %w", err)
 	}
 
+	// Round-8 Task 1: build the dedup pass FIRST so the Stage-4
+	// storer can be constructed with it wired into StoreConfig.
+	//
+	// Semantic dedup (Round-6 Task 3 / Round-8 Task 1): the
+	// Stage-4 store worker consults the Deduplicator before
+	// persisting a chunk. Gated behind CONTEXT_ENGINE_DEDUP_ENABLED.
+	dedupCfg := pipeline.LoadDedupConfigFromEnv()
+	dedupCfg.Audit = auditRepo
+	dedupCfg.Connector = "kafka"
+	dedup := pipeline.NewDeduplicator(dedupCfg)
+	if dedupCfg.Enabled {
+		slog.Info("ingest: semantic dedup enabled",
+			slog.Float64("threshold", float64(dedupCfg.Threshold)))
+	}
+
 	// ---- Stage 4 storer
 	fetcher := pipeline.NewFetcher(pipeline.FetchConfig{})
 	storer, err := pipeline.NewStorer(pipeline.StoreConfig{
-		Vector:    qdrant,
-		Metadata:  pgStore,
-		Connector: "kafka",
+		Vector:       qdrant,
+		Metadata:     pgStore,
+		Connector:    "kafka",
+		Deduplicator: dedup,
 	})
 	if err != nil {
 		return fmt.Errorf("storer: %w", err)
@@ -181,46 +208,24 @@ func run() error {
 		EmbedWorkers: stageWorkerEnv("CONTEXT_ENGINE_EMBED_WORKERS"),
 		StoreWorkers: stageWorkerEnv("CONTEXT_ENGINE_STORE_WORKERS"),
 	}
-	// Round-7 Task 3: Round-6 pipeline features. Each block is
-	// guarded by its own env flag so the ingest worker boots
-	// unchanged when nothing is opted in.
-	//
-	// Semantic dedup (Round-6 Task 3): the Stage-4 store worker
-	// consults the Deduplicator before persisting a chunk. The
-	// Deduplicator itself is constructed below; the pre-write
-	// hook is owned by the storer (see storer_round6.go).
-	dedupCfg := pipeline.LoadDedupConfigFromEnv()
-	dedup := pipeline.NewDeduplicator(dedupCfg)
-	if dedupCfg.Enabled {
-		slog.Info("ingest: semantic dedup enabled",
-			slog.Float64("threshold", float64(dedupCfg.Threshold)))
-	}
-	_ = dedup
 
-	// Priority buffer (Round-6 Task 8): when
-	// CONTEXT_ENGINE_PRIORITY_ENABLED=true the coordinator
-	// pulls events out of a 3-class priority buffer fronting
-	// Kafka. The buffer is constructed here so subsequent
-	// rounds can plumb it into Submit().
+	// Priority buffer (Round-6 Task 8 / Round-8 Task 2): when
+	// CONTEXT_ENGINE_PRIORITY_ENABLED=true the coordinator pulls
+	// events out of a 3-class priority buffer fronting Kafka.
+	// High-priority (steady-state) events are dequeued before
+	// low-priority (backfill) events; the buffer is plumbed into
+	// CoordinatorConfig.PriorityBuffer below.
+	var priorityBuffer *pipeline.PriorityBuffer
 	if os.Getenv("CONTEXT_ENGINE_PRIORITY_ENABLED") == "true" {
-		pb := pipeline.NewPriorityBuffer(pipeline.PriorityBufferConfig{})
-		slog.Info("ingest: priority buffer constructed")
-		_ = pb
+		priorityBuffer = pipeline.NewPriorityBuffer(pipeline.PriorityBufferConfig{})
+		slog.Info("ingest: priority buffer enabled")
 	}
 
-	// Embedding config resolver (Round-6 Task 1): per-source
-	// embedding model selection. The resolver reads the
-	// embedding_config table; pipeline embed stage falls back
-	// to the default model when no row exists.
-	embedCfgRepo := admin.NewEmbeddingConfigRepository(db)
-	_ = embedCfgRepo
-
-	// Retry analytics (Round-6 Task 12): every retry the
-	// coordinator performs is recorded so the
-	// /v1/admin/pipeline/retries endpoint can surface the
+	// Retry analytics (Round-6 Task 12 / Round-8 Task 4): every
+	// retry the coordinator performs is recorded so the
+	// /v1/admin/pipeline/retry-stats endpoint can surface the
 	// breakdown.
 	retryAnalytics := pipeline.NewRetryAnalytics()
-	_ = retryAnalytics
 
 	// Phase 3 Stage 3b: opt-in GraphRAG entity extraction. When
 	// CONTEXT_ENGINE_GRAPHRAG_ENABLED=true and both the gRPC target
@@ -236,12 +241,14 @@ func run() error {
 	}
 
 	coord, err := pipeline.NewCoordinator(pipeline.CoordinatorConfig{
-		Fetch:    fetcher,
-		Parse:    parser,
-		Embed:    embedder,
-		Store:    storer,
-		Workers:  stageWorkers,
-		GraphRAG: graphRAG,
+		Fetch:          fetcher,
+		Parse:          parser,
+		Embed:          embedder,
+		Store:          storer,
+		Workers:        stageWorkers,
+		GraphRAG:       graphRAG,
+		PriorityBuffer: priorityBuffer,
+		RetryAnalytics: retryAnalytics,
 	})
 	if err != nil {
 		return fmt.Errorf("coordinator: %w", err)
@@ -386,7 +393,7 @@ func run() error {
 			Chunks: chunkSrc, Policies: policySrc, Deleter: deleter,
 			Logger:   slog.Default(),
 			Interval: interval,
-			Audit:    audit.NewRepository(db),
+			Audit:    auditRepo,
 			Actor:    envOr("CONTEXT_ENGINE_RETENTION_ACTOR", ""),
 		})
 		if werr != nil {

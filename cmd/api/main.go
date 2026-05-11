@@ -147,6 +147,22 @@ func run() error {
 
 	auditRepo := audit.NewRepository(db)
 
+	// Round-8 Task 5: notification dispatcher wiring. Build the
+	// dispatcher + delivery log here so every handler that takes
+	// an AuditWriter can be wrapped in a NotifyingAuditWriter,
+	// which fans configured webhook/email subscribers out on every
+	// audit Create. Failures inside Dispatch are swallowed so they
+	// can never block the audit write.
+	notifStore := admin.NewInMemoryNotificationStore()
+	notifDelivery := &admin.WebhookDelivery{Client: http.DefaultClient}
+	notifDispatcher, err := admin.NewNotificationDispatcher(notifStore, notifDelivery)
+	if err != nil {
+		return fmt.Errorf("notification dispatcher: %w", err)
+	}
+	notifDeliveryLog := admin.NewInMemoryNotificationDeliveryLog()
+	notifDispatcher.SetDeliveryLog(notifDeliveryLog)
+	notifyingAudit := &admin.NotifyingAuditWriter{Inner: auditRepo, Dispatcher: notifDispatcher, Async: true}
+
 	qdrantPool := 32
 	if v, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_QDRANT_POOL_SIZE")); v > 0 {
 		qdrantPool = v
@@ -306,7 +322,7 @@ func run() error {
 	healthRepo := admin.NewHealthRepository(db, admin.DefaultThresholds)
 	adminHandler, err := admin.NewHandler(admin.HandlerConfig{
 		Repo:   sourceRepo,
-		Audit:  auditRepo,
+		Audit:  notifyingAudit,
 		Health: healthRepo,
 	})
 	if err != nil {
@@ -331,7 +347,7 @@ func run() error {
 	// for CredentialGracePeriod so in-flight requests drain.
 	(&admin.CredentialRotator{
 		Repo:      sourceRepo,
-		Audit:     auditRepo,
+		Audit:     notifyingAudit,
 		Validator: admin.NewRegistryValidator(),
 	}).Register(api)
 
@@ -423,7 +439,7 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("reindex orchestrator: %w", err)
 		}
-		reindexHandler, err := admin.NewReindexHandler(admin.ReindexHandlerConfig{Runner: orch, Audit: auditRepo})
+		reindexHandler, err := admin.NewReindexHandler(admin.ReindexHandlerConfig{Runner: orch, Audit: notifyingAudit})
 		if err != nil {
 			return fmt.Errorf("reindex handler: %w", err)
 		}
@@ -439,7 +455,7 @@ func run() error {
 	tenantStatusRepo := admin.NewTenantStatusRepoGORM(db)
 	tenantDeleter, err := admin.NewTenantDeleter(admin.TenantDeleterConfig{
 		Status: tenantStatusRepo,
-		Audit:  auditRepo,
+		Audit:  notifyingAudit,
 	})
 	if err != nil {
 		return fmt.Errorf("tenant deleter: %w", err)
@@ -467,7 +483,7 @@ func run() error {
 	promoter, err := policy.NewPromoter(policy.PromotionConfig{
 		Drafts:    draftRepo,
 		LiveStore: liveStore,
-		Audit:     auditRepo,
+		Audit:     notifyingAudit,
 	})
 	if err != nil {
 		return fmt.Errorf("policy promoter: %w", err)
@@ -483,7 +499,7 @@ func run() error {
 		Drafts:    draftRepo,
 		Promotion: promoter,
 		Simulator: simulator,
-		Audit:     auditRepo,
+		Audit:     notifyingAudit,
 	})
 	if err != nil {
 		return fmt.Errorf("simulator handler: %w", err)
@@ -543,7 +559,7 @@ func run() error {
 	// dependencies while still exposing the full surface for
 	// integration tests.
 	abtestStore := admin.NewInMemoryABTestStore()
-	if abtestHandler, aerr := admin.NewABTestHandler(abtestStore, auditRepo); aerr == nil {
+	if abtestHandler, aerr := admin.NewABTestHandler(abtestStore, notifyingAudit); aerr == nil {
 		abtestHandler.Register(api)
 	}
 	abtestRouter := admin.NewABTestRouter(abtestStore)
@@ -563,25 +579,19 @@ func run() error {
 	}
 
 	if tmplStore := admin.NewInMemoryConnectorTemplateStore(); tmplStore != nil {
-		if tmplHandler, terr := admin.NewConnectorTemplateHandler(tmplStore, auditRepo); terr == nil {
+		if tmplHandler, terr := admin.NewConnectorTemplateHandler(tmplStore, notifyingAudit); terr == nil {
 			tmplHandler.Register(api)
 		}
 	}
 
-	notifStore := admin.NewInMemoryNotificationStore()
-	if notifHandler, nerr := admin.NewNotificationHandler(notifStore, auditRepo); nerr == nil {
+	if notifHandler, nerr := admin.NewNotificationHandler(notifStore, notifyingAudit); nerr == nil {
 		notifHandler.Register(api)
 	}
-	notifDelivery := &admin.WebhookDelivery{Client: http.DefaultClient}
-	notifDispatcher, _ := admin.NewNotificationDispatcher(notifStore, notifDelivery)
-	notifDeliveryLog := admin.NewInMemoryNotificationDeliveryLog()
-	notifDispatcher.SetDeliveryLog(notifDeliveryLog)
 	if dlogHandler, derr := admin.NewNotificationDeliveryLogHandler(notifDeliveryLog); derr == nil {
 		dlogHandler.Register(api)
 	}
-	_ = notifDispatcher
 
-	if ecHandler, eerr := admin.NewEmbeddingConfigHandler(admin.NewEmbeddingConfigRepository(db), auditRepo); eerr == nil {
+	if ecHandler, eerr := admin.NewEmbeddingConfigHandler(admin.NewEmbeddingConfigRepository(db), notifyingAudit); eerr == nil {
 		ecHandler.Register(api)
 	}
 
@@ -589,7 +599,7 @@ func run() error {
 		rsHandler.Register(api)
 	}
 
-	if synHandler, serr := admin.NewSynonymsHandler(retrieval.NewInMemorySynonymStore(), auditRepo); serr == nil {
+	if synHandler, serr := admin.NewSynonymsHandler(retrieval.NewInMemorySynonymStore(), notifyingAudit); serr == nil {
 		synHandler.Register(api)
 	}
 
@@ -643,17 +653,17 @@ func run() error {
 		}
 		return out
 	})
-	if cwHandler, werr := admin.NewCacheWarmHandler(admin.CacheWarmHandlerConfig{Warmer: cacheWarmExec, Analytics: queryAnalyticsStore, AutoTopN: 10, Audit: auditRepo}); werr == nil {
+	if cwHandler, werr := admin.NewCacheWarmHandler(admin.CacheWarmHandlerConfig{Warmer: cacheWarmExec, Analytics: queryAnalyticsStore, AutoTopN: 10, Audit: notifyingAudit}); werr == nil {
 		cwHandler.Register(api)
 	}
 
 	// Round-7 Task 10: bulk source operations.
-	if bulkHandler, berr := admin.NewBulkSourceHandler(sourceRepo, auditRepo); berr == nil {
+	if bulkHandler, berr := admin.NewBulkSourceHandler(sourceRepo, notifyingAudit); berr == nil {
 		bulkHandler.Register(api)
 	}
 
 	// Round-7 Task 11: per-tenant latency budget.
-	if lbHandler, lerr := admin.NewLatencyBudgetHandler(admin.NewInMemoryLatencyBudgetStore(), auditRepo); lerr == nil {
+	if lbHandler, lerr := admin.NewLatencyBudgetHandler(admin.NewInMemoryLatencyBudgetStore(), notifyingAudit); lerr == nil {
 		lbHandler.Register(api)
 	}
 
@@ -663,12 +673,12 @@ func run() error {
 	}
 
 	// Round-7 Task 14: audit export.
-	if aeHandler, aerr := admin.NewAuditExportHandler(auditRepo, auditRepo); aerr == nil {
+	if aeHandler, aerr := admin.NewAuditExportHandler(auditRepo, notifyingAudit); aerr == nil {
 		aeHandler.Register(api)
 	}
 
 	// Round-7 Task 15: per-tenant cache TTL.
-	if ccHandler, cerr := admin.NewCacheConfigHandler(admin.NewInMemoryCacheTTLStore(), auditRepo); cerr == nil {
+	if ccHandler, cerr := admin.NewCacheConfigHandler(admin.NewInMemoryCacheTTLStore(), notifyingAudit); cerr == nil {
 		ccHandler.Register(api)
 	}
 
@@ -678,7 +688,7 @@ func run() error {
 	}
 
 	// Round-7 Task 17: pinned retrieval results.
-	if prHandler, perr := admin.NewPinnedResultsHandler(admin.NewInMemoryPinnedResultStore(nil), auditRepo); perr == nil {
+	if prHandler, perr := admin.NewPinnedResultsHandler(admin.NewInMemoryPinnedResultStore(nil), notifyingAudit); perr == nil {
 		prHandler.Register(api)
 	}
 
