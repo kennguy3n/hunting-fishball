@@ -40,20 +40,20 @@ const (
 // NotificationDeliveryAttempt is the persisted shape backing the
 // migrations/025_notification_delivery_log.sql table.
 type NotificationDeliveryAttempt struct {
-	ID            string                     `gorm:"type:char(26);primaryKey;column:id" json:"id"`
-	TenantID      string                     `gorm:"type:char(26);not null;column:tenant_id" json:"tenant_id"`
-	PreferenceID  string                     `gorm:"type:char(26);not null;column:preference_id" json:"preference_id"`
-	EventType     string                     `gorm:"type:varchar(64);not null;column:event_type" json:"event_type"`
-	Channel       NotificationChannel        `gorm:"type:varchar(16);not null;column:channel" json:"channel"`
-	Target        string                     `gorm:"type:text;not null;column:target" json:"target"`
-	Payload       JSONMap                    `gorm:"type:jsonb;not null;default:'{}';column:payload" json:"payload"`
-	Status        NotificationDeliveryStatus `gorm:"type:varchar(16);not null;column:status" json:"status"`
-	Attempt       int                        `gorm:"not null;column:attempt" json:"attempt"`
-	ResponseCode  int                        `gorm:"not null;column:response_code" json:"response_code"`
-	ErrorMessage  string                     `gorm:"type:text;not null;column:error_message" json:"error_message,omitempty"`
-	NextRetryAt   *time.Time                 `gorm:"column:next_retry_at" json:"next_retry_at,omitempty"`
-	CreatedAt     time.Time                  `gorm:"not null;default:now();column:created_at" json:"created_at"`
-	UpdatedAt     time.Time                  `gorm:"not null;default:now();column:updated_at" json:"updated_at"`
+	ID           string                     `gorm:"type:char(26);primaryKey;column:id" json:"id"`
+	TenantID     string                     `gorm:"type:char(26);not null;column:tenant_id" json:"tenant_id"`
+	PreferenceID string                     `gorm:"type:char(26);not null;column:preference_id" json:"preference_id"`
+	EventType    string                     `gorm:"type:varchar(64);not null;column:event_type" json:"event_type"`
+	Channel      NotificationChannel        `gorm:"type:varchar(16);not null;column:channel" json:"channel"`
+	Target       string                     `gorm:"type:text;not null;column:target" json:"target"`
+	Payload      JSONMap                    `gorm:"type:jsonb;not null;default:'{}';column:payload" json:"payload"`
+	Status       NotificationDeliveryStatus `gorm:"type:varchar(16);not null;column:status" json:"status"`
+	Attempt      int                        `gorm:"not null;column:attempt" json:"attempt"`
+	ResponseCode int                        `gorm:"not null;column:response_code" json:"response_code"`
+	ErrorMessage string                     `gorm:"type:text;not null;column:error_message" json:"error_message,omitempty"`
+	NextRetryAt  *time.Time                 `gorm:"column:next_retry_at" json:"next_retry_at,omitempty"`
+	CreatedAt    time.Time                  `gorm:"not null;default:now();column:created_at" json:"created_at"`
+	UpdatedAt    time.Time                  `gorm:"not null;default:now();column:updated_at" json:"updated_at"`
 }
 
 // TableName pins the table name.

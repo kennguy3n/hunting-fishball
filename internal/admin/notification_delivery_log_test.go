@@ -67,7 +67,7 @@ func TestNotificationDispatcher_RecordsAttempts(t *testing.T) {
 	wh := &admin.WebhookDelivery{
 		Sleep:   func(time.Duration) {},
 		Backoff: []time.Duration{time.Millisecond},
-		Client: &http.Client{Transport: failingRoundTripper{}},
+		Client:  &http.Client{Transport: failingRoundTripper{}},
 	}
 	disp, err := admin.NewNotificationDispatcher(store, wh)
 	if err != nil {

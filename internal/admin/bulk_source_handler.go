@@ -8,7 +8,7 @@
 //   - pause      → Source.Status = paused
 //   - resume     → Source.Status = active
 //   - disconnect → Source.Status = removing (lifecycle handed off
-//                  to the forget worker)
+//     to the forget worker)
 //
 // Each individual operation emits its own audit row so the admin
 // timeline reflects the action as if it had been issued via the

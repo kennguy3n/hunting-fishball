@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -117,7 +116,7 @@ func (h *AuditExportHandler) export(c *gin.Context) {
 			w.Flush()
 			return w.Error()
 		}); err != nil {
-			_, _ = c.Writer.WriteString(fmt.Sprintf("\nERROR: %s\n", err.Error()))
+			_, _ = fmt.Fprintf(c.Writer, "\nERROR: %s\n", err.Error())
 		}
 		w.Flush()
 		return
@@ -135,7 +134,7 @@ func (h *AuditExportHandler) export(c *gin.Context) {
 		}
 		return nil
 	}); err != nil {
-		_, _ = c.Writer.WriteString(fmt.Sprintf("ERROR: %s\n", err.Error()))
+		_, _ = fmt.Fprintf(c.Writer, "ERROR: %s\n", err.Error())
 	}
 	actor := actorIDFromContext(c)
 	_ = h.audit.Create(c.Request.Context(), audit.NewAuditLog(
@@ -162,17 +161,4 @@ func (h *AuditExportHandler) stream(ctx context.Context, filter audit.ListFilter
 		filter.PageToken = res.NextPageToken
 	}
 	return errors.New("audit_export: pagination safety limit exceeded")
-}
-
-// parseQueryInt is a small helper kept locally so the package
-// stays free of strconv noise in the handler body.
-func parseQueryInt(s string, def int) int {
-	if s == "" {
-		return def
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return def
-	}
-	return n
 }
