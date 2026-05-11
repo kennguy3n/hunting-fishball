@@ -2,15 +2,15 @@
 
 // Package e2e — round9_pipeline_test.go — Round-10 Task 12.
 //
-// (a) Drives a coordinator with CONTEXT_ENGINE_PARSE_TIMEOUT=1ms
-//     and a parse stage that blocks for 250ms. The per-attempt
-//     deadline must fire on every attempt, so after MaxAttempts
-//     the event lands in the DLQ.
+// Subtest (a) drives the pipeline coordinator with
+// CONTEXT_ENGINE_PARSE_TIMEOUT=1ms and a parse stage that blocks
+// for 250ms. The per-attempt deadline must fire on every attempt,
+// so after MaxAttempts the event lands in the DLQ.
 //
-// (b) Drives a retrieval handler with CacheWarmOnMiss=true and
-//     a SlowCache whose Set blocks for ~500ms. The HTTP response
-//     should return well before the Set finishes; a second call
-//     to Get returns the warmed entry.
+// Subtest (b) drives a retrieval handler with CacheWarmOnMiss=true
+// and a SlowCache whose Set blocks for ~500ms. The HTTP response
+// should return well before the Set finishes; a second call to Get
+// returns the warmed entry.
 //
 // Both subtests use only public APIs so the fakes live in this
 // file; coordinator_test.go's fakes are package-private.
