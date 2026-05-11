@@ -65,7 +65,7 @@ func TestPayloadSizeLimiter_SkipsConfiguredPaths(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(observability.PayloadSizeLimiter(observability.PayloadLimiterConfig{
-		MaxBytes: 1,
+		MaxBytes:  1,
 		SkipPaths: []string{"/metrics"},
 	}))
 	r.POST("/metrics", func(c *gin.Context) { c.String(http.StatusOK, "ok") })

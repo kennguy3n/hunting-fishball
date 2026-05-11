@@ -28,12 +28,12 @@ import (
 
 // IntegrityResponse is the JSON envelope.
 type IntegrityResponse struct {
-	TenantID    string `json:"tenant_id"`
-	EntryCount  int    `json:"entry_count"`
-	HeadHash    string `json:"head_hash"`
-	FirstEntry  string `json:"first_entry_id,omitempty"`
-	LastEntry   string `json:"last_entry_id,omitempty"`
-	Algorithm   string `json:"algorithm"`
+	TenantID   string `json:"tenant_id"`
+	EntryCount int    `json:"entry_count"`
+	HeadHash   string `json:"head_hash"`
+	FirstEntry string `json:"first_entry_id,omitempty"`
+	LastEntry  string `json:"last_entry_id,omitempty"`
+	Algorithm  string `json:"algorithm"`
 }
 
 // IntegrityHandler serves GET /v1/admin/audit/integrity.

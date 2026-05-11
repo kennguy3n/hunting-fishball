@@ -48,9 +48,9 @@ type PoolLeakDetectorConfig struct {
 
 // PoolLeakDetector watches for sustained Postgres pool saturation.
 type PoolLeakDetector struct {
-	cfg   PoolLeakDetectorConfig
-	hits  int
-	last  int // last published percent
+	cfg  PoolLeakDetectorConfig
+	hits int
+	last int // last published percent
 }
 
 // ErrNoMaxOpen is returned by NewPoolLeakDetector when the

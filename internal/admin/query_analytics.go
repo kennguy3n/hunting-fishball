@@ -47,7 +47,7 @@ type QueryAnalyticsRow struct {
 	// constants below. Backed by migration
 	// migrations/033_query_analytics_source.sql which defaults to
 	// "user" so pre-Round-11 rows keep their semantics.
-	Source    string    `gorm:"type:varchar(16);not null;default:'user';column:source" json:"source"`
+	Source string `gorm:"type:varchar(16);not null;default:'user';column:source" json:"source"`
 	// Slow — Round-13 Task 8. True when the retrieval latency
 	// exceeded the per-deployment threshold
 	// (CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS, default 1000ms).

@@ -75,11 +75,11 @@ type StageCircuitBreakerConfig struct {
 // concurrent use; the coordinator's stage goroutines hit a single
 // breaker per stage.
 type StageCircuitBreaker struct {
-	cfg     StageCircuitBreakerConfig
-	mu      sync.Mutex
-	state   StageBreakerState
-	fails   int
-	openAt  time.Time
+	cfg    StageCircuitBreakerConfig
+	mu     sync.Mutex
+	state  StageBreakerState
+	fails  int
+	openAt time.Time
 }
 
 // NewStageCircuitBreaker validates and constructs the breaker.

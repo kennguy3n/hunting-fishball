@@ -41,15 +41,15 @@ func (h *CacheStatsHandler) Register(rg *gin.RouterGroup) {
 
 // CacheStatsResponse is the JSON envelope.
 type CacheStatsResponse struct {
-	TenantID     string    `json:"tenant_id"`
-	WindowStart  time.Time `json:"window_start"`
-	WindowEnd    time.Time `json:"window_end"`
-	Hits         int       `json:"hits"`
-	Misses       int       `json:"misses"`
-	Total        int       `json:"total"`
-	HitRatePct   float64   `json:"hit_rate_pct"`
-	MissRatePct  float64   `json:"miss_rate_pct"`
-	WindowMin    int       `json:"window_minutes"`
+	TenantID    string    `json:"tenant_id"`
+	WindowStart time.Time `json:"window_start"`
+	WindowEnd   time.Time `json:"window_end"`
+	Hits        int       `json:"hits"`
+	Misses      int       `json:"misses"`
+	Total       int       `json:"total"`
+	HitRatePct  float64   `json:"hit_rate_pct"`
+	MissRatePct float64   `json:"miss_rate_pct"`
+	WindowMin   int       `json:"window_minutes"`
 }
 
 func (h *CacheStatsHandler) get(c *gin.Context) {
