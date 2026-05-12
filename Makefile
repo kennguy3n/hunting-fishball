@@ -93,6 +93,21 @@ lint:
 		echo "golangci-lint not installed; skipping. Install: https://golangci-lint.run/"; \
 	fi
 
+# Round-18 Task 20 — dependency CVE scan. `govulncheck` queries
+# the Go vulnerability database for every module + function we
+# call. It catches a class of supply-chain failures the test
+# suite cannot: a transitive dependency advisory landing
+# overnight between a `make test` green run and a deploy.
+# Wired into the fast lane via .github/workflows/ci.yml.
+.PHONY: vulncheck
+vulncheck:
+	@if command -v govulncheck >/dev/null 2>&1; then \
+		govulncheck ./...; \
+	else \
+		$(GO) install golang.org/x/vuln/cmd/govulncheck@latest && \
+		$$($(GO) env GOPATH)/bin/govulncheck ./...; \
+	fi
+
 .PHONY: proto-tools
 proto-tools:
 	$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@latest

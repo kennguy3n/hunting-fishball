@@ -97,6 +97,10 @@ const (
 	// Round-14 Task 6: audit log integrity worker detected a
 	// chain mismatch on the periodic verification pass.
 	ActionAuditIntegrityViolation Action = "audit.integrity_violation"
+	// Round-19 Task 24: the per-connector health degradation
+	// detector observed a sustained error-rate breach over the
+	// configured sliding window and auto-paused the source.
+	ActionSourceAutoPaused Action = "source.auto_paused"
 )
 
 // AuditLog is a single audit event. The table is append-only — there is

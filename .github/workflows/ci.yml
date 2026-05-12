@@ -380,6 +380,47 @@ jobs:
       - name: proto-check
         run: make proto-check
 
+  # Round-18 Task 20 — dependency CVE scan. `govulncheck` queries
+  # the Go vulnerability database and reports advisories whose
+  # affected symbols our package set actually calls. We install
+  # the binary fresh per run (cheap) so we always get the latest
+  # advisory data.
+  fast-govulncheck:
+    name: Fast — govulncheck (deps CVE scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  # Round-18 Task 19 — pull the OpenAPI router-coverage test out
+  # of fast-test into its own micro-lane. The test is a 1-2s
+  # walk of the gin engine versus docs/openapi.yaml, so isolating
+  # it removes a long-tail cause of "is fast-test red because of
+  # docs or because of code?" triage time.
+  fast-openapi:
+    name: Fast — OpenAPI router coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: OpenAPI coverage test
+        run: go test -race -count=1 ./docs/...
+
   fast-python:
     name: Fast Python services unit tests
     runs-on: ubuntu-latest
@@ -407,7 +448,7 @@ jobs:
   fast-required:
     name: Required CI (fast lane)
     runs-on: ubuntu-latest
-    needs: [fast-check, fast-test, fast-build, fast-connector-unit, fast-connector-integration, fast-regression, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
+    needs: [fast-check, fast-test, fast-build, fast-connector-unit, fast-connector-integration, fast-regression, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-govulncheck, fast-openapi, fast-python]
     if: always()
     steps:
       - name: Verify fast-lane jobs passed
@@ -427,13 +468,15 @@ jobs:
             "${{ needs.fast-rollback-parity.result }}" \
             "${{ needs.fast-migrate-dry-run.result }}" \
             "${{ needs.fast-proto-check.result }}" \
+            "${{ needs.fast-govulncheck.result }}" \
+            "${{ needs.fast-openapi.result }}" \
             "${{ needs.fast-python.result }}"; do
             if [ "$r" != "success" ]; then
               fail=1
             fi
           done
           if [ "$fail" = "1" ]; then
-            echo "::error::fast-check=${{ needs.fast-check.result }} fast-test=${{ needs.fast-test.result }} fast-build=${{ needs.fast-build.result }} fast-connector-unit=${{ needs.fast-connector-unit.result }} fast-connector-integration=${{ needs.fast-connector-integration.result }} fast-regression=${{ needs.fast-regression.result }} fast-lint=${{ needs.fast-lint.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
+            echo "::error::fast-check=${{ needs.fast-check.result }} fast-test=${{ needs.fast-test.result }} fast-build=${{ needs.fast-build.result }} fast-connector-unit=${{ needs.fast-connector-unit.result }} fast-connector-integration=${{ needs.fast-connector-integration.result }} fast-regression=${{ needs.fast-regression.result }} fast-lint=${{ needs.fast-lint.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-govulncheck=${{ needs.fast-govulncheck.result }} fast-openapi=${{ needs.fast-openapi.result }} fast-python=${{ needs.fast-python.result }}"
             exit 1
           fi
           echo "fast lane green"

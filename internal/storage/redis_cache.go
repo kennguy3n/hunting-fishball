@@ -147,6 +147,13 @@ func (s *SemanticCache) CacheKey(tenantID, channelID string, queryEmbedding []fl
 	return fmt.Sprintf("%scache:%s:%s", s.cfg.KeyPrefix, tenantID, hex.EncodeToString(h.Sum(nil)))
 }
 
+// sourceTagKey returns the per-tenant + per-source tag set used by
+// InvalidateBySources to scope a source-reindex without touching
+// the rest of the tenant's cached entries. Round-19 Task 21.
+func (s *SemanticCache) sourceTagKey(tenantID, sourceID string) string {
+	return fmt.Sprintf("%scache-tag:source:%s:%s", s.cfg.KeyPrefix, tenantID, sourceID)
+}
+
 // memberKey returns the per-chunk membership-set key. The set
 // contains every cache key whose CachedResult includes the chunk.
 func (s *SemanticCache) memberKey(tenantID, chunkID string) string {
@@ -215,11 +222,102 @@ func (s *SemanticCache) Set(ctx context.Context, tenantID, channelID string, que
 		pipe.SAdd(ctx, mk, key)
 		pipe.Expire(ctx, mk, ttl)
 	}
+	// Round-19 Task 21 — write per-source tag sets so a source
+	// reindex can invalidate only the cached entries that referenced
+	// that source, without dropping the rest of the tenant's cache.
+	sources := sourceIDs(result.Hits)
+	for _, sourceID := range sources {
+		tk := s.sourceTagKey(tenantID, sourceID)
+		pipe.SAdd(ctx, tk, key)
+		pipe.Expire(ctx, tk, ttl)
+	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("semantic-cache: set: %w", err)
 	}
 
 	return nil
+}
+
+// InvalidateBySources drops every cached entry that references any
+// of the supplied source IDs for tenantID. Stage 4 (or an admin
+// reindex action) calls this with the source IDs being re-indexed,
+// preserving the rest of the tenant's cached entries.
+// Round-19 Task 21.
+func (s *SemanticCache) InvalidateBySources(ctx context.Context, tenantID string, sourceIDs []string) error {
+	if tenantID == "" {
+		return ErrMissingTenantScope
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(sourceIDs) == 0 {
+		return nil
+	}
+	keys := map[string]struct{}{}
+	for _, sid := range sourceIDs {
+		tk := s.sourceTagKey(tenantID, sid)
+		members, err := s.cfg.Client.SMembers(ctx, tk).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return fmt.Errorf("semantic-cache: smembers tag: %w", err)
+		}
+		for _, k := range members {
+			keys[k] = struct{}{}
+		}
+		if err := s.cfg.Client.Del(ctx, tk).Err(); err != nil && !errors.Is(err, redis.Nil) {
+			return fmt.Errorf("semantic-cache: del tag: %w", err)
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	args := make([]string, 0, len(keys))
+	for k := range keys {
+		args = append(args, k)
+	}
+	if err := s.cfg.Client.Del(ctx, args...).Err(); err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("semantic-cache: del entries: %w", err)
+	}
+
+	return nil
+}
+
+// RefreshFn rebuilds a cache entry. Used by GetOrRefresh to
+// populate a cold (or about-to-expire) cache entry without making
+// the caller wait. Round-19 Task 21.
+type RefreshFn func(ctx context.Context) (*CachedResult, error)
+
+// GetOrRefresh returns the current cached result for the key. When
+// the entry is missing or its CachedAt is older than `staleAfter`
+// (relative to the current time), GetOrRefresh kicks off
+// `refresh` in a detached goroutine to repopulate the entry.
+// Hot-query callers thus serve from cache while a single background
+// worker keeps the entry warm. Round-19 Task 21.
+func (s *SemanticCache) GetOrRefresh(ctx context.Context, tenantID, channelID string, queryEmbedding []float32, scopeHash string, staleAfter time.Duration, ttl time.Duration, refresh RefreshFn) (*CachedResult, error) {
+	cached, err := s.Get(ctx, tenantID, channelID, queryEmbedding, scopeHash)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if cached != nil && (staleAfter <= 0 || now.Sub(cached.CachedAt) < staleAfter) {
+		return cached, nil
+	}
+	if refresh == nil {
+		return cached, nil
+	}
+	// Best-effort detached refresh — the caller still sees the
+	// previous CachedResult (if any). Errors are dropped on the
+	// floor (the next call will retry).
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		fresh, ferr := refresh(bgCtx)
+		if ferr != nil || fresh == nil {
+			return
+		}
+		_ = s.Set(bgCtx, tenantID, channelID, queryEmbedding, scopeHash, fresh, ttl)
+	}()
+
+	return cached, nil
 }
 
 // Invalidate drops every cached entry that references any of the
@@ -262,6 +360,26 @@ func (s *SemanticCache) Invalidate(ctx context.Context, tenantID string, chunkID
 	}
 
 	return nil
+}
+
+// sourceIDs extracts the unique source IDs referenced by the
+// cached hits. Used by Set to populate the per-source tag sets.
+// Round-19 Task 21.
+func sourceIDs(hits []CachedHit) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(hits))
+	for _, h := range hits {
+		if h.SourceID == "" {
+			continue
+		}
+		if _, ok := seen[h.SourceID]; ok {
+			continue
+		}
+		seen[h.SourceID] = struct{}{}
+		out = append(out, h.SourceID)
+	}
+
+	return out
 }
 
 // chunkIDs extracts the unique chunk IDs from the cached hits.
