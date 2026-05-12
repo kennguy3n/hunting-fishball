@@ -31,15 +31,19 @@ import (
 // checks below.
 var auditedConnectors = []string{
 	"asana",
+	"bamboohr",
 	"box",
 	"clickup",
+	"coda",
 	"confluence",
 	"confluence_server",
 	"discord",
 	"dropbox",
+	"entra_id",
 	"github",
 	"gitlab",
 	"gmail",
+	"google_workspace",
 	"googledrive",
 	"hubspot",
 	"jira",
@@ -50,13 +54,17 @@ var auditedConnectors = []string{
 	"notion",
 	"okta",
 	"onedrive",
+	"outlook",
+	"personio",
 	"pipedrive",
 	"rss",
 	"s3",
 	"salesforce",
 	"sharepoint",
+	"sitemap",
 	"slack",
 	"teams",
+	"workday",
 }
 
 type auditCheck struct {

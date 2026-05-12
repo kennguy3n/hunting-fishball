@@ -22,15 +22,19 @@ import (
 	// Blank-imports mirror cmd/api/main.go so the registry is
 	// populated before ListSourceConnectors runs.
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/asana"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/coda"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence_server"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/google_workspace"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
@@ -41,13 +45,17 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/notion"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/okta"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/outlook"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/personio"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sitemap"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 )
 
 // runbookFilename maps a registry name to its expected runbook
@@ -91,8 +99,8 @@ var requiredSections = []string{
 func TestConnectorRunbooks_ExistAndCoverRequiredSections(t *testing.T) {
 	t.Parallel()
 	names := connector.ListSourceConnectors()
-	if len(names) < 28 {
-		t.Fatalf("expected at least 28 connectors registered; got %d (%v)", len(names), names)
+	if len(names) < 36 {
+		t.Fatalf("expected at least 36 connectors registered; got %d (%v)", len(names), names)
 	}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
