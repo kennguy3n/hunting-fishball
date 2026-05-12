@@ -297,6 +297,11 @@ func (it *docIterator) fetchPage(ctx context.Context) bool {
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		it.err = fmt.Errorf("%w: googledrive: list files status=%d", connector.ErrRateLimited, resp.StatusCode)
+
+		return false
+	}
 	if resp.StatusCode != http.StatusOK {
 		it.err = fmt.Errorf("googledrive: list files status=%d", resp.StatusCode)
 
@@ -446,6 +451,9 @@ func (g *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 			return nil, "", err
 		}
 		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, "", fmt.Errorf("%w: googledrive: startPageToken status=%d", connector.ErrRateLimited, resp.StatusCode)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, "", fmt.Errorf("googledrive: startPageToken status=%d", resp.StatusCode)
 		}
@@ -473,6 +481,9 @@ func (g *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		return nil, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, "", fmt.Errorf("%w: googledrive: changes status=%d", connector.ErrRateLimited, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("googledrive: changes status=%d", resp.StatusCode)
 	}

@@ -466,8 +466,79 @@ func TestGoogleDrive_ListNamespaces_RateLimited(t *testing.T) {
 	srv := newDriveServer(t, mux)
 	g := newDriveConnector(srv)
 	conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
-	if _, err := g.ListNamespaces(context.Background(), conn); err == nil {
-		t.Fatal("expected rate-limit error")
+	_, err := g.ListNamespaces(context.Background(), conn)
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
+// TestGoogleDrive_DocIterator_RateLimited verifies that the
+// document iterator wraps 429 responses with
+// connector.ErrRateLimited so the adaptive rate limiter in
+// internal/connector/adaptive_rate.go can detect throttling on
+// the hot listing path. The audit_test.go gate is textual; this
+// test asserts the behavioural contract.
+func TestGoogleDrive_DocIterator_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/files", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rate", http.StatusTooManyRequests)
+	})
+	srv := newDriveServer(t, mux)
+	g := newDriveConnector(srv)
+	conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+	it, err := g.ListDocuments(context.Background(), conn, connector.Namespace{ID: "my-drive", Kind: "my_drive"}, connector.ListOpts{})
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	defer func() { _ = it.Close() }()
+	if it.Next(context.Background()) {
+		t.Fatal("Next must not advance on 429")
+	}
+	if !errors.Is(it.Err(), connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited from iterator, got %v", it.Err())
+	}
+}
+
+// TestGoogleDrive_DeltaSync_RateLimited verifies both DeltaSync
+// HTTP paths (initial startPageToken fetch with empty cursor,
+// and the /changes call with a non-empty cursor) wrap 429 as
+// connector.ErrRateLimited so adaptive_rate.go can react during
+// incremental sync just as it can during ListNamespaces.
+func TestGoogleDrive_DeltaSync_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		cursor string
+		path   string
+	}{
+		{"startPageToken", "", "/changes/startPageToken"},
+		{"changes", "abc", "/changes"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{}`))
+			})
+			mux.HandleFunc(tc.path, func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "rate", http.StatusTooManyRequests)
+			})
+			srv := newDriveServer(t, mux)
+			g := newDriveConnector(srv)
+			conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+			_, _, err := g.DeltaSync(context.Background(), conn, connector.Namespace{ID: "my-drive"}, tc.cursor)
+			if !errors.Is(err, connector.ErrRateLimited) {
+				t.Fatalf("expected ErrRateLimited, got %v", err)
+			}
+		})
 	}
 }
 
