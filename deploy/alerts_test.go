@@ -246,3 +246,106 @@ func TestAlertsManifest_Round12Alerts(t *testing.T) {
 		}
 	}
 }
+
+// TestAlertsManifest_Round13BurnRate — Round-13 Task 2.
+//
+// Validates deploy/alerts/slo_burn_rate.yaml as a PrometheusRule
+// with the four expected multi-window burn-rate alerts. The four
+// alerts cover the two SLOs (retrieval latency, pipeline
+// throughput) at both burn rates (fast=page, slow=warning).
+func TestAlertsManifest_Round13BurnRate(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join(".", "alerts", "slo_burn_rate.yaml"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var m manifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		t.Fatalf("yaml: %v", err)
+	}
+	if m.Kind != "PrometheusRule" {
+		t.Fatalf("kind=%q", m.Kind)
+	}
+	wantSeverity := map[string]string{
+		"RetrievalLatencyBudgetBurnFast":   "page",
+		"RetrievalLatencyBudgetBurnSlow":   "warning",
+		"PipelineThroughputBudgetBurnFast": "page",
+		"PipelineThroughputBudgetBurnSlow": "warning",
+	}
+	found := map[string]rule{}
+	for _, g := range m.Spec.Groups {
+		for _, r := range g.Rules {
+			if _, ok := wantSeverity[r.Alert]; ok {
+				found[r.Alert] = r
+			}
+		}
+	}
+	for name, sev := range wantSeverity {
+		r, ok := found[name]
+		if !ok {
+			t.Errorf("required Round-13 burn-rate alert missing: %s", name)
+			continue
+		}
+		if r.Labels["severity"] != sev {
+			t.Errorf("alert=%s severity=%q want=%q", name, r.Labels["severity"], sev)
+		}
+		if r.For == "" {
+			t.Errorf("alert=%s missing `for:` duration", name)
+		}
+		if r.Expr == "" {
+			t.Errorf("alert=%s missing expr", name)
+		}
+	}
+	// The retrieval-latency burn alerts must reference the
+	// recording rule from deploy/recording-rules.yaml.
+	if r, ok := found["RetrievalLatencyBudgetBurnFast"]; ok {
+		if !strings.Contains(r.Expr, "context_engine_retrieval_p95_latency_seconds") {
+			t.Errorf("RetrievalLatencyBudgetBurnFast expr missing recording-rule metric: %q", r.Expr)
+		}
+	}
+	// The throughput burn alerts must reference the recording rule.
+	if r, ok := found["PipelineThroughputBudgetBurnFast"]; ok {
+		if !strings.Contains(r.Expr, "context_engine_pipeline_throughput_per_minute") {
+			t.Errorf("PipelineThroughputBudgetBurnFast expr missing recording-rule metric: %q", r.Expr)
+		}
+	}
+}
+
+// TestAlertsManifest_Round13DLQAge — Round-13 Task 4.
+//
+// Validates that the DLQAgeHigh alert exists in deploy/alerts.yaml
+// and references the gauge published by the DLQAgeMonitor.
+func TestAlertsManifest_Round13DLQAge(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join(".", "alerts.yaml"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var m manifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		t.Fatalf("yaml: %v", err)
+	}
+	var dlqAge rule
+	for _, g := range m.Spec.Groups {
+		for _, r := range g.Rules {
+			if r.Alert == "DLQAgeHigh" {
+				dlqAge = r
+			}
+		}
+	}
+	if dlqAge.Alert == "" {
+		t.Fatal("DLQAgeHigh alert missing")
+	}
+	if dlqAge.Labels["severity"] != "warning" {
+		t.Errorf("severity=%q want=warning", dlqAge.Labels["severity"])
+	}
+	if dlqAge.For == "" {
+		t.Errorf("missing `for:`")
+	}
+	if !strings.Contains(dlqAge.Expr, "context_engine_dlq_oldest_message_age_seconds") {
+		t.Errorf("expr missing gauge metric: %q", dlqAge.Expr)
+	}
+	if !strings.Contains(dlqAge.Expr, "3600") {
+		t.Errorf("expr missing 1h threshold: %q", dlqAge.Expr)
+	}
+}

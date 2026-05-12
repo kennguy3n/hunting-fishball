@@ -122,7 +122,11 @@ proto-check: proto-gen
 .PHONY: alerts-check
 alerts-check:
 	@echo "Validating Prometheus alert + recording YAML..."
-	$(GO) run ./internal/observability/alertcheck deploy/alerts.yaml deploy/recording-rules.yaml
+	$(GO) run ./internal/observability/alertcheck \
+		deploy/alerts.yaml \
+		deploy/recording-rules.yaml \
+		deploy/alerts/pipeline_backpressure.yaml \
+		deploy/alerts/slo_burn_rate.yaml
 
 .PHONY: eval
 eval:
@@ -174,3 +178,14 @@ migrate-rollback:
 .PHONY: clean
 clean:
 	rm -rf $(BIN_DIR) coverage.out coverage.html
+
+# Round-13 Task 16: developer prerequisite checker.
+.PHONY: doctor
+doctor:
+	@echo "==> hunting-fishball doctor"
+	@scripts/doctor.sh
+
+# Round-13 Task 20: Postgres-backed migration dry-run.
+.PHONY: migrate-dry-run-pg
+migrate-dry-run-pg:
+	@scripts/migrate-dry-run-pg.sh

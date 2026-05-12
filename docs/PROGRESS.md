@@ -435,6 +435,127 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-11: **Round 13: Next 20 tasks — health summary, SLO
+  burn-rate alerts, batch tracing, DLQ age monitor, stage
+  breakers, percent_complete, backend contributions, slow-query
+  log, cache-stats, API-key rotation, payload limiter, audit
+  integrity chain, chaos kafka + concurrent-delete e2e, eval
+  corpus 50, `make doctor`, OpenAPI completeness gate, PG pool
+  leak detector, embed fallback, Postgres migrate-dry-run**.
+  - **Task 0 (CI)**: `.github/workflows/ci.yml` splits `fast-go`
+    so `golangci-lint` runs in its own `fast-lint` job in
+    parallel with gofmt+vet+race+cover+build. Brings fast-lane
+    wall-clock under 3 minutes.
+  - **Task 1**: `internal/admin/health_summary_handler.go`
+    serves `GET /v1/admin/health/summary` and fans out to every
+    health probe (Postgres, Redis, Qdrant, Kafka, gRPC sidecars,
+    credential health) in parallel. Returns a verdict
+    (healthy / degraded / unhealthy) plus per-component latency
+    + error. Test in
+    `internal/admin/health_summary_handler_test.go`. Documented
+    in `docs/openapi.yaml`.
+  - **Task 2**: `deploy/alerts/slo_burn_rate.yaml` declares
+    multi-window burn-rate alerts for the retrieval P95 SLO
+    (500 ms) and the pipeline throughput SLO, both keyed off
+    the existing recording rules. Wired into `make alerts-check`
+    and asserted in `deploy/alerts_test.go`.
+  - **Task 3**: `internal/retrieval/batch_handler.go` wraps the
+    fan-out in a parent OTel span; sub-requests are emitted as
+    children. The batch response now returns the parent
+    `trace_id`. Test exercises the linkage.
+  - **Task 4**: `cmd/ingest/main.go` runs a `DLQAgeMonitor`
+    goroutine that publishes
+    `context_engine_dlq_oldest_message_age_seconds`. New
+    `DLQAgeHigh` alert in `deploy/alerts.yaml` (severity
+    `warning`, fires when oldest > 1 h). Tests in
+    `internal/pipeline/dlq_age_monitor_test.go`.
+  - **Task 5**: `internal/pipeline/stage_breaker.go` adds
+    per-stage circuit breakers; consecutive failures on Parse /
+    Embed short-circuit events to the DLQ. Gated on
+    `CONTEXT_ENGINE_STAGE_BREAKER_ENABLED`. Metrics:
+    `context_engine_pipeline_stage_breaker_transitions_total`
+    and `_short_circuits_total`. Tests with fault injection.
+  - **Task 6**: `internal/admin/sync_progress_handler.go` now
+    aggregates per-namespace progress into a source-level
+    `percent_complete` weighted by discovered-doc count.
+  - **Task 7**: `internal/retrieval/explain.go` returns a
+    `backend_contributions` map (vector / BM25 / graph / memory)
+    showing how many results each backend contributed to the
+    final top-K after RRF merge.
+  - **Task 8**: `internal/admin/slow_query.go` records retrievals
+    exceeding `CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS` (default
+    1000 ms) into `query_analytics` with `slow=true`. New
+    handler at `GET /v1/admin/analytics/queries/slow`.
+  - **Task 9**: `internal/admin/cache_stats_handler.go` exposes
+    `GET /v1/admin/analytics/cache-stats` returning per-tenant
+    cache hits / misses / hit_rate_pct over a configurable
+    window. Backed by the existing
+    `context_engine_retrieval_cache_*` counters.
+  - **Task 10**: `internal/admin/api_key_rotation.go` adds
+    `POST /v1/admin/tenants/:tenant_id/rotate-api-key`. New key
+    returned exactly once; old key remains valid for
+    `CONTEXT_ENGINE_API_KEY_GRACE_PERIOD` (default 24 h).
+    Migration `036_api_keys.sql` if not already present. Audit
+    event `api_key.rotated`.
+  - **Task 11**: `internal/observability/payload_limiter.go`
+    rejects requests larger than
+    `CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES` (default 10 MiB)
+    with HTTP 413. Wired into both `cmd/api` and `cmd/ingest`
+    probe servers. `internal/observability/payload_limiter_test.go`
+    covers bypass paths + oversized bodies.
+  - **Task 12**: `internal/audit/integrity.go` implements
+    `ComputeIntegrity()` — a deterministic SHA-256 hash chain
+    over audit rows sorted oldest-first. New
+    `GET /v1/admin/audit/integrity` returns head hash + entry
+    count so operators can detect tampering. Test exercises the
+    empty / append / tamper / delete cases.
+  - **Task 13**: `tests/e2e/chaos_kafka_test.go` (build tag
+    `e2e`) simulates a Kafka broker outage via an in-process
+    `chaosEmitter`. Twenty concurrent events retry / fall back
+    to DLQ as the broker recovers; the test asserts
+    successes + DLQ'd = 20.
+  - **Task 14**: `tests/e2e/concurrent_delete_test.go` (build
+    tag `e2e`) spawns two goroutines that simultaneously call
+    `shard.Forget()` against the same tenant. The fenced Redis
+    lease is the single race point — exactly one succeeds and
+    the other observes `shard.ErrLeaseHeld`.
+  - **Task 15**: `tests/eval/golden_corpus.json` expanded from
+    20 to 50 cases covering multi-hop graph, BM25 exact-match,
+    memory-augmented, and cross-namespace queries. Thresholds
+    (Precision@5 ≥ 0.6, Recall@5 ≥ 0.6, MRR ≥ 0.7, nDCG ≥ 0.7)
+    held without adjustment.
+  - **Task 16**: `make doctor` (via `scripts/doctor.sh`) checks
+    Go ≥ 1.25, Docker daemon, docker-compose, Python 3.11+,
+    protoc, golangci-lint, and the e2e env vars; prints a
+    green / red checklist and exits non-zero on hard failure.
+  - **Task 17**: `docs/openapi_test.go` adds
+    `TestOpenAPI_RouterCoverage` — an AST walk over
+    `internal/admin`, `internal/audit`, `internal/retrieval`
+    that enumerates every gin route registration prefixed with
+    `/v1/` and asserts each has a matching path entry in
+    `docs/openapi.yaml`. Catches new endpoints shipped without
+    documentation. Runs in the fast lane.
+  - **Task 18**: `internal/observability/pool_leak_detector.go`
+    periodically reads `db.Stats().OpenConnections` against
+    `CONTEXT_ENGINE_PG_MAX_OPEN` and logs a structured warning
+    when utilisation stays above 90 % for three consecutive
+    samples. Wired into `cmd/api/main.go`; publishes
+    `context_engine_postgres_pool_utilization_percent`.
+  - **Task 19**: `internal/pipeline/embed_fallback.go` provides
+    a deterministic Go-native 256-dim hashing-trick embedder
+    that activates when the gRPC sidecar circuit breaker opens
+    and `CONTEXT_ENGINE_EMBED_FALLBACK_ENABLED` is set. Stored
+    chunks carry `degraded_embedding=true` so retrieval can
+    filter / down-weight them.
+  - **Task 20**: `scripts/migrate-dry-run-pg.sh` + new
+    `make migrate-dry-run-pg` target launch a disposable
+    Postgres 16 container, apply every `migrations/*.sql` in
+    order, then run the matching rollbacks. Wired into the
+    full-lane CI job `full-migrate-dry-run-pg`. Catches
+    Postgres-specific syntax errors (JSONB, TIMESTAMPTZ,
+    `ADD COLUMN IF NOT EXISTS`) the SQLite-based dry-run
+    cannot.
+
 - 2026-05-11: **Round 12: Next 20 tasks — observability alerts,
   resilience hardening, CI gates, OpenAPI completeness, fuzz
   expansion, docs audit**.

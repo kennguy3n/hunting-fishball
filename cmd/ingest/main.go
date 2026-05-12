@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -252,6 +253,39 @@ func run() error {
 	}
 	// Round-9 Task 8: per-stage timeouts.
 	coordCfg.LoadStageTimeoutsFromEnv(os.Getenv)
+
+	// Round-13 Task 5: optional per-stage circuit breakers.
+	// Gated on CONTEXT_ENGINE_STAGE_BREAKER_ENABLED so existing
+	// deployments inherit the previous no-breaker behaviour.
+	if os.Getenv("CONTEXT_ENGINE_STAGE_BREAKER_ENABLED") == "1" {
+		threshold := stageWorkerEnv("CONTEXT_ENGINE_STAGE_BREAKER_THRESHOLD")
+		if threshold <= 0 {
+			threshold = 5
+		}
+		openFor := 30 * time.Second
+		if raw := os.Getenv("CONTEXT_ENGINE_STAGE_BREAKER_OPEN_FOR"); raw != "" {
+			if d, perr := time.ParseDuration(raw); perr == nil && d > 0 {
+				openFor = d
+			}
+		}
+		breakers := map[string]*pipeline.StageCircuitBreaker{}
+		for _, stage := range []string{"fetch", "parse", "embed", "store"} {
+			b, berr := pipeline.NewStageCircuitBreaker(pipeline.StageCircuitBreakerConfig{
+				Stage:     stage,
+				Threshold: threshold,
+				OpenFor:   openFor,
+			})
+			if berr != nil {
+				return fmt.Errorf("stage breaker %s: %w", stage, berr)
+			}
+			breakers[stage] = b
+		}
+		coordCfg.StageBreakers = breakers
+		slog.Info("ingest: stage circuit breakers enabled",
+			slog.Int("threshold", threshold),
+			slog.Duration("open_for", openFor),
+		)
+	}
 
 	// Round-10 Task 3: sync-history recording. Stage 1 opens a
 	// row on every backfill kickoff; Stage 4 / DLQ bump
@@ -572,6 +606,22 @@ func run() error {
 				}
 			}
 		}
+		// Round-13 Task 4: publish the gauge for the oldest unresolved
+		// DLQ row so the DLQAgeHigh alert can fire. Polls dlq_messages
+		// every minute; failures keep the previous gauge value rather
+		// than flap the alert.
+		ageMon, amErr := pipeline.NewDLQAgeMonitor(pipeline.DLQAgeMonitorConfig{
+			Lister: dlqStore,
+		})
+		if amErr != nil {
+			slog.Warn("ingest: dlq age monitor", slog.String("error", amErr.Error()))
+		} else {
+			go func() {
+				if err := ageMon.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Warn("ingest: dlq age monitor", slog.String("error", err.Error()))
+				}
+			}()
+		}
 	}
 
 	// ---- Phase 8 Task 20: HTTP probes + /metrics on a sidecar port.
@@ -582,9 +632,21 @@ func run() error {
 		}
 	}
 	httpAddr := envOr("CONTEXT_ENGINE_INGEST_HTTP_ADDR", ":8090")
+	// Round-13 Task 11: wrap the probe/metrics mux with the
+	// payload-size limiter so the ingest sidecar has the same
+	// safety net as the public API.
+	maxBody := observability.DefaultMaxRequestBodyBytes
+	if raw := os.Getenv("CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES"); raw != "" {
+		if v, perr := strconv.ParseInt(raw, 10, 64); perr == nil && v > 0 {
+			maxBody = v
+		}
+	}
 	httpSrv := &http.Server{
-		Addr:              httpAddr,
-		Handler:           ingestHTTPHandler(db, redisClient, brokerList),
+		Addr: httpAddr,
+		Handler: observability.PayloadSizeLimiterHTTP(observability.PayloadLimiterConfig{
+			MaxBytes:  maxBody,
+			SkipPaths: []string{"/metrics", "/healthz", "/readyz"},
+		}, ingestHTTPHandler(db, redisClient, brokerList)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

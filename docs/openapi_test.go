@@ -12,8 +12,13 @@
 package docs_test
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -121,4 +126,156 @@ func TestOpenAPI_KindIsOpenAPI3(t *testing.T) {
 	if !strings.Contains(string(data), "openapi: 3.") {
 		t.Fatal("openapi.yaml: missing `openapi: 3.x` declaration")
 	}
+}
+
+// routeFromCall mirrors adminRouteFromCall in
+// tests/integration/rbac_coverage_test.go but matches any
+// /v1/ prefix (admin + public). Returns (method, path) on
+// success, "", "", false otherwise.
+func routeFromCall(call *ast.CallExpr) (string, string, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", "", false
+	}
+	method := sel.Sel.Name
+	switch method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD":
+	default:
+		return "", "", false
+	}
+	if len(call.Args) == 0 {
+		return "", "", false
+	}
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok {
+		return "", "", false
+	}
+	val := strings.Trim(lit.Value, `"`)
+	if !strings.HasPrefix(val, "/v1/") {
+		return "", "", false
+	}
+	return method, val, true
+}
+
+// normalizeGinPathParam rewrites a gin path param (":id") to the
+// OpenAPI form ("{id}") so the two manifests are comparable.
+func normalizeGinPathParam(p string) string {
+	re := regexp.MustCompile(`:([a-zA-Z_][a-zA-Z0-9_]*)`)
+	return re.ReplaceAllString(p, "{$1}")
+}
+
+// pathsFromOpenAPI extracts every top-level path key from the
+// openapi.yaml so we can compare against the discovered route
+// manifest. We do a light-weight scan rather than a full YAML
+// parse because the spec only has one path-key indentation level.
+func pathsFromOpenAPI(t *testing.T, src string) map[string]struct{} {
+	t.Helper()
+	out := map[string]struct{}{}
+	inPaths := false
+	for _, line := range strings.Split(src, "\n") {
+		if strings.HasPrefix(line, "paths:") {
+			inPaths = true
+			continue
+		}
+		if inPaths && len(line) > 0 && line[0] != ' ' && line[0] != '\t' {
+			// Left a paths block.
+			break
+		}
+		if !inPaths {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "/") || !strings.HasSuffix(trimmed, ":") {
+			continue
+		}
+		// Path keys in openapi.yaml are indented by two spaces.
+		if !strings.HasPrefix(line, "  /") {
+			continue
+		}
+		path := strings.TrimSuffix(trimmed, ":")
+		out[path] = struct{}{}
+	}
+	return out
+}
+
+// TestOpenAPI_RouterCoverage walks internal/admin/*.go +
+// internal/audit/*.go for gin route registrations under /v1/ and
+// asserts every registered route has a corresponding path entry
+// in docs/openapi.yaml. Round-13 Task 17. This catches new
+// endpoints shipping without OpenAPI documentation.
+//
+// The test runs in the fast lane (no docker, no real router).
+func TestOpenAPI_RouterCoverage(t *testing.T) {
+	t.Parallel()
+	repoRoot, err := filepath.Abs(filepath.Join(".."))
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	dirs := []string{
+		filepath.Join(repoRoot, "internal", "admin"),
+		filepath.Join(repoRoot, "internal", "audit"),
+		filepath.Join(repoRoot, "internal", "retrieval"),
+	}
+	fset := token.NewFileSet()
+	routes := map[string]struct{}{}
+	for _, d := range dirs {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") ||
+				strings.HasSuffix(e.Name(), "_test.go") {
+				continue
+			}
+			file, ferr := parser.ParseFile(fset, filepath.Join(d, e.Name()), nil, parser.AllErrors)
+			if ferr != nil {
+				continue
+			}
+			ast.Inspect(file, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				_, p, ok := routeFromCall(call)
+				if !ok {
+					return true
+				}
+				routes[normalizeGinPathParam(p)] = struct{}{}
+				return true
+			})
+		}
+	}
+	if len(routes) < 10 {
+		t.Fatalf("router scan returned %d routes; scanner is broken", len(routes))
+	}
+
+	data, err := os.ReadFile(filepath.Join(".", "openapi.yaml"))
+	if err != nil {
+		t.Fatalf("read openapi.yaml: %v", err)
+	}
+	documented := pathsFromOpenAPI(t, string(data))
+
+	// Allowlist: a handful of registered routes are intentionally
+	// undocumented because they are internal/no-stable-contract
+	// (e.g. test-only debug helpers). Add a path here only after
+	// a deliberate decision NOT to expose it in the public spec.
+	allow := map[string]struct{}{}
+
+	var missing []string
+	for p := range routes {
+		if _, ok := allow[p]; ok {
+			continue
+		}
+		if _, ok := documented[p]; ok {
+			continue
+		}
+		missing = append(missing, p)
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("openapi.yaml is missing %d routes registered in the router:\n  %s",
+			len(missing), strings.Join(missing, "\n  "))
+	}
+	t.Logf("verified %d registered /v1/ routes against openapi.yaml", len(routes))
 }

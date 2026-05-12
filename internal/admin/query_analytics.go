@@ -47,7 +47,12 @@ type QueryAnalyticsRow struct {
 	// constants below. Backed by migration
 	// migrations/033_query_analytics_source.sql which defaults to
 	// "user" so pre-Round-11 rows keep their semantics.
-	Source    string    `gorm:"type:varchar(16);not null;default:'user';column:source" json:"source"`
+	Source string `gorm:"type:varchar(16);not null;default:'user';column:source" json:"source"`
+	// Slow — Round-13 Task 8. True when the retrieval latency
+	// exceeded the per-deployment threshold
+	// (CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS, default 1000ms).
+	// The slow-query admin endpoint filters on this column.
+	Slow      bool      `gorm:"not null;default:false;column:slow" json:"slow"`
 	CreatedAt time.Time `gorm:"not null;default:now();column:created_at" json:"created_at"`
 }
 
@@ -90,7 +95,10 @@ type QueryAnalyticsEvent struct {
 	// is treated as QueryAnalyticsSourceUser so legacy callers
 	// continue to populate the "user" bucket without code changes.
 	Source string
-	At     time.Time
+	// Slow — Round-13 Task 8. Set by the retrieval handler when
+	// LatencyMS exceeded the configured slow-query threshold.
+	Slow bool
+	At   time.Time
 }
 
 // QueryHash returns a stable sha256 prefix of the query text. Used
@@ -117,6 +125,10 @@ type QueryAnalyticsQuery struct {
 	Since    time.Time
 	Until    time.Time
 	Limit    int
+	// SlowOnly — Round-13 Task 8. When true, List returns only
+	// rows where slow=true. The admin endpoint
+	// /v1/admin/analytics/queries/slow sets this.
+	SlowOnly bool
 }
 
 // TopQuery is the aggregate shape for the top-N projection.
@@ -182,6 +194,9 @@ func (s *QueryAnalyticsStoreGORM) List(ctx context.Context, q QueryAnalyticsQuer
 	}
 	if !q.Until.IsZero() {
 		tx = tx.Where("created_at <= ?", q.Until)
+	}
+	if q.SlowOnly {
+		tx = tx.Where("slow = ?", true)
 	}
 	if err := tx.Order("created_at DESC").Limit(limit).Find(&out).Error; err != nil {
 		return nil, err
@@ -294,6 +309,9 @@ func (s *InMemoryQueryAnalyticsStore) List(_ context.Context, q QueryAnalyticsQu
 		if !q.Until.IsZero() && r.CreatedAt.After(q.Until) {
 			continue
 		}
+		if q.SlowOnly && !r.Slow {
+			continue
+		}
 		cp := *r
 		out = append(out, &cp)
 	}
@@ -381,6 +399,7 @@ func (r *QueryAnalyticsRecorder) Record(ctx context.Context, evt QueryAnalyticsE
 		ExperimentName: evt.ExperimentName,
 		ExperimentArm:  evt.ExperimentArm,
 		Source:         source,
+		Slow:           evt.Slow,
 		CreatedAt:      at,
 	}
 	if err := r.store.Record(ctx, row); err != nil {

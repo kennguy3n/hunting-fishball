@@ -259,6 +259,16 @@ func run() error {
 		PolicyResolver:     liveResolver,
 		ShardVersionLookup: shard.VersionLookup{Repo: shardRepo},
 	}
+	// Round-13 Task 8: slow-query threshold. Defaults to 1000ms.
+	// Setting it to 0 (or any non-numeric value) disables the
+	// slow-query flag + log.
+	slowMS := 1000
+	if raw := os.Getenv("CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS"); raw != "" {
+		if v, perr := strconv.Atoi(raw); perr == nil && v >= 0 {
+			slowMS = v
+		}
+	}
+	handlerCfg.SlowQueryThresholdMS = slowMS
 
 	// Phase 3: BM25, graph, semantic cache, Mem0. Each backend is
 	// optional — when its env var is empty the handler skips it and
@@ -334,6 +344,18 @@ func run() error {
 	// header, and trace span carries the X-Request-ID.
 	r.Use(observability.RequestIDMiddleware())
 	r.Use(observability.PrometheusMiddleware())
+	// Round-13 Task 11: payload size limiter. Configurable via
+	// CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES; defaults to 10 MiB.
+	maxBody := observability.DefaultMaxRequestBodyBytes
+	if raw := os.Getenv("CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES"); raw != "" {
+		if v, perr := strconv.ParseInt(raw, 10, 64); perr == nil && v > 0 {
+			maxBody = v
+		}
+	}
+	r.Use(observability.PayloadSizeLimiter(observability.PayloadLimiterConfig{
+		MaxBytes:  maxBody,
+		SkipPaths: []string{"/metrics", "/healthz", "/readyz"},
+	}))
 	// Round-4 Task 7: structured error envelope. The middleware
 	// converts any *errors.Error attached via c.Error() into a
 	// JSON envelope keyed by stable codes so log scanners and
@@ -374,6 +396,10 @@ func run() error {
 
 	api := r.Group("/", apiMiddlewares...)
 	audit.NewHandler(auditRepo).Register(api)
+	// Round-13 Task 12: audit integrity endpoint.
+	if integ, ierr := audit.NewIntegrityHandler(auditRepo); ierr == nil {
+		integ.Register(api)
+	}
 	retrievalHandler.Register(api)
 
 	// Admin source-management surface (Phase 2). The handler mounts
@@ -466,6 +492,40 @@ func run() error {
 		})
 	}
 	admin.NewIndexHealthHandler(indexCheckers...).Register(api)
+
+	// Round-13 Task 1: structured health-check aggregator.
+	// GET /v1/admin/health/summary fans every backing probe out
+	// in parallel and returns a verdict (healthy/degraded/unhealthy)
+	// with per-component latency. Probes reuse the same closures
+	// the per-backend health endpoint runs so the two surfaces
+	// can't drift.
+	summaryProbes := []admin.SummaryProbe{
+		admin.SummaryProbeFunc{ProbeName: "postgres", Fn: func(ctx context.Context) (admin.SummaryStatus, error) {
+			sqlDB, err := db.DB()
+			if err != nil {
+				return admin.SummaryStatusUnhealthy, err
+			}
+			if err := sqlDB.PingContext(ctx); err != nil {
+				return admin.SummaryStatusUnhealthy, err
+			}
+			return admin.SummaryStatusHealthy, nil
+		}},
+		admin.SummaryProbeFunc{ProbeName: "qdrant", Fn: func(ctx context.Context) (admin.SummaryStatus, error) {
+			if err := qdrant.Ping(ctx); err != nil {
+				return admin.SummaryStatusUnhealthy, err
+			}
+			return admin.SummaryStatusHealthy, nil
+		}},
+	}
+	if sharedRedis != nil {
+		summaryProbes = append(summaryProbes, admin.SummaryProbeFunc{ProbeName: "redis", Fn: func(ctx context.Context) (admin.SummaryStatus, error) {
+			if err := sharedRedis.Ping(ctx).Err(); err != nil {
+				return admin.SummaryStatusUnhealthy, err
+			}
+			return admin.SummaryStatusHealthy, nil
+		}})
+	}
+	admin.NewHealthSummaryHandler(summaryProbes...).Register(api)
 
 	// Round-4 Task 18: server-sent-events feed for live sync progress.
 	// Mounts GET /v1/admin/sources/:id/sync/stream and pushes
@@ -715,10 +775,25 @@ func run() error {
 			BackendTimings: e.BackendTimings,
 			ExperimentName: e.ExperimentName, ExperimentArm: e.ExperimentArm,
 			Source: e.Source,
+			Slow:   e.Slow,
 		})
 	})
 	if qaHandler, qerr := admin.NewQueryAnalyticsHandler(queryAnalyticsStore); qerr == nil {
 		qaHandler.Register(api)
+	}
+	// Round-13 Task 8: slow-query admin endpoint.
+	admin.NewSlowQueryHandler(queryAnalyticsStore).Register(api)
+	// Round-13 Task 9: per-tenant cache-stats admin endpoint.
+	admin.NewCacheStatsHandler(queryAnalyticsStore).Register(api)
+	// Round-13 Task 10: API key rotation endpoint.
+	apiKeyStore := admin.NewAPIKeyStoreGORM(db)
+	if err := apiKeyStore.AutoMigrate(context.Background()); err != nil {
+		return fmt.Errorf("api_keys automigrate: %w", err)
+	}
+	if rotHandler, rerr := admin.NewAPIKeyRotationHandler(admin.APIKeyRotationHandlerConfig{
+		Store: apiKeyStore, Audit: notifyingAudit,
+	}); rerr == nil {
+		rotHandler.Register(api)
 	}
 
 	// Round-7 Task 7 / Round-8 Task 11: credential health worker +
@@ -945,6 +1020,28 @@ func run() error {
 		Interval: 30 * time.Second,
 	})
 	go poolSampler.Start(keepAliveCtx)
+
+	// Round-13 Task 18: Postgres pool leak detector. Sustained
+	// utilisation above 90% across three consecutive samples
+	// produces a structured warning; the percent reading is also
+	// published to the context_engine_postgres_pool_utilization_percent
+	// gauge for dashboards.
+	if pgMax, _ := strconv.Atoi(os.Getenv("CONTEXT_ENGINE_PG_MAX_OPEN")); pgMax > 0 {
+		ldet, lerr := observability.NewPoolLeakDetector(observability.PoolLeakDetectorConfig{
+			Pool: observability.PostgresStatsFunc(func() int {
+				sqlDB, derr := db.DB()
+				if derr != nil || sqlDB == nil {
+					return 0
+				}
+				return sqlDB.Stats().OpenConnections
+			}),
+			MaxOpen:  pgMax,
+			Interval: 30 * time.Second,
+		})
+		if lerr == nil {
+			go ldet.Start(keepAliveCtx)
+		}
+	}
 
 	// Round-10 Task 6: background OAuth token refresh worker.
 	// Scans every active source on `CONTEXT_ENGINE_TOKEN_REFRESH_INTERVAL`

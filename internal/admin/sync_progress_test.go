@@ -214,3 +214,71 @@ func TestSyncProgress_ConcurrentFirstInsert(t *testing.T) {
 		t.Fatalf("expected Discovered=%d (no lost updates), got %d", N, rows[0].Discovered)
 	}
 }
+
+// TestSyncProgress_PercentCompleteWeighted — Round-13 Task 6.
+//
+// With two namespaces of different sizes the source-level
+// percent_complete is computed as
+//
+//	sum(processed) / sum(discovered) * 100
+//
+// — i.e. the larger namespace pulls the percentage. The
+// per-namespace PercentDone field is independent of this.
+func TestSyncProgress_PercentCompleteWeighted(t *testing.T) {
+	t.Parallel()
+	db := newProgressDB(t)
+	store := admin.NewSyncProgressStoreGORM(db)
+	ctx := context.Background()
+	// ns-big: 100 discovered, 50 processed => 50% done
+	_ = store.IncrementDiscovered(ctx, "t-a", "s-1", "ns-big", 100)
+	_ = store.IncrementProcessed(ctx, "t-a", "s-1", "ns-big", 50)
+	// ns-small: 10 discovered, 10 processed => 100% done
+	_ = store.IncrementDiscovered(ctx, "t-a", "s-1", "ns-small", 10)
+	_ = store.IncrementProcessed(ctx, "t-a", "s-1", "ns-small", 10)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set(audit.TenantContextKey, "t-a"); c.Next() })
+	rg := r.Group("/")
+	admin.NewSyncProgressHandler(store).Register(rg)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/sources/s-1/progress", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	var body admin.SyncProgressResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Weighted: (50+10) / (100+10) = 60/110 = 54.5454...
+	want := 60.0 / 110.0 * 100
+	if body.PercentComplete < want-0.01 || body.PercentComplete > want+0.01 {
+		t.Fatalf("percent_complete=%v want≈%v", body.PercentComplete, want)
+	}
+}
+
+// TestSyncProgress_PercentCompleteZero — Round-13 Task 6.
+// No discovered docs => percent_complete is 0 (rather than NaN).
+func TestSyncProgress_PercentCompleteZero(t *testing.T) {
+	t.Parallel()
+	db := newProgressDB(t)
+	store := admin.NewSyncProgressStoreGORM(db)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set(audit.TenantContextKey, "t-a"); c.Next() })
+	rg := r.Group("/")
+	admin.NewSyncProgressHandler(store).Register(rg)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/sources/s-1/progress", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	var body admin.SyncProgressResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.PercentComplete != 0 {
+		t.Fatalf("percent_complete=%v want 0", body.PercentComplete)
+	}
+}

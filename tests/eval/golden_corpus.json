@@ -136,6 +136,191 @@
       "query": "How does the index watchdog auto-trigger reindex when a backend is unhealthy?",
       "expected_chunk_ids": ["chunk-index-watchdog"],
       "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "Trace the connector -> source -> namespace -> document chain for a Slack channel.",
+      "expected_chunk_ids": ["chunk-slack-chain-multihop"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "Which policies override the default retention for a tenant by privacy mode through the inheritance chain?",
+      "expected_chunk_ids": ["chunk-policy-multihop-retention"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "What is the multi-hop path from an audit row to the originating user via actor and tenant?",
+      "expected_chunk_ids": ["chunk-audit-multihop"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "bm25",
+      "query": "ALTER TABLE audit_logs ADD COLUMN published_at TIMESTAMPTZ",
+      "expected_chunk_ids": ["chunk-bm25-alter-table-audit"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "bm25",
+      "query": "context_engine_retrieval_p95_latency_ms histogram_quantile",
+      "expected_chunk_ids": ["chunk-bm25-p95-histogram"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "bm25",
+      "query": "SHA-256 hex digest api_keys.key_hash column varchar(64)",
+      "expected_chunk_ids": ["chunk-bm25-api-key-hash"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "bm25",
+      "query": "CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS default 1000",
+      "expected_chunk_ids": ["chunk-bm25-slow-threshold"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "bm25",
+      "query": "CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES 10485760 HTTP 413",
+      "expected_chunk_ids": ["chunk-bm25-payload-limiter"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "memory",
+      "query": "Remind me what the on-call doc says about the DLQ replay grace period.",
+      "expected_chunk_ids": ["chunk-mem-dlq-grace"],
+      "expected_min_score": 0.55,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "memory",
+      "query": "Recall the decision on whether to enable the embedding fallback by default.",
+      "expected_chunk_ids": ["chunk-mem-embed-fallback-default"],
+      "expected_min_score": 0.55,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "memory",
+      "query": "What did we agree about the slow-query log retention window?",
+      "expected_chunk_ids": ["chunk-mem-slow-retention"],
+      "expected_min_score": 0.55,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "memory",
+      "query": "Recall the action item from the Round-13 planning meeting about audit integrity polling.",
+      "expected_chunk_ids": ["chunk-mem-audit-integrity-poll"],
+      "expected_min_score": 0.55,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "vector",
+      "query": "How does the stage circuit breaker decide when to transition from open back to half-open?",
+      "expected_chunk_ids": ["chunk-stage-breaker-halfopen"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "vector",
+      "query": "What signal does the DLQ age monitor publish for Prometheus?",
+      "expected_chunk_ids": ["chunk-dlq-age-gauge"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "vector",
+      "query": "How does the percent_complete field weight namespaces in the sync progress response?",
+      "expected_chunk_ids": ["chunk-sync-progress-percent"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "vector",
+      "query": "What does the backend_contributions map in the explain response represent?",
+      "expected_chunk_ids": ["chunk-explain-contributions"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "vector",
+      "query": "Why does the API key rotation endpoint return the cleartext key exactly once?",
+      "expected_chunk_ids": ["chunk-api-key-cleartext-once"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "vector",
+      "query": "What cross-namespace policy lets a tenant see chunks from a shared knowledge base?",
+      "expected_chunk_ids": ["chunk-cross-ns-shared-kb"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "vector",
+      "query": "Across namespaces internal and partner, how does retention diverge for tier-1 vs tier-2 chunks?",
+      "expected_chunk_ids": ["chunk-cross-ns-retention-diverge"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "vector",
+      "query": "How does the cross-namespace query expander route synonyms when the source namespace is private?",
+      "expected_chunk_ids": ["chunk-cross-ns-query-expander"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "Find chunks one hop away from the cred-rotation runbook through the cited_by edge.",
+      "expected_chunk_ids": ["chunk-graph-onehop-cited"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "Two-hop traversal: which tenants connect to the DLQ poison-pill incident via a related-document edge?",
+      "expected_chunk_ids": ["chunk-graph-twohop-dlq"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "graph",
+      "query": "Which Memory-backend rows trace back to a Slack thread via the references edge?",
+      "expected_chunk_ids": ["chunk-graph-mem-slack-ref"],
+      "expected_min_score": 0.5
+    },
+    {
+      "backend": "bm25",
+      "query": "tenant_id char(26) NOT NULL PRIMARY KEY tenant_lifecycle",
+      "expected_chunk_ids": ["chunk-bm25-tenant-lifecycle-schema"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "bm25",
+      "query": "DELETE FROM dlq_messages WHERE created_at < NOW() - INTERVAL '30 days'",
+      "expected_chunk_ids": ["chunk-bm25-dlq-retention"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "bm25",
+      "query": "X-Request-ID echo header observability middleware",
+      "expected_chunk_ids": ["chunk-bm25-request-id-header"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "memory",
+      "query": "Remind me about the team norm for amending commits during the Round-13 work cycle.",
+      "expected_chunk_ids": ["chunk-mem-no-amend-norm"],
+      "expected_min_score": 0.55,
+      "skill_id": "qa-bot"
+    },
+    {
+      "backend": "vector",
+      "query": "How does the payload size limiter middleware bypass the GET /healthz probe?",
+      "expected_chunk_ids": ["chunk-payload-limiter-bypass"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "vector",
+      "query": "What does the audit integrity head_hash field guarantee about the audit log table?",
+      "expected_chunk_ids": ["chunk-audit-integrity-headhash"],
+      "expected_min_score": 0.55
+    },
+    {
+      "backend": "vector",
+      "query": "How does the cache stats endpoint handle empty windows without dividing by zero?",
+      "expected_chunk_ids": ["chunk-cache-stats-empty-window"],
+      "expected_min_score": 0.55
     }
   ]
 }

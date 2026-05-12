@@ -478,6 +478,63 @@ var (
 			Help: "audit_logs rows deleted by the retention sweeper.",
 		},
 	)
+
+	// DLQOldestMessageAgeSeconds — Round-13 Task 4. Gauge of the
+	// age (in seconds) of the OLDEST unresolved row in dlq_messages
+	// — i.e. the row with the smallest failed_at whose replayed_at
+	// is still NULL. Operators alert on this exceeding 1h via the
+	// DLQAgeHigh alert in deploy/alerts.yaml. The publisher
+	// goroutine in cmd/ingest polls every minute.
+	DLQOldestMessageAgeSeconds = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "context_engine_dlq_oldest_message_age_seconds",
+			Help: "Age in seconds of the oldest unresolved dlq_messages row.",
+		},
+	)
+
+	// PostgresPoolUtilizationPercent — Round-13 Task 18. Gauge of
+	// the API binary's Postgres pool utilisation as a percentage of
+	// the configured max (CONTEXT_ENGINE_PG_MAX_OPEN). The leak
+	// detector in cmd/api logs a warning when this stays above 90%
+	// for three consecutive samples.
+	PostgresPoolUtilizationPercent = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "context_engine_postgres_pool_utilization_percent",
+			Help: "Postgres pool utilisation as percent of CONTEXT_ENGINE_PG_MAX_OPEN.",
+		},
+	)
+
+	// StageBreakerStatesTotal — Round-13 Task 5. Counts per-stage
+	// circuit-breaker state transitions. Labels: stage (bounded:
+	// fetch/parse/embed/store), state (closed/open/half-open).
+	StageBreakerStatesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_pipeline_stage_breaker_transitions_total",
+			Help: "Per-stage pipeline circuit breaker state transitions.",
+		},
+		[]string{"stage", "state"},
+	)
+
+	// StageBreakerShortCircuitsTotal — Round-13 Task 5. Counts
+	// events the per-stage breaker shed straight to the DLQ
+	// instead of paying the retry budget.
+	StageBreakerShortCircuitsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_pipeline_stage_breaker_short_circuits_total",
+			Help: "Events short-circuited to DLQ by the per-stage circuit breaker.",
+		},
+		[]string{"stage"},
+	)
+
+	// EmbedFallbackTotal — Round-13 Task 19. Counts events that
+	// fell back to the Go-native degraded-mode embedder when the
+	// gRPC sidecar circuit breaker was open.
+	EmbedFallbackTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_pipeline_embed_fallback_total",
+			Help: "Events that used the degraded-mode embedding fallback.",
+		},
+	)
 )
 
 // SetGRPCCircuitBreakerState records the current breaker state for
@@ -522,6 +579,11 @@ func init() {
 		AdaptiveRateCurrent,
 		AdaptiveRateHalvedTotal,
 		AuditRowsExpiredTotal,
+		DLQOldestMessageAgeSeconds,
+		PostgresPoolUtilizationPercent,
+		StageBreakerStatesTotal,
+		StageBreakerShortCircuitsTotal,
+		EmbedFallbackTotal,
 	)
 }
 
@@ -589,6 +651,11 @@ func ResetForTest() {
 	Registry.Unregister(AdaptiveRateCurrent)
 	Registry.Unregister(AdaptiveRateHalvedTotal)
 	Registry.Unregister(AuditRowsExpiredTotal)
+	Registry.Unregister(DLQOldestMessageAgeSeconds)
+	Registry.Unregister(PostgresPoolUtilizationPercent)
+	Registry.Unregister(StageBreakerStatesTotal)
+	Registry.Unregister(StageBreakerShortCircuitsTotal)
+	Registry.Unregister(EmbedFallbackTotal)
 	APIRequestsTotal.Reset()
 	APIRequestDurationSeconds.Reset()
 	KafkaConsumerLag.Reset()
@@ -659,6 +726,11 @@ func ResetForTest() {
 		AdaptiveRateCurrent,
 		AdaptiveRateHalvedTotal,
 		AuditRowsExpiredTotal,
+		DLQOldestMessageAgeSeconds,
+		PostgresPoolUtilizationPercent,
+		StageBreakerStatesTotal,
+		StageBreakerShortCircuitsTotal,
+		EmbedFallbackTotal,
 	)
 }
 

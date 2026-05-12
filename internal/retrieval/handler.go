@@ -160,6 +160,14 @@ type HandlerConfig struct {
 	// role. Round-5 Task 12.
 	ExplainEnvEnabled bool
 
+	// SlowQueryThresholdMS — Round-13 Task 8. When non-zero, any
+	// retrieval whose latency meets or exceeds this threshold is
+	// flagged with Slow=true on the persisted analytics row and
+	// emits a structured warn log line. Zero disables the
+	// feature. The production wiring reads
+	// CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS (default 1000).
+	SlowQueryThresholdMS int
+
 	// LatencyBudget is the optional per-tenant latency budget
 	// lookup (Round-8 Task 9). When set, the handler bounds the
 	// fan-out deadline with the returned budget.
@@ -384,6 +392,13 @@ type RetrieveResponse struct {
 	// traces. Empty when no tracer is active. See
 	// docs/ARCHITECTURE.md §4.1.
 	TraceID string `json:"trace_id,omitempty"`
+	// BackendContributions — Round-13 Task 7. Per-backend count
+	// of how many top-K hits each backend contributed after the
+	// RRF merger. Only populated when the request opted into
+	// explain mode AND the caller is authorised. Helps
+	// operators understand which backends are pulling weight
+	// for a given query class.
+	BackendContributions map[string]int `json:"backend_contributions,omitempty"`
 
 	// PreferLocal is the on-device-first hint. When true the client
 	// SHOULD serve the query from its local shard at
@@ -630,6 +645,9 @@ func (h *Handler) retrieve(c *gin.Context) {
 			hit.Explain = BuildExplain(m, preRerankByID[m.ID])
 		}
 		resp.Hits = append(resp.Hits, hit)
+	}
+	if emitExplain {
+		resp.BackendContributions = computeBackendContributions(pres.Allowed)
 	}
 
 	// Round-8 Task 16: apply operator-pinned chunks after policy
@@ -1016,6 +1034,12 @@ func (h *Handler) runPipelineFromVec(ctx context.Context, tenantID string, req R
 			hit.Explain = BuildExplain(m, preRerankByID[m.ID])
 		}
 		resp.Hits = append(resp.Hits, hit)
+	}
+	// Per-backend contributions are emitted by every explain path
+	// (gin single-request, batch sub-request, snapshot) so callers
+	// see a consistent payload regardless of entry point.
+	if req.Explain {
+		resp.BackendContributions = computeBackendContributions(pres.Allowed)
 	}
 	return resp, nil
 }

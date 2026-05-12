@@ -1,0 +1,144 @@
+# Prometheus multi-window burn-rate alerts for hunting-fishball /
+# context-engine.
+#
+# Round-13 Task 2: multi-window burn-rate alerts for the
+# retrieval P95 latency SLO (500ms) and the pipeline throughput
+# SLO. Burn-rate alerts catch SLO regressions early without
+# paging on transient blips:
+#
+#   * 1h+5m windows trigger a critical page when error budget
+#     is being consumed >14.4x faster than allowed (would burn
+#     30 days of budget in ~2 hours).
+#   * 6h+30m windows trigger a warning ticket when budget is
+#     being burned >6x faster than allowed (~5-day budget burn).
+#
+# The expressions reference the recording rules already in
+# deploy/recording-rules.yaml so the alert and the dashboard
+# always look at the same series. Apply via prometheus-operator
+# alongside deploy/alerts.yaml.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: context-engine-slo-burn-rate
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: context-engine
+    app.kubernetes.io/component: slo-alerts
+spec:
+  groups:
+    # -----------------------------------------------------------
+    # Retrieval P95 latency SLO (500ms over 30d rolling window)
+    # -----------------------------------------------------------
+    - name: context-engine.slo.retrieval-latency
+      interval: 30s
+      rules:
+        - alert: RetrievalLatencyBudgetBurnFast
+          # Fast-burn: the 1h and 5m windows BOTH show p95
+          # latency above the SLO threshold. Translates to
+          # ~30d budget consumed in ~2h at 14.4x burn rate.
+          # The 1h window ensures the regression is sustained;
+          # the 5m window ensures it is still happening right
+          # now. Both must hold to page.
+          expr: |
+            (
+              avg_over_time(context_engine_retrieval_p95_latency_seconds[1h]) > 0.5
+              and
+              avg_over_time(context_engine_retrieval_p95_latency_seconds[5m]) > 0.5
+            )
+          for: 2m
+          labels:
+            severity: page
+            slo: retrieval-latency
+            service: context-engine
+          annotations:
+            summary: "Retrieval p95 latency burn rate is fast (1h+5m windows both >500ms)"
+            description: |
+              Retrieval p95 latency has exceeded the 500ms SLO on both
+              the 1h trend and the latest 5m window. At this rate the
+              30-day error budget burns in ~2 hours. Inspect the
+              `context_engine_retrieval_backend_duration_seconds`
+              histogram per backend to find the long-pole.
+            runbook_url: docs/RUNBOOKS.md#slo-retrieval-latency
+
+        - alert: RetrievalLatencyBudgetBurnSlow
+          # Slow-burn: the 6h and 30m windows BOTH show p95
+          # latency above the SLO. Translates to ~5-day budget
+          # burn at 6x rate.
+          expr: |
+            (
+              avg_over_time(context_engine_retrieval_p95_latency_seconds[30m]) > 0.5
+              and
+              avg_over_time(context_engine_retrieval_p95_latency_seconds[6h]) > 0.5
+            )
+          for: 15m
+          labels:
+            severity: warning
+            slo: retrieval-latency
+            service: context-engine
+          annotations:
+            summary: "Retrieval p95 latency burn rate is slow (6h+30m windows both >500ms)"
+            description: |
+              Retrieval p95 latency has averaged over 500ms across
+              both the 6h and 30m windows. The error budget is
+              burning ~6x faster than allowed (~5 days to depletion).
+              Open a ticket; this isn't a page but the trend will be
+              one if untreated.
+            runbook_url: docs/RUNBOOKS.md#slo-retrieval-latency
+
+    # -----------------------------------------------------------
+    # Pipeline throughput SLO. The recording rule
+    # context_engine_pipeline_throughput_per_minute aggregates
+    # per-stage throughput; the SLO is that no individual stage
+    # drops below 10 documents/min for sustained periods.
+    # -----------------------------------------------------------
+    - name: context-engine.slo.pipeline-throughput
+      interval: 30s
+      rules:
+        - alert: PipelineThroughputBudgetBurnFast
+          # Fast-burn: the 1h trend and the latest 5m window
+          # BOTH show the slowest pipeline stage below 10
+          # docs/min. The 1h window confirms a sustained
+          # regression; the 5m window confirms it is current.
+          expr: |
+            (
+              min(avg_over_time(context_engine_pipeline_throughput_per_minute[1h])) < 10
+              and
+              min(avg_over_time(context_engine_pipeline_throughput_per_minute[5m])) < 10
+            )
+          for: 2m
+          labels:
+            severity: page
+            slo: pipeline-throughput
+            service: context-engine
+          annotations:
+            summary: "Pipeline throughput burn rate is fast (1h+5m windows both <10 docs/min)"
+            description: |
+              The slowest pipeline stage has dropped below 10
+              documents per minute on both the 1h trend and the
+              latest 5m window. At this rate the throughput SLO
+              budget burns in ~2 hours. Check
+              `context_engine_pipeline_channel_depth` for back-pressure
+              and `context_engine_pipeline_stage_duration_seconds`
+              for the long-pole stage.
+            runbook_url: docs/RUNBOOKS.md#slo-pipeline-throughput
+
+        - alert: PipelineThroughputBudgetBurnSlow
+          expr: |
+            (
+              min(avg_over_time(context_engine_pipeline_throughput_per_minute[30m])) < 10
+              and
+              min(avg_over_time(context_engine_pipeline_throughput_per_minute[6h])) < 10
+            )
+          for: 15m
+          labels:
+            severity: warning
+            slo: pipeline-throughput
+            service: context-engine
+          annotations:
+            summary: "Pipeline throughput burn rate is slow (6h+30m windows both <10 docs/min)"
+            description: |
+              The slowest pipeline stage has averaged below 10
+              documents per minute across both the 6h and 30m windows.
+              The error budget is burning ~6x faster than allowed.
+            runbook_url: docs/RUNBOOKS.md#slo-pipeline-throughput

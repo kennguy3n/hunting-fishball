@@ -140,6 +140,58 @@ phase.
 > observability/operability; shard pre-generation extends
 > Phase 5. See PROGRESS.md for the per-task list.
 >
+> **Round 13** (2026-05-11) layers another 20 tasks focused on
+> health surfaces, sustained-saturation detectors, payload /
+> audit / fallback safety nets, chaos coverage, and dialect-aware
+> schema validation. Highlights: `GET /v1/admin/health/summary`
+> fans out to every health probe (Postgres / Redis / Qdrant /
+> Kafka / gRPC sidecars / credential health) in parallel and
+> returns a verdict (`healthy | degraded | unhealthy`);
+> `deploy/alerts/slo_burn_rate.yaml` declares the SRE-book
+> multi-window burn-rate alerts for retrieval P95 (500 ms) and
+> pipeline throughput; the batch retrieve handler now emits a
+> parent span that wraps every sub-request; `DLQAgeMonitor`
+> publishes `context_engine_dlq_oldest_message_age_seconds` and
+> a new `DLQAgeHigh` alert fires when the oldest unresolved row
+> exceeds an hour; per-stage circuit breakers
+> (`internal/pipeline/stage_breaker.go`, gated on
+> `CONTEXT_ENGINE_STAGE_BREAKER_ENABLED`) short-circuit
+> Parse / Embed to the DLQ after N consecutive failures;
+> `GET /v1/admin/sources/:id/progress` now aggregates per-namespace
+> counts into a source-level `percent_complete`;
+> `internal/retrieval/explain.go` returns a per-backend
+> `backend_contributions` map; `GET /v1/admin/analytics/queries/slow`
+> surfaces retrievals exceeding
+> `CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS` (default 1000 ms);
+> `GET /v1/admin/analytics/cache-stats` exposes per-tenant cache
+> hit / miss / hit_rate; `POST /v1/admin/tenants/:tenant_id/rotate-api-key`
+> issues a new key with `CONTEXT_ENGINE_API_KEY_GRACE_PERIOD` of
+> overlap; `internal/observability/payload_limiter.go` (Gin +
+> `net/http`) rejects bodies >
+> `CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES` (default 10 MiB)
+> with HTTP 413; `GET /v1/admin/audit/integrity` returns a
+> SHA-256 hash-chain head for tamper detection; new e2e tests
+> exercise a chaos-Kafka outage and a concurrent tenant
+> deletion race; the eval corpus is expanded to 50 cases
+> (multi-hop graph, BM25 exact-match, memory, cross-namespace);
+> `make doctor` walks contributor prerequisites;
+> `docs/openapi_test.go::TestOpenAPI_RouterCoverage` AST-walks
+> the gin router and asserts every registered `/v1/` route has
+> a path entry in `docs/openapi.yaml`; a Postgres pool leak
+> detector logs a structured warning when utilisation stays
+> above 90 % for three consecutive samples and publishes
+> `context_engine_postgres_pool_utilization_percent`; the
+> embedder grows a deterministic Go-native hashing-trick
+> fallback (gated on `CONTEXT_ENGINE_EMBED_FALLBACK_ENABLED`,
+> stored chunks carry `degraded_embedding=true`); and
+> `make migrate-dry-run-pg` (`full-migrate-dry-run-pg` CI job)
+> uses a disposable Postgres 16 container to catch
+> Postgres-specific syntax errors the SQLite dry-run cannot.
+> Fast-lane CI is also split (`fast-go` ↔ `fast-lint` in
+> parallel) so the wall-clock drops below 3 min. Migration
+> count is unchanged (034 + Round-13's `api_keys` migration if
+> not already present). See PROGRESS.md for the per-task list.
+
 > **Round 12** (2026-05-11) layers another 20 tasks focused on
 > observability alerts, resilience hardening, CI gates, OpenAPI
 > completeness, fuzz expansion, and docs audit. Highlights:

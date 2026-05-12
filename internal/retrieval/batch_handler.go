@@ -22,6 +22,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	"github.com/kennguy3n/hunting-fishball/internal/policy"
 )
 
@@ -51,6 +52,11 @@ type BatchResultItem struct {
 // BatchResponse is the JSON shape returned by /v1/retrieve/batch.
 type BatchResponse struct {
 	Results []BatchResultItem `json:"results"`
+	// TraceID is the parent span trace id when distributed
+	// tracing is active. Round-13 Task 3: operators correlate the
+	// batch parent span with the N child sub-request spans by
+	// pasting this id into Jaeger / Tempo.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // RegisterBatch mounts POST /v1/retrieve/batch on rg.
@@ -97,6 +103,14 @@ func (h *Handler) retrieveBatch(c *gin.Context) {
 // in-process callers (e.g. internal admin tools). It fans out every
 // sub-request concurrently with the configured parallelism cap and
 // returns one BatchResultItem per input.
+//
+// Round-13 Task 3: the entire batch is wrapped in a parent span
+// ("retrieval.batch"). Each runOne call inherits the parent's
+// context so its own per-request spans (e.g. retrieval.vector,
+// retrieval.bm25) attach as descendants of the batch parent.
+// The parent trace id is echoed back to the caller in
+// BatchResponse.TraceID so operators can correlate the parent
+// + children in a single Jaeger / Tempo view.
 func (h *Handler) RunBatch(ctx context.Context, tenantID string, req BatchRequest) BatchResponse {
 	parallel := req.MaxParallel
 	if parallel <= 0 {
@@ -105,6 +119,11 @@ func (h *Handler) RunBatch(ctx context.Context, tenantID string, req BatchReques
 	if parallel > len(req.Requests) {
 		parallel = len(req.Requests)
 	}
+	ctx, span := observability.StartSpan(ctx, "retrieval.batch",
+		observability.AttrTenantID.String(tenantID),
+	)
+	span.SetAttributes(observability.AttrHitCount.Int(len(req.Requests)))
+	defer span.End()
 	results := make([]BatchResultItem, len(req.Requests))
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
@@ -114,11 +133,15 @@ func (h *Handler) RunBatch(ctx context.Context, tenantID string, req BatchReques
 		go func(idx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[idx] = h.runOne(ctx, tenantID, idx, req.Requests[idx])
+			subCtx, subSpan := observability.StartSpan(ctx, "retrieval.batch.sub",
+				observability.AttrTenantID.String(tenantID),
+			)
+			results[idx] = h.runOne(subCtx, tenantID, idx, req.Requests[idx])
+			subSpan.End()
 		}(i)
 	}
 	wg.Wait()
-	return BatchResponse{Results: results}
+	return BatchResponse{Results: results, TraceID: observability.TraceID(ctx)}
 }
 
 func (h *Handler) runOne(ctx context.Context, tenantID string, index int, sub RetrieveRequest) BatchResultItem {

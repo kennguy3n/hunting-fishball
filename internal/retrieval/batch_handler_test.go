@@ -529,3 +529,61 @@ func TestBatch_DiversityFieldThreadedToSubRequests(t *testing.T) {
 		}
 	}
 }
+
+// TestBatch_TraceIDEcho_Round13Task3 — Round-13 Task 3.
+//
+// With a span recorder installed, the batch endpoint must wrap
+// the entire fan-out in a parent "retrieval.batch" span and emit
+// N child "retrieval.batch.sub" spans. The HTTP response echoes
+// the parent trace id back to the caller in BatchResponse.TraceID.
+//
+// Runs serially because installTracer mutates the process-global
+// otel TracerProvider; other parallel batch tests would otherwise
+// emit "retrieval.batch" spans into this recorder and overwrite
+// the parent trace id we're trying to verify.
+func TestBatch_TraceIDEcho_Round13Task3(t *testing.T) {
+	rec := installTracer(t)
+	vs := &slowVectorStore{hits: []storage.QdrantHit{{ID: "a:b:c", Score: 0.9, Payload: map[string]any{"tenant_id": "tenant-a"}}}}
+	h, err := retrieval.NewHandler(retrieval.HandlerConfig{VectorStore: vs, Embedder: &fakeEmbedder{vec: []float32{1, 2}}})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	r := newRouter(t, h, "tenant-a")
+	body, _ := json.Marshal(retrieval.BatchRequest{Requests: []retrieval.RetrieveRequest{
+		{Query: "q1"}, {Query: "q2"},
+	}})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/v1/retrieve/batch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var got retrieval.BatchResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.TraceID == "" {
+		t.Fatalf("response.trace_id empty; want parent span id")
+	}
+	spans := rec.Ended()
+	var parent string
+	var subCount int
+	for _, s := range spans {
+		switch s.Name() {
+		case "retrieval.batch":
+			parent = s.SpanContext().TraceID().String()
+		case "retrieval.batch.sub":
+			subCount++
+		}
+	}
+	if parent == "" {
+		t.Fatal("retrieval.batch parent span missing")
+	}
+	if parent != got.TraceID {
+		t.Fatalf("response.trace_id=%q parent span trace=%q", got.TraceID, parent)
+	}
+	if subCount != 2 {
+		t.Fatalf("expected 2 retrieval.batch.sub spans, got %d", subCount)
+	}
+}

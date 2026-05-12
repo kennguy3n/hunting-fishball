@@ -173,6 +173,15 @@ type CoordinatorConfig struct {
 	// quality reports into. Best-effort: write failures are logged
 	// and ignored so a scoring outage cannot block ingestion.
 	ChunkQuality ChunkQualityRecorder
+
+	// StageBreakers — Round-13 Task 5. Optional per-stage
+	// circuit breakers keyed by stage name (fetch/parse/embed/
+	// store/delete). When the breaker for a stage is open,
+	// runWithRetry short-circuits to ErrStageBreakerOpen so the
+	// caller routes the event to the DLQ without paying any
+	// retry budget. A nil map disables the feature so existing
+	// deployments behave as before.
+	StageBreakers map[string]*StageCircuitBreaker
 }
 
 // LoadStageTimeoutsFromEnv reads the four
@@ -696,6 +705,19 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn
 		observability.ObserveStageDuration(stage, time.Since(start).Seconds())
 	}()
 
+	// Round-13 Task 5: consult the per-stage breaker before paying
+	// any retry budget. An open breaker short-circuits to the DLQ.
+	breaker := c.cfg.StageBreakers[stage]
+	if breaker != nil {
+		if err := breaker.Allow(); err != nil {
+			observability.RecordError(span, err)
+			if c.cfg.RetryAnalytics != nil {
+				_ = c.cfg.RetryAnalytics.RecordAttempt(stage, docKey, RetryOutcomeFailed, err.Error())
+			}
+			return nil, err
+		}
+	}
+
 	rec := c.cfg.RetryAnalytics
 	stageTO := c.cfg.stageTimeout(stage)
 	var lastErr error
@@ -720,15 +742,29 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn
 			if rec != nil {
 				_ = rec.RecordAttempt(stage, docKey, RetryOutcomeSuccess, "")
 			}
+			if breaker != nil {
+				breaker.OnSuccess()
+			}
 			return out, nil
 		}
 		if errors.Is(err, ErrUnchanged) {
+			// Stage ran cleanly; the document just hasn't changed.
+			// Treat as a healthy stage outcome so the breaker probe
+			// is released and the half-open gate clears.
+			if breaker != nil {
+				breaker.OnSuccess()
+			}
 			return nil, err
 		}
 		if errors.Is(err, ErrPoisonMessage) {
 			observability.RecordError(span, err)
 			if rec != nil {
 				_ = rec.RecordAttempt(stage, docKey, RetryOutcomeFailed, err.Error())
+			}
+			// Poison is a document-level fault, not stage
+			// infrastructure. Don't count it against the breaker.
+			if breaker != nil {
+				breaker.OnSuccess()
 			}
 			return nil, err
 		}
@@ -748,7 +784,12 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn
 		select {
 		case <-ctx.Done():
 			t.Stop()
-
+			// Abandoning mid-retry after a failed attempt:
+			// release the probe gate by recording a failure so
+			// the breaker can re-open cleanly.
+			if breaker != nil {
+				breaker.OnFailure()
+			}
 			return nil, ctx.Err()
 		case <-t.C:
 		}
@@ -758,6 +799,9 @@ func (c *Coordinator) runWithRetry(ctx context.Context, stage, docKey string, fn
 		}
 	}
 
+	if breaker != nil {
+		breaker.OnFailure()
+	}
 	return nil, fmt.Errorf("retries exhausted: %w", lastErr)
 }
 

@@ -45,7 +45,12 @@ jobs:
   # ===============================================================
 
   fast-go:
-    name: Fast Go (gofmt + vet + lint + race+cover)
+    # Round-13 Task 0: golangci-lint was bundled into this job and
+    # consistently pushed wall time over 3m. We moved the linter
+    # into its own parallel `fast-lint` job below so this job
+    # focuses on the unit-test / build path that everything else
+    # depends on. Both jobs are required gates of fast-required.
+    name: Fast Go (gofmt + vet + race+cover + build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,17 +78,35 @@ jobs:
       - name: go test -race -cover
         run: go test -race -cover -count=1 ./...
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.5.0
-          args: --timeout=5m
-
       - name: build binaries
         run: |
           mkdir -p bin
           go build -o bin/context-engine-ingest ./cmd/ingest
           go build -o bin/context-engine-api    ./cmd/api
+
+  fast-lint:
+    # Round-13 Task 0: golangci-lint runs in parallel with the
+    # race+cover suite. The action restores its own analysis
+    # cache via the `go-version` setup-go cache; total wall time
+    # is now dominated by the longer of the two jobs.
+    name: Fast golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.5.0
+          args: --timeout=5m
 
   fast-eval:
     name: Fast Eval (retrieval golden corpus)
@@ -209,7 +232,7 @@ jobs:
   fast-required:
     name: Required CI (fast lane)
     runs-on: ubuntu-latest
-    needs: [fast-go, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
+    needs: [fast-go, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
     if: always()
     steps:
       - name: Verify fast-lane jobs passed
@@ -218,6 +241,7 @@ jobs:
           fail=0
           for r in \
             "${{ needs.fast-go.result }}" \
+            "${{ needs.fast-lint.result }}" \
             "${{ needs.fast-eval.result }}" \
             "${{ needs.fast-alerts.result }}" \
             "${{ needs.fast-rollback-parity.result }}" \
@@ -229,7 +253,7 @@ jobs:
             fi
           done
           if [ "$fail" = "1" ]; then
-            echo "::error::fast-go=${{ needs.fast-go.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
+            echo "::error::fast-go=${{ needs.fast-go.result }} fast-lint=${{ needs.fast-lint.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
             exit 1
           fi
           echo "fast lane green"
@@ -449,6 +473,19 @@ jobs:
         run: go mod download
       - name: capacity test
         run: make capacity-test
+
+  # Round-13 Task 20: dialect-aware migration dry-run.
+  full-migrate-dry-run-pg:
+    name: Full — migrate-dry-run-pg
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    steps:
+      - uses: actions/checkout@v4
+      - name: migrate-dry-run-pg
+        run: make migrate-dry-run-pg
 
   nightly-fuzz:
     name: Nightly — fuzz targets

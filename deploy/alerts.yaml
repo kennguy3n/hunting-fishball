@@ -84,6 +84,28 @@ spec:
               service health.
             runbook_url: "https://docs/RUNBOOKS.md#dlq-rate-high"
 
+        # Round-13 Task 4: long-tail DLQ row alert. Fires when the
+        # oldest unresolved DLQ row has been waiting longer than 1
+        # hour. The auto-replay worker handles transient failures
+        # within minutes; an hour-old row is almost certainly a
+        # poison message awaiting human acknowledgement.
+        - alert: DLQAgeHigh
+          expr: context_engine_dlq_oldest_message_age_seconds > 3600
+          for: 5m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "DLQ oldest row > 1h"
+            description: |
+              The oldest unresolved row on dlq_messages has been
+              sitting for more than an hour. The auto-replay worker
+              recycles transient failures inside minutes; rows that
+              survive that long are almost always poison messages
+              waiting for a human. Replay, fix, or purge via the
+              admin UI.
+            runbook_url: "https://docs/RUNBOOKS.md#dlq-age-high"
+
     # -------------------------------------------------------------
     # API: retrieval latency
     # -------------------------------------------------------------
