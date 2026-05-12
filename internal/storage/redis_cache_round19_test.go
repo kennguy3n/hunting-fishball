@@ -7,6 +7,7 @@ package storage_test
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -120,4 +121,76 @@ func TestSemanticCache_GetOrRefresh_FreshEntrySkipsRefresh(t *testing.T) {
 	if atomic.LoadInt32(&calls) != 0 {
 		t.Fatalf("fresh entry must not trigger refresh, got %d calls", calls)
 	}
+}
+
+// TestSemanticCache_GetOrRefresh_DedupsConcurrentRefreshes pins the
+// singleflight-based fix for the thundering-herd bug in GetOrRefresh:
+// before the fix, N concurrent stale-readers spawned N independent
+// refresh goroutines, all running the (expensive) RefreshFn and all
+// racing to Set the same key. After the fix, the singleflight gate
+// must collapse those N concurrent refreshes into a single
+// invocation of RefreshFn per cache key per pass.
+func TestSemanticCache_GetOrRefresh_DedupsConcurrentRefreshes(t *testing.T) {
+	t.Parallel()
+	cache, _, _ := newCacheWithMiniredis(t)
+	ctx := context.Background()
+
+	const callers = 50
+	var calls int32
+	// Hold every concurrent refresh inside RefreshFn until the test
+	// signals release. This guarantees the singleflight window
+	// captures every caller; without the gate, every blocked
+	// goroutine would bump `calls`.
+	release := make(chan struct{})
+	refresh := func(_ context.Context) (*storage.CachedResult, error) {
+		atomic.AddInt32(&calls, 1)
+		<-release
+		return &storage.CachedResult{
+			Hits: []storage.CachedHit{{ID: "c1", SourceID: "src-A", TenantID: "t"}},
+		}, nil
+	}
+
+	// Fire `callers` concurrent GetOrRefresh calls. The entry is
+	// cold, so every caller should observe the stale branch and
+	// attempt to kick off the background refresh.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = cache.GetOrRefresh(ctx, "t", "ch", []float32{0.1}, "scope", time.Minute, 30*time.Second, refresh)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Give the spawned background goroutines a moment to reach the
+	// singleflight.Do call. Only one should actually enter
+	// RefreshFn; the rest must attach to that in-flight call.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&calls) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Wait long enough that any un-deduped goroutines would also
+	// have bumped the counter.
+	time.Sleep(200 * time.Millisecond)
+
+	got := atomic.LoadInt32(&calls)
+	close(release)
+	if got != 1 {
+		t.Fatalf("singleflight gate must collapse %d concurrent refreshes into a single RefreshFn invocation, got %d", callers, got)
+	}
+
+	// Confirm the cache eventually populates from the single
+	// surviving refresh.
+	for i := 0; i < 50; i++ {
+		fresh, _ := cache.Get(ctx, "t", "ch", []float32{0.1}, "scope")
+		if fresh != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("deduped refresh never populated the cache")
 }

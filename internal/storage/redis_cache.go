@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/singleflight"
 )
 
 // CachedHit is one entry within a CachedResult. It mirrors the public
@@ -90,6 +91,15 @@ type SemanticCacheConfig struct {
 // SemanticCache is the Redis-backed semantic cache.
 type SemanticCache struct {
 	cfg SemanticCacheConfig
+	// refreshSF dedupes concurrent GetOrRefresh background refreshes
+	// for the same cache key. Without it every caller that finds the
+	// entry stale spawns its own refresh goroutine — a thundering herd
+	// of expensive retrieval-pipeline calls all racing to Set the same
+	// key. With singleflight, only the first caller per key actually
+	// runs `refresh`; subsequent callers attach to the in-flight call
+	// (and discard its return value, since GetOrRefresh never blocks
+	// its caller). Round-19 Task 21 fix.
+	refreshSF singleflight.Group
 }
 
 // NewSemanticCache validates cfg and returns a *SemanticCache.
@@ -291,7 +301,10 @@ type RefreshFn func(ctx context.Context) (*CachedResult, error)
 // (relative to the current time), GetOrRefresh kicks off
 // `refresh` in a detached goroutine to repopulate the entry.
 // Hot-query callers thus serve from cache while a single background
-// worker keeps the entry warm. Round-19 Task 21.
+// worker keeps the entry warm. Concurrent stale-readers are
+// deduplicated through a singleflight gate keyed on the canonical
+// cache key, so `refresh` runs exactly once per key per pass even
+// under high caller concurrency. Round-19 Task 21.
 func (s *SemanticCache) GetOrRefresh(ctx context.Context, tenantID, channelID string, queryEmbedding []float32, scopeHash string, staleAfter time.Duration, ttl time.Duration, refresh RefreshFn) (*CachedResult, error) {
 	cached, err := s.Get(ctx, tenantID, channelID, queryEmbedding, scopeHash)
 	if err != nil {
@@ -307,14 +320,25 @@ func (s *SemanticCache) GetOrRefresh(ctx context.Context, tenantID, channelID st
 	// Best-effort detached refresh — the caller still sees the
 	// previous CachedResult (if any). Errors are dropped on the
 	// floor (the next call will retry).
+	//
+	// The refresh goroutine is gated by a singleflight.Group keyed on
+	// the canonical cache key. Concurrent stale-readers spawn their
+	// own goroutines but only the first reaches the underlying
+	// `refresh` invocation; the rest attach to the in-flight call,
+	// receive its result, and return without re-running `refresh` or
+	// double-writing the entry. This honours the docstring promise of
+	// "a single background worker" under arbitrary caller concurrency.
+	key := s.CacheKey(tenantID, channelID, queryEmbedding, scopeHash)
 	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		fresh, ferr := refresh(bgCtx)
-		if ferr != nil || fresh == nil {
-			return
-		}
-		_ = s.Set(bgCtx, tenantID, channelID, queryEmbedding, scopeHash, fresh, ttl)
+		_, _, _ = s.refreshSF.Do(key, func() (any, error) {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			fresh, ferr := refresh(bgCtx)
+			if ferr != nil || fresh == nil {
+				return nil, ferr
+			}
+			return nil, s.Set(bgCtx, tenantID, channelID, queryEmbedding, scopeHash, fresh, ttl)
+		})
 	}()
 
 	return cached, nil
