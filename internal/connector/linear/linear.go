@@ -127,7 +127,10 @@ func (l *Connector) Connect(ctx context.Context, cfg connector.ConnectorConfig) 
 			} `json:"viewer"`
 		} `json:"data"`
 		Errors []struct {
-			Message string `json:"message"`
+			Message    string `json:"message"`
+			Extensions struct {
+				Code string `json:"code"`
+			} `json:"extensions"`
 		} `json:"errors"`
 	}
 	if err := l.query(ctx, conn, `query { viewer { id } }`, nil, &out); err != nil {
@@ -268,7 +271,10 @@ func (it *issueIterator) fetchPage(ctx context.Context) bool {
 			} `json:"team"`
 		} `json:"data"`
 		Errors []struct {
-			Message string `json:"message"`
+			Message    string `json:"message"`
+			Extensions struct {
+				Code string `json:"code"`
+			} `json:"extensions"`
 		} `json:"errors"`
 	}
 	if err := it.l.query(ctx, it.conn, q, vars, &out); err != nil {
@@ -409,9 +415,18 @@ func (l *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 				} `json:"issues"`
 			} `json:"team"`
 		} `json:"data"`
+		Errors []struct {
+			Message    string `json:"message"`
+			Extensions struct {
+				Code string `json:"code"`
+			} `json:"extensions"`
+		} `json:"errors"`
 	}
 	if err := l.query(ctx, conn, q, map[string]any{"teamId": ns.ID, "filter": filter}, &out); err != nil {
 		return nil, "", err
+	}
+	if len(out.Errors) > 0 {
+		return nil, "", fmt.Errorf("linear: delta issues query failed: %s", out.Errors[0].Message)
 	}
 
 	changes := make([]connector.DocumentChange, 0, len(out.Data.Team.Issues.Nodes))
@@ -551,7 +566,27 @@ func (l *Connector) query(ctx context.Context, conn *connection, q string, vars 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("linear: status=%d", resp.StatusCode)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("linear: read response: %w", err)
+	}
+	// Linear returns 200-OK with errors[0].extensions.code = "RATELIMITED"
+	// when the per-key hourly bucket is exhausted (docs/runbooks/linear.md §3).
+	// Surface that as ErrRateLimited so adaptive_rate.go can react, same as 429.
+	var probe struct {
+		Errors []struct {
+			Message    string `json:"message"`
+			Extensions struct {
+				Code string `json:"code"`
+			} `json:"extensions"`
+		} `json:"errors"`
+	}
+	if jerr := json.Unmarshal(respBody, &probe); jerr == nil && len(probe.Errors) > 0 {
+		if strings.EqualFold(probe.Errors[0].Extensions.Code, "RATELIMITED") {
+			return fmt.Errorf("%w: linear: graphql code=%s message=%q", connector.ErrRateLimited, probe.Errors[0].Extensions.Code, probe.Errors[0].Message)
+		}
+	}
+	if err := json.Unmarshal(respBody, out); err != nil {
 		return fmt.Errorf("linear: decode response: %w", err)
 	}
 

@@ -267,3 +267,75 @@ func TestLinear_Registered(t *testing.T) {
 		t.Fatalf("expected registered, got %v", err)
 	}
 }
+
+// rateLimitedGQLBody is Linear's documented 200-OK GraphQL
+// rate-limit response shape (docs/runbooks/linear.md §3, §5):
+// `{"errors":[{"message":"...","extensions":{"code":"RATELIMITED"}}]}`.
+const rateLimitedGQLBody = `{"errors":[{"message":"per-key quota exhausted","extensions":{"code":"RATELIMITED"}}]}`
+
+// TestLinear_Connect_RateLimitedOn200 verifies that a 200-OK
+// response with `errors[0].extensions.code = "RATELIMITED"` on
+// the `viewer { id }` connectivity check wraps as
+// connector.ErrRateLimited. Before the fix the connector would
+// return a generic GraphQL error and the adaptive rate limiter
+// in internal/connector/adaptive_rate.go would be blind during
+// Connect-time throttling.
+func TestLinear_Connect_RateLimitedOn200(t *testing.T) {
+	t.Parallel()
+
+	srv := gqlServer(t, map[string]string{
+		"viewer": rateLimitedGQLBody,
+	})
+	l := linear.New(linear.WithBaseURL(srv.URL), linear.WithHTTPClient(srv.Client()))
+	_, err := l.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited from Connect, got %v", err)
+	}
+}
+
+// TestLinear_ListDocuments_RateLimitedOn200 verifies the same
+// behaviour on the document-iteration hot path. The audit gate
+// in internal/connector/audit_test.go is textual; this test
+// asserts the behavioural contract through errors.Is.
+func TestLinear_ListDocuments_RateLimitedOn200(t *testing.T) {
+	t.Parallel()
+
+	srv := gqlServer(t, map[string]string{
+		"viewer":       `{"data":{"viewer":{"id":"U1"}}}`,
+		"issues(first": rateLimitedGQLBody,
+	})
+	l := linear.New(linear.WithBaseURL(srv.URL), linear.WithHTTPClient(srv.Client()))
+	conn, _ := l.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	it, err := l.ListDocuments(context.Background(), conn, connector.Namespace{ID: "T1"}, connector.ListOpts{})
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	defer func() { _ = it.Close() }()
+	if it.Next(context.Background()) {
+		t.Fatal("Next must not advance on 200-OK RATELIMITED")
+	}
+	if !errors.Is(it.Err(), connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited from iterator, got %v", it.Err())
+	}
+}
+
+// TestLinear_DeltaSync_RateLimitedOn200 verifies the same
+// behaviour on DeltaSync. Before the fix DeltaSync's response
+// struct silently dropped the `errors` array entirely (the
+// field was absent), so a 200-OK RATELIMITED response returned
+// zero changes plus an unchanged cursor and the adaptive rate
+// limiter could not react during incremental sync.
+func TestLinear_DeltaSync_RateLimitedOn200(t *testing.T) {
+	t.Parallel()
+
+	srv := gqlServer(t, map[string]string{
+		"viewer":             `{"data":{"viewer":{"id":"U1"}}}`,
+		"orderBy: updatedAt": rateLimitedGQLBody,
+	})
+	l := linear.New(linear.WithBaseURL(srv.URL), linear.WithHTTPClient(srv.Client()))
+	conn, _ := l.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	_, _, err := l.DeltaSync(context.Background(), conn, connector.Namespace{ID: "T1"}, "2024-01-01T00:00:00Z")
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited from DeltaSync, got %v", err)
+	}
+}
