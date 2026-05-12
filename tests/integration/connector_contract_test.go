@@ -30,7 +30,13 @@ import (
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/asana"
+	azureblob "github.com/kennguy3n/hunting-fishball/internal/connector/azure_blob"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/bookstack"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/egnyte"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/gcs"
+	sharepointonprem "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint_onprem"
+	uploadportal "github.com/kennguy3n/hunting-fishball/internal/connector/upload_portal"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/coda"
 	confluenceserver "github.com/kennguy3n/hunting-fishball/internal/connector/confluence_server"
@@ -104,6 +110,21 @@ func TestConnectorContract_SourceConnectorAssertions(t *testing.T) {
 	var _ connector.DeltaSyncer = (*personio.Connector)(nil)
 	var _ connector.DeltaSyncer = (*sitemap.Connector)(nil)
 	var _ connector.DeltaSyncer = (*coda.Connector)(nil)
+
+	// Round-18 Task 17 — compile-time assertions for the 6 new
+	// connectors. Mirrors the per-round blocks above.
+	var _ connector.SourceConnector = (*sharepointonprem.Connector)(nil)
+	var _ connector.SourceConnector = (*azureblob.Connector)(nil)
+	var _ connector.SourceConnector = (*gcs.Connector)(nil)
+	var _ connector.SourceConnector = (*egnyte.Connector)(nil)
+	var _ connector.SourceConnector = (*bookstack.Connector)(nil)
+	var _ connector.SourceConnector = (*uploadportal.Connector)(nil)
+	var _ connector.DeltaSyncer = (*sharepointonprem.Connector)(nil)
+	var _ connector.DeltaSyncer = (*azureblob.Connector)(nil)
+	var _ connector.DeltaSyncer = (*gcs.Connector)(nil)
+	var _ connector.DeltaSyncer = (*egnyte.Connector)(nil)
+	var _ connector.DeltaSyncer = (*bookstack.Connector)(nil)
+	var _ connector.WebhookReceiver = (*uploadportal.Connector)(nil)
 }
 
 // TestConnectorContract_Round17_DeltaSyncerEmptyCursor exercises
@@ -176,6 +197,101 @@ func TestConnectorContract_Round17_DeltaSyncerEmptyCursor(t *testing.T) {
 				t.Fatalf("connect: %v", err)
 			}
 			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: srv.URL + "/sitemap.xml"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.run(t)
+		})
+	}
+}
+
+// TestConnectorContract_Round18_DeltaSyncerEmptyCursor exercises
+// the bootstrap contract against heterogeneous Round-18 surfaces:
+// Azure Blob (XML list + Last-Modified), GCS (JSON list + updated
+// timestamp), and BookStack (changed-since + updated_at sort).
+// Each must return zero changes plus a non-empty cursor on an
+// empty-cursor call.
+func TestConnectorContract_Round18_DeltaSyncerEmptyCursor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"azure_blob", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/ctr", func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					w.WriteHeader(http.StatusOK)
+
+					return
+				}
+				w.Header().Set("Content-Type", "application/xml")
+				_, _ = io.WriteString(w, `<?xml version="1.0"?><EnumerationResults><Blobs></Blobs></EnumerationResults>`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := azureblob.New(azureblob.WithBaseURL(srv.URL), azureblob.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(azureblob.Credentials{Account: "acct", Container: "ctr", SASToken: "sv=2024&sig=ok"})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "ctr"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+		{"gcs", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/storage/v1/b/b", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"name":"b"}`)
+			})
+			mux.HandleFunc("/storage/v1/b/b/o", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"items":[]}`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := gcs.New(gcs.WithBaseURL(srv.URL), gcs.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(gcs.Credentials{AccessToken: "t", Bucket: "b"})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "b"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+		{"bookstack", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/books", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"data":[]}`)
+			})
+			mux.HandleFunc("/api/pages", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"data":[{"id":1,"updated_at":"2026-01-01T00:00:00Z"}]}`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := bookstack.New(bookstack.WithBaseURL(srv.URL), bookstack.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(bookstack.Credentials{TokenID: "id", TokenSecret: "secret"})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "pages"}, "")
 			if err != nil || len(ch) != 0 || cur == "" {
 				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
 			}
