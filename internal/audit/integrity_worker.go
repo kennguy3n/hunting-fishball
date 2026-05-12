@@ -6,14 +6,14 @@
 // previously-recorded head no longer matches the freshly-
 // computed head, the worker:
 //
-//   1. Emits an `audit.integrity_violation` audit event so the
-//      tamper attempt is itself recorded in the same append-only
-//      log (the new event extends the chain and gives operators
-//      a forensic anchor).
-//   2. Increments the Prometheus counter
-//      `context_engine_audit_integrity_violations_total`.
-//   3. Writes a structured slog.Error so on-call gets paged
-//      through the existing log-pipeline routing.
+//  1. Emits an `audit.integrity_violation` audit event so the
+//     tamper attempt is itself recorded in the same append-only
+//     log (the new event extends the chain and gives operators
+//     a forensic anchor).
+//  2. Increments the Prometheus counter
+//     `context_engine_audit_integrity_violations_total`.
+//  3. Writes a structured slog.Error so on-call gets paged
+//     through the existing log-pipeline routing.
 //
 // The worker is gated on CONTEXT_ENGINE_AUDIT_INTEGRITY_CHECK=true
 // so a deployment can opt in without redeploying. The interval

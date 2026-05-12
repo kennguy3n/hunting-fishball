@@ -10,12 +10,12 @@
 // accepted indefinitely if a misconfigured grace_until landed
 // in the future. The sweeper closes that loop:
 //
-//   * Every CONTEXT_ENGINE_API_KEY_SWEEP_INTERVAL ticks
+//   - Every CONTEXT_ENGINE_API_KEY_SWEEP_INTERVAL ticks
 //     (default 5m), select rows WHERE status='grace' AND
 //     grace_until < now() and UPDATE status='expired'.
-//   * Increment context_engine_api_keys_expired_total for every
+//   - Increment context_engine_api_keys_expired_total for every
 //     row transitioned.
-//   * Emit an api_key.expired audit event per row so the
+//   - Emit an api_key.expired audit event per row so the
 //     transition is captured in the append-only log.
 //
 // `expired` is a NEW value of the api_keys.status enum. The

@@ -42,7 +42,7 @@ func seedAudit(t *testing.T, repo *audit.Repository, tenant string) {
 }
 
 func TestIntegrityWorker_BootstrapDoesNotFlag(t *testing.T) {
-	
+
 	db := newAuditDB(t)
 	repo := audit.NewRepository(db)
 	seedAudit(t, repo, "tenant-1")
@@ -74,7 +74,7 @@ func TestIntegrityWorker_BootstrapDoesNotFlag(t *testing.T) {
 }
 
 func TestIntegrityWorker_AppendDoesNotFlag(t *testing.T) {
-	
+
 	db := newAuditDB(t)
 	repo := audit.NewRepository(db)
 	seedAudit(t, repo, "tenant-1")
@@ -105,7 +105,7 @@ func TestIntegrityWorker_AppendDoesNotFlag(t *testing.T) {
 }
 
 func TestIntegrityWorker_TamperFlagsViolation(t *testing.T) {
-	
+
 	db := newAuditDB(t)
 	repo := audit.NewRepository(db)
 	seedAudit(t, repo, "tenant-1")

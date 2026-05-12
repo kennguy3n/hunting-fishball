@@ -1,9 +1,10 @@
 // payload_validator.go — Round-14 Task 5.
 //
 // Strict request-payload validation for the core POST endpoints:
-//   /v1/retrieve
-//   /v1/retrieve/batch
-//   /v1/retrieve/stream
+//
+//	/v1/retrieve
+//	/v1/retrieve/batch
+//	/v1/retrieve/stream
 //
 // Round-13 Task 11 added a payload SIZE limiter middleware. This
 // file adds payload SCHEMA validation: every required field is

@@ -10,12 +10,12 @@
 //
 // Coverage:
 //
-//   (a) Health summary aggregator returns valid JSON.
-//   (b) Slow-query endpoint surfaces a deliberately slow row.
-//   (c) Cache stats endpoint surfaces hit/miss/eviction counts.
-//   (d) API-key rotation transitions old → grace → expired.
-//   (e) Audit integrity endpoint reports a valid hash chain head.
-//   (f) Per-stage circuit-breaker dashboard returns breaker state.
+//	(a) Health summary aggregator returns valid JSON.
+//	(b) Slow-query endpoint surfaces a deliberately slow row.
+//	(c) Cache stats endpoint surfaces hit/miss/eviction counts.
+//	(d) API-key rotation transitions old → grace → expired.
+//	(e) Audit integrity endpoint reports a valid hash chain head.
+//	(f) Per-stage circuit-breaker dashboard returns breaker state.
 package e2e
 
 import (
