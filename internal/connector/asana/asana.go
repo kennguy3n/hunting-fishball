@@ -393,20 +393,91 @@ func (a *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 
 // DeltaSync polls tasks with the `modified_since` query parameter.
 // The cursor is an ISO-8601 timestamp; the new cursor returned is
-// the latest `modified_at` value seen. Empty cursor on the first
-// call returns the current cursor without backfilling — matching
-// the DeltaSyncer contract.
+// the latest `modified_at` value seen.
+//
+// Bootstrap (cursor == ""): Asana's /projects/{gid}/tasks endpoint
+// does NOT support sort_by=modified_at — it returns tasks in
+// creation / task-list-rank order. So pulling the first N tasks
+// from there and taking max(modified_at) gives the most-recent
+// modification *within those N* (creation-ordered), which for any
+// active project where the recently-modified task isn't in the
+// first creation-ordered page produces a stale cursor — the next
+// steady-state call's modified_since filter would then backfill
+// nearly the entire project as "changes", violating the
+// DeltaSyncer contract that an empty cursor returns the current
+// cursor without backfilling pre-cursor history.
+//
+// The workspace search endpoint /workspaces/{wgid}/tasks/search
+// DOES support sort_by=modified_at + sort_ascending=false, so we
+// use it with limit=1 to grab the single most-recently-modified
+// task across the requested project and set newCursor to that
+// timestamp. The workspace GID is stashed in Namespace.Metadata
+// during ListNamespaces. Mirrors the HubSpot / Linear / Salesforce
+// bootstrap fixes elsewhere in this PR.
+//
+// Steady-state (cursor != ""): keep the /projects/{gid}/tasks +
+// modified_since path, which Asana applies server-side regardless
+// of sort order.
 func (a *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
 		return nil, "", errors.New("asana: bad connection type")
 	}
+	if cursor == "" {
+		return a.deltaSyncBootstrap(ctx, conn, ns)
+	}
+
+	return a.deltaSyncSince(ctx, conn, ns, cursor)
+}
+
+func (a *Connector) deltaSyncBootstrap(ctx context.Context, conn *connection, ns connector.Namespace) ([]connector.DocumentChange, string, error) {
+	wgid := ""
+	if ns.Metadata != nil {
+		wgid = ns.Metadata["workspace_gid"]
+	}
+	if wgid == "" {
+		return nil, "", fmt.Errorf("%w: asana: namespace metadata workspace_gid required for delta bootstrap", connector.ErrInvalidConfig)
+	}
+	q := url.Values{}
+	q.Set("projects.any", ns.ID)
+	q.Set("sort_by", "modified_at")
+	q.Set("sort_ascending", "false")
+	q.Set("limit", "1")
+	q.Set("opt_fields", "gid,modified_at")
+
+	resp, err := a.do(ctx, conn, http.MethodGet, "/workspaces/"+wgid+"/tasks/search?"+q.Encode(), nil)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, "", fmt.Errorf("%w: asana: status=%d", connector.ErrRateLimited, resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("asana: workspace search status=%d", resp.StatusCode)
+	}
+	var body struct {
+		Data []struct {
+			GID        string `json:"gid"`
+			ModifiedAt string `json:"modified_at"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, "", fmt.Errorf("asana: decode workspace search: %w", err)
+	}
+	newCursor := ""
+	if len(body.Data) > 0 {
+		newCursor = body.Data[0].ModifiedAt
+	}
+
+	return nil, newCursor, nil
+}
+
+func (a *Connector) deltaSyncSince(ctx context.Context, conn *connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	q := url.Values{}
 	q.Set("limit", "100")
 	q.Set("opt_fields", "gid,name,modified_at")
-	if cursor != "" {
-		q.Set("modified_since", cursor)
-	}
+	q.Set("modified_since", cursor)
 
 	resp, err := a.do(ctx, conn, http.MethodGet, "/projects/"+ns.ID+"/tasks?"+q.Encode(), nil)
 	if err != nil {
@@ -447,9 +518,6 @@ func (a *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		if t.ModifiedAt > newCursor {
 			newCursor = t.ModifiedAt
 		}
-	}
-	if cursor == "" {
-		changes = nil
 	}
 
 	return changes, newCursor, nil
