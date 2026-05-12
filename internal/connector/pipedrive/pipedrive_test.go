@@ -231,6 +231,38 @@ func TestPipedrive_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+// TestPipedrive_NetworkErrorDoesNotLeakAPIToken regresses against a Round-16
+// review finding: the do() helper used to embed the api_token in the URL
+// passed to fmt.Errorf, which leaked the credential to structured logs on
+// every transient network failure.
+func TestPipedrive_NetworkErrorDoesNotLeakAPIToken(t *testing.T) {
+	t.Parallel()
+	const secretToken = "super-secret-leakable-token-xyz"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Hijack the connection and close it abruptly so http.Client.Do
+		// returns a transport-level error instead of an HTTP status.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		c, _, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+	}))
+	defer srv.Close()
+	creds, _ := json.Marshal(pipedrive.Credentials{APIToken: secretToken, CompanyDomain: "acme"})
+	p := pipedrive.New(pipedrive.WithBaseURL(srv.URL), pipedrive.WithHTTPClient(srv.Client()))
+	_, err := p.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds})
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if strings.Contains(err.Error(), secretToken) {
+		t.Fatalf("api_token leaked into error string: %v", err)
+	}
+}
+
 func TestPipedrive_SubscribeNotSupported(t *testing.T) {
 	t.Parallel()
 	p := pipedrive.New()

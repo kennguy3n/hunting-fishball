@@ -427,28 +427,44 @@ func (p *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	return changes, newCursor, nil
 }
 
-// do is the shared HTTP helper. The api_token is added to the
-// query string (Pipedrive does not use Authorization headers).
+// do is the shared HTTP helper. Pipedrive authenticates via an
+// `api_token` query parameter (its REST v1 API does not accept
+// Authorization headers for personal API tokens). The token is
+// attached via req.URL.Query() AFTER request construction so the
+// raw URL we format into errors does not carry it, and any error
+// returned by http.Client.Do — which contains *url.Error.URL with
+// the full query string — has the token redacted before wrapping.
 func (p *Connector) do(ctx context.Context, conn *connection, method, path string, body io.Reader) (*http.Response, error) {
-	sep := "?"
-	if strings.Contains(path, "?") {
-		sep = "&"
-	}
-	target := strings.TrimRight(conn.baseURL, "/") + path + sep + "api_token=" + url.QueryEscape(conn.token)
-	req, err := http.NewRequestWithContext(ctx, method, target, body)
+	safeTarget := strings.TrimRight(conn.baseURL, "/") + path
+	req, err := http.NewRequestWithContext(ctx, method, safeTarget, body)
 	if err != nil {
 		return nil, fmt.Errorf("pipedrive: build request: %w", err)
 	}
+	q := req.URL.Query()
+	q.Set("api_token", conn.token)
+	req.URL.RawQuery = q.Encode()
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("pipedrive: %s %s: %w", method, target, err)
+		return nil, fmt.Errorf("pipedrive: %s %s: %s", method, safeTarget, redactToken(err.Error(), conn.token))
 	}
 
 	return resp, nil
+}
+
+// redactToken removes the api_token query parameter value from any
+// stringified error path that Go's net/http may embed.
+func redactToken(s, token string) string {
+	if token == "" {
+		return s
+	}
+	s = strings.ReplaceAll(s, token, "REDACTED")
+	s = strings.ReplaceAll(s, url.QueryEscape(token), "REDACTED")
+
+	return s
 }
 
 // Register registers the Pipedrive connector with the global registry.

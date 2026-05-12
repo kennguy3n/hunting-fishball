@@ -218,6 +218,34 @@ func TestConfluenceServer_DeltaSync_InitialCursorIsCurrent(t *testing.T) {
 	}
 }
 
+// TestConfluenceServer_DeltaSync_CursorPreservesSecondsPrecision regresses
+// against a Round-16 review finding: the CQL cursor must preserve seconds
+// precision, otherwise pages modified within the cursor's minute are
+// re-emitted as duplicate ChangeUpserted events on every subsequent poll.
+func TestConfluenceServer_DeltaSync_CursorPreservesSecondsPrecision(t *testing.T) {
+	t.Parallel()
+	var gotCQL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rest/api/user/current", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/rest/api/content/search", func(w http.ResponseWriter, r *http.Request) {
+		gotCQL = r.URL.Query().Get("cql")
+		_, _ = io.WriteString(w, `{"results":[]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	s := confluenceserver.New(confluenceserver.WithBaseURL(srv.URL), confluenceserver.WithHTTPClient(srv.Client()))
+	conn, _ := s.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL)})
+	// Bootstrap cursor stored in RFC3339 with full second precision.
+	if _, _, err := s.DeltaSync(context.Background(), conn, connector.Namespace{ID: "DOCS"}, "2024-01-05T12:30:45Z"); err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if !strings.Contains(gotCQL, `lastModified > "2024-01-05 12:30:45"`) {
+		t.Fatalf("cql lost seconds precision: %q", gotCQL)
+	}
+}
+
 func TestConfluenceServer_DeltaSync_RateLimited(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
