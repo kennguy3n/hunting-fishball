@@ -800,8 +800,24 @@ func ResetForTest() {
 	DLQAutoReplaysTotal.Reset()
 	AdaptiveRateCurrent.Reset()
 	AdaptiveRateHalvedTotal.Reset()
-	// Counters can't be Reset() — unregister + re-register above
-	// is enough to drop their accumulated value.
+	// Round-14 Task 13 follow-up: CounterVec / Gauge / Histogram
+	// collectors retain accumulated values across an
+	// Unregister/MustRegister cycle because the Go variable is
+	// the same instance. Clear them explicitly so a previous
+	// test that hit, e.g., reason=circuit_open doesn't leak
+	// into the next case.
+	EmbeddingFallbackByReason.Reset()
+	APIKeysGraceExpiringSoon.Set(0)
+	EmbeddingFallbackLatency = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "context_engine_embedding_fallback_latency_seconds",
+			Help:    "Wall-clock latency of the degraded embedding fallback.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+		},
+	)
+	// Plain prometheus.Counter has no Reset(); unregister +
+	// re-register above is enough to drop the registry's view
+	// of the accumulated value for those collectors.
 	Registry.MustRegister(
 		APIRequestsTotal,
 		APIRequestDurationSeconds,

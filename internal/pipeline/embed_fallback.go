@@ -109,13 +109,15 @@ func (f *FallbackEmbedder) EmbedWithReason(_ context.Context, chunks []string, r
 	for i, text := range chunks {
 		out[i] = hashEmbed(text)
 	}
-	// Round-14 Task 18: count fallback calls toward the same
-	// embed-request denominator the gRPC path increments in
-	// embedWithModel. Without this, embeds served exclusively
-	// by the fallback path would never increment the
-	// denominator, leaving the EmbeddingFallbackRateHigh alert
-	// ratio undefined (numerator-only).
-	observability.EmbeddingRequestsTotal.Inc()
+	// Round-14 Task 18 follow-up: EmbeddingRequestsTotal is
+	// owned by Embedder.embedWithModel (the single entry point
+	// for every embed call in the pipeline). Incrementing it
+	// here would double-count whenever a deployment wires the
+	// FallbackEmbedder into Embedder.cfg.Remote, since the
+	// outer path increments first and then delegates to
+	// Remote.Embed. The fallback-specific counter below is
+	// still incremented here so the numerator of the
+	// EmbeddingFallbackRateHigh alert remains accurate.
 	observability.EmbeddingFallbackByReason.WithLabelValues(string(reason)).Inc()
 	observability.EmbeddingFallbackLatency.Observe(time.Since(start).Seconds())
 	return out, FallbackModelID, nil

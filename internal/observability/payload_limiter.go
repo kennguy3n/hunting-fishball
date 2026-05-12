@@ -97,9 +97,16 @@ const DefaultMaxRequestBodyBytes int64 = 10 * 1024 * 1024
 
 // PayloadSizeLimiterHTTP returns an http.Handler-style wrapper of
 // the limiter for callers that don't use Gin (e.g. the ingest
-// probe mux). The semantics match the Gin variant — oversized
-// Content-Length yields HTTP 413, GET/HEAD/DELETE bypass, the
-// body is wrapped with http.MaxBytesReader.
+// probe mux). It mirrors the Gin variant's global behaviour —
+// oversized Content-Length yields HTTP 413, GET/HEAD/DELETE
+// bypass, the body is wrapped with http.MaxBytesReader.
+//
+// Note: cfg.TenantOverride is Gin-only and is ignored here. The
+// HTTP variant runs on transport-level handlers (ingest probe
+// mux, metrics) that don't carry per-tenant identity. If a
+// caller ever needs per-tenant caps on a non-Gin handler, add a
+// TenantOverrideHTTP func(*http.Request) field rather than
+// reusing the Gin closure.
 func PayloadSizeLimiterHTTP(cfg PayloadLimiterConfig, next http.Handler) http.Handler {
 	if cfg.MaxBytes <= 0 {
 		return next
