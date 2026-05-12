@@ -268,6 +268,61 @@ func TestSalesforce_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+// TestSalesforce_DeltaSync_RejectsTamperedCursor locks in that the
+// cursor is parsed and re-formatted as time.RFC3339 before being
+// concatenated into the SOQL WHERE clause. A tampered cursor row
+// (e.g. an injected SOQL clause stored in place of the timestamp)
+// must surface as connector.ErrInvalidConfig and never reach the
+// /query endpoint, defending against SOQL injection via the
+// platform-managed cursor.
+func TestSalesforce_DeltaSync_RejectsTamperedCursor(t *testing.T) {
+	t.Parallel()
+	bad := []string{
+		"' OR Id != null --",
+		"2024-01-01T00:00:00Z; DROP TABLE Account",
+		"2024-01-01",       // date-only, not full RFC3339
+		"2024-01-01 00:00", // space instead of T
+		"not-a-timestamp",
+		"", // empty is fine — caller short-circuits, handled below
+	}
+	for _, cur := range bad {
+		cur := cur
+		t.Run(cur, func(t *testing.T) {
+			t.Parallel()
+			mux := http.NewServeMux()
+			mux.HandleFunc("/services/data/v59.0/limits", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{}`))
+			})
+			mux.HandleFunc("/services/data/v59.0/query", func(w http.ResponseWriter, r *http.Request) {
+				// Empty cursor is the only valid case in `bad` — it
+				// goes through and returns a benign first-call payload.
+				if cur == "" {
+					_, _ = w.Write([]byte(`{"done":true,"records":[{"Id":"a","SystemModstamp":"2024-01-01T00:00:00Z"}]}`))
+
+					return
+				}
+				t.Errorf("unsanitised cursor %q reached /query as %q", cur, r.URL.Query().Get("q"))
+				http.Error(w, "should not be called", http.StatusInternalServerError)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			s := salesforce.New(salesforce.WithHTTPClient(srv.Client()), salesforce.WithBaseURL(srv.URL))
+			conn, _ := s.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL)})
+			_, _, err := s.DeltaSync(context.Background(), conn, connector.Namespace{ID: "Account"}, cur)
+			if cur == "" {
+				if err != nil {
+					t.Fatalf("empty cursor must be accepted, got %v", err)
+				}
+
+				return
+			}
+			if !errors.Is(err, connector.ErrInvalidConfig) {
+				t.Fatalf("expected ErrInvalidConfig for cursor %q, got %v", cur, err)
+			}
+		})
+	}
+}
+
 func TestSalesforce_Subscribe_NotSupported(t *testing.T) {
 	t.Parallel()
 	if _, err := salesforce.New().Subscribe(context.Background(), nil, connector.Namespace{}); !errors.Is(err, connector.ErrNotSupported) {

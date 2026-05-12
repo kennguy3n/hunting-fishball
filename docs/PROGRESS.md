@@ -506,7 +506,7 @@ ships, the matrix is empty. Each row records:
     test -race -count=1 ./internal/connector/...` in isolation
     so connector-only PRs get sub-30s feedback. Concurrency
     group `ci-${{ github.workflow }}-${{
-    github.event.pull_request.number || github.ref }}` cancels
+    github.event.pull_request.number || github.sha }}` cancels
     stale runs. Existing fast-lane jobs already share `setup-go`
     cache + `actions/cache` build-cache keys (Round-14 Task
     16) — no additional changes needed.

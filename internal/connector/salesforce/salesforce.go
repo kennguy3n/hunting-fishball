@@ -360,6 +360,14 @@ func (s *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 // cursor is an ISO-8601 timestamp; the new cursor returned is the
 // latest SystemModstamp seen. Empty cursor on first call returns
 // the current cursor without backfilling.
+//
+// The cursor is round-tripped through platform-managed storage
+// between calls, so before interpolating it into the SOQL WHERE
+// clause we parse it as time.RFC3339 and re-format the parsed
+// value. A tampered cursor (e.g. an injected SOQL clause stored
+// in place of the timestamp) fails to parse and returns
+// connector.ErrInvalidConfig, matching the type-level guarantee
+// the ListDocuments iterator gets from its time.Time `opts.Since`.
 func (s *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
@@ -367,7 +375,11 @@ func (s *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	}
 	soql := fmt.Sprintf("SELECT Id, SystemModstamp FROM %s", sanitiseSObject(ns.ID))
 	if cursor != "" {
-		soql += " WHERE SystemModstamp > " + cursor
+		ts, err := time.Parse(time.RFC3339, cursor)
+		if err != nil {
+			return nil, "", fmt.Errorf("%w: salesforce: cursor not RFC3339: %v", connector.ErrInvalidConfig, err)
+		}
+		soql += " WHERE SystemModstamp > " + ts.UTC().Format(time.RFC3339)
 	}
 	soql += " ORDER BY SystemModstamp ASC"
 	q := url.Values{}
