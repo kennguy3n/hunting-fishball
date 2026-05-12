@@ -391,33 +391,42 @@ func (a *Connector) Subscribe(_ context.Context, _ connector.Connection, _ conne
 // Disconnect is a no-op.
 func (a *Connector) Disconnect(_ context.Context, _ connector.Connection) error { return nil }
 
-// DeltaSync polls tasks with the `modified_since` query parameter.
-// The cursor is an ISO-8601 timestamp; the new cursor returned is
-// the latest `modified_at` value seen.
+// DeltaSync uses Asana's workspace search endpoint
+// (/workspaces/{wgid}/tasks/search) for BOTH bootstrap and
+// steady-state to guarantee monotonic cursor advancement.
 //
-// Bootstrap (cursor == ""): Asana's /projects/{gid}/tasks endpoint
-// does NOT support sort_by=modified_at — it returns tasks in
-// creation / task-list-rank order. So pulling the first N tasks
-// from there and taking max(modified_at) gives the most-recent
-// modification *within those N* (creation-ordered), which for any
-// active project where the recently-modified task isn't in the
-// first creation-ordered page produces a stale cursor — the next
-// steady-state call's modified_since filter would then backfill
-// nearly the entire project as "changes", violating the
-// DeltaSyncer contract that an empty cursor returns the current
-// cursor without backfilling pre-cursor history.
+// Asana's /projects/{gid}/tasks list endpoint returns tasks in
+// creation / task-list-rank order — it does NOT support
+// sort_by=modified_at. Server-side filtering with modified_since
+// works, but the page-of-100 returned is creation-ordered, so
+// taking max(modified_at) over the first 100 and advancing the
+// cursor skips any task whose modified_at falls in the active
+// change window but whose creation rank places it beyond task
+// #100. That violates the DeltaSyncer "no skipped changes"
+// contract.
 //
 // The workspace search endpoint /workspaces/{wgid}/tasks/search
-// DOES support sort_by=modified_at + sort_ascending=false, so we
-// use it with limit=1 to grab the single most-recently-modified
-// task across the requested project and set newCursor to that
-// timestamp. The workspace GID is stashed in Namespace.Metadata
-// during ListNamespaces. Mirrors the HubSpot / Linear / Salesforce
-// bootstrap fixes elsewhere in this PR.
+// supports server-side sort_by=modified_at, so each page is
+// modification-ordered:
 //
-// Steady-state (cursor != ""): keep the /projects/{gid}/tasks +
-// modified_since path, which Asana applies server-side regardless
-// of sort order.
+//   - Bootstrap (cursor == ""): sort_ascending=false + limit=1
+//     fetches the single most-recently-modified task across the
+//     project; newCursor equals that timestamp ("now"). Returns
+//     zero changes.
+//   - Steady-state (cursor != ""): sort_ascending=true +
+//     modified_at.after=<cursor> + limit=100 returns the next
+//     batch of changes oldest-first. max(modified_at) of this
+//     page is always less than min(modified_at) of the next
+//     call's response, so the next call's modified_at.after
+//     filter picks up exactly where this one left off — no
+//     skipped tasks regardless of changeset size. Mirrors the
+//     monotonic-cursor invariant the HubSpot / Linear /
+//     Salesforce DeltaSync paths already rely on, just via
+//     a different endpoint because Asana's project list does
+//     not sort by modification time.
+//
+// The workspace GID is stashed in Namespace.Metadata during
+// ListNamespaces.
 func (a *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
@@ -474,24 +483,35 @@ func (a *Connector) deltaSyncBootstrap(ctx context.Context, conn *connection, ns
 }
 
 func (a *Connector) deltaSyncSince(ctx context.Context, conn *connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
+	wgid := ""
+	if ns.Metadata != nil {
+		wgid = ns.Metadata["workspace_gid"]
+	}
+	if wgid == "" {
+		return nil, "", fmt.Errorf("%w: asana: namespace metadata workspace_gid required for delta sync", connector.ErrInvalidConfig)
+	}
 	q := url.Values{}
+	q.Set("projects.any", ns.ID)
+	q.Set("sort_by", "modified_at")
+	q.Set("sort_ascending", "true")
+	q.Set("modified_at.after", cursor)
 	q.Set("limit", "100")
 	q.Set("opt_fields", "gid,name,modified_at")
-	q.Set("modified_since", cursor)
 
-	resp, err := a.do(ctx, conn, http.MethodGet, "/projects/"+ns.ID+"/tasks?"+q.Encode(), nil)
+	resp, err := a.do(ctx, conn, http.MethodGet, "/workspaces/"+wgid+"/tasks/search?"+q.Encode(), nil)
 	if err != nil {
 		return nil, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// Surface 429 as connector.ErrRateLimited so the adaptive rate
-	// limiter reacts to Asana's per-project throttling during delta
-	// sync, mirroring the ListDocuments iterator above.
+	// limiter reacts to Asana's workspace-search throttling during
+	// delta sync, mirroring the bootstrap path and the
+	// ListDocuments iterator above.
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return nil, "", fmt.Errorf("%w: asana: status=%d", connector.ErrRateLimited, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("asana: tasks status=%d", resp.StatusCode)
+		return nil, "", fmt.Errorf("asana: workspace search status=%d", resp.StatusCode)
 	}
 	var body struct {
 		Data []struct {
@@ -500,7 +520,7 @@ func (a *Connector) deltaSyncSince(ctx context.Context, conn *connection, ns con
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("asana: decode tasks: %w", err)
+		return nil, "", fmt.Errorf("asana: decode workspace search: %w", err)
 	}
 	newCursor := cursor
 	changes := make([]connector.DocumentChange, 0, len(body.Data))
