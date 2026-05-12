@@ -162,10 +162,17 @@ func (g *Connector) ListNamespaces(ctx context.Context, c connector.Connection) 
 
 	pageToken := ""
 	for {
-		path := "/drives?pageSize=100"
+		// Use url.Values so pageToken is properly encoded —
+		// Google pageToken values are opaque and may contain
+		// characters (=, +, /) that break raw concatenation,
+		// silently truncating the shared-drive list. Matches
+		// the document iterator below.
+		q := url.Values{}
+		q.Set("pageSize", "100")
 		if pageToken != "" {
-			path += "&pageToken=" + pageToken
+			q.Set("pageToken", pageToken)
 		}
+		path := "/drives?" + q.Encode()
 		resp, err := g.do(ctx, conn, http.MethodGet, path, nil)
 		if err != nil {
 			return nil, err

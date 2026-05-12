@@ -197,23 +197,76 @@ func TestS3_ListDocuments_EmptyAndSingle(t *testing.T) {
 func TestS3_ListDocuments_RateLimited(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodHead {
-			w.WriteHeader(http.StatusOK)
-
-			return
-		}
-		http.Error(w, "slow down", http.StatusTooManyRequests)
-	}))
-	defer srv.Close()
-	c := s3.New(s3.WithHTTPClient(srv.Client()))
-	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL)})
-	it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "test-bucket"}, connector.ListOpts{})
-	defer func() { _ = it.Close() }()
-	for it.Next(context.Background()) {
+	// Real AWS S3 surfaces throttling as "503 Slow Down" while
+	// MinIO / R2 / Wasabi proxies often use "429 Too Many
+	// Requests". Both must wrap connector.ErrRateLimited so the
+	// adaptive limiter in internal/connector/adaptive_rate.go
+	// can react.
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"429_too_many_requests", http.StatusTooManyRequests},
+		{"503_slow_down", http.StatusServiceUnavailable},
 	}
-	if it.Err() == nil || errors.Is(it.Err(), connector.ErrEndOfPage) {
-		t.Fatalf("expected non-EOP err, got %v", it.Err())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					w.WriteHeader(http.StatusOK)
+
+					return
+				}
+				http.Error(w, "slow down", tc.status)
+			}))
+			defer srv.Close()
+			c := s3.New(s3.WithHTTPClient(srv.Client()))
+			conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL)})
+			it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "test-bucket"}, connector.ListOpts{})
+			defer func() { _ = it.Close() }()
+			for it.Next(context.Background()) {
+			}
+			if !errors.Is(it.Err(), connector.ErrRateLimited) {
+				t.Fatalf("expected ErrRateLimited for status=%d, got %v", tc.status, it.Err())
+			}
+		})
+	}
+}
+
+func TestS3_DeltaSync_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	// DeltaSync shares the throttling contract with ListDocuments:
+	// both 429 and 503 must wrap ErrRateLimited.
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"429_too_many_requests", http.StatusTooManyRequests},
+		{"503_slow_down", http.StatusServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					w.WriteHeader(http.StatusOK)
+
+					return
+				}
+				http.Error(w, "slow down", tc.status)
+			}))
+			defer srv.Close()
+			c := s3.New(s3.WithHTTPClient(srv.Client()))
+			conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL)})
+			_, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "test-bucket"}, "cursor-1")
+			if !errors.Is(err, connector.ErrRateLimited) {
+				t.Fatalf("expected ErrRateLimited for status=%d, got %v", tc.status, err)
+			}
+		})
 	}
 }
 

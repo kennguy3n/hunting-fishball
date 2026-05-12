@@ -269,7 +269,11 @@ func (it *objIterator) fetchPage(ctx context.Context) bool {
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
+	// AWS S3 emits "503 Slow Down" for native throttling while
+	// MinIO / R2 / Wasabi proxies often surface "429 Too Many
+	// Requests". Treat both as ErrRateLimited so the adaptive
+	// limiter can react to either signal.
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		it.err = fmt.Errorf("%w: s3: status=%d", connector.ErrRateLimited, resp.StatusCode)
 
 		return false
@@ -401,6 +405,9 @@ func (s *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		return nil, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		return nil, "", fmt.Errorf("%w: s3: status=%d", connector.ErrRateLimited, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("s3: list-objects-v2 status=%d", resp.StatusCode)
 	}

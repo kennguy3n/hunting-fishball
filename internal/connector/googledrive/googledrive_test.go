@@ -122,6 +122,60 @@ func TestGoogleDrive_ListNamespaces(t *testing.T) {
 	}
 }
 
+// TestGoogleDrive_ListNamespaces_PageTokenEncoded ensures that a
+// nextPageToken containing characters that would corrupt a raw
+// URL (=, +, &, /) round-trips correctly via url.Values.Encode(),
+// so large shared-drive sets are not silently truncated.
+func TestGoogleDrive_ListNamespaces_PageTokenEncoded(t *testing.T) {
+	t.Parallel()
+
+	// Chosen to stress URL escaping: '&' would split the query
+	// string, '+' would decode to ' ', '=' would split key/value,
+	// '/' is generally safe but still echoed back.
+	const trickyToken = "abc&def+ghi=jkl/mno"
+
+	var calls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
+	mux.HandleFunc("/drives", func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		got := r.URL.Query().Get("pageToken")
+		switch n {
+		case 1:
+			if got != "" {
+				t.Errorf("first call pageToken=%q, want empty", got)
+			}
+			_, _ = w.Write([]byte(`{"nextPageToken":"` + trickyToken + `","drives":[{"id":"D1","name":"Engineering"}]}`))
+		case 2:
+			if got != trickyToken {
+				t.Errorf("second call pageToken=%q, want %q", got, trickyToken)
+			}
+			_, _ = w.Write([]byte(`{"drives":[{"id":"D2","name":"Ops"}]}`))
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	})
+	srv := newDriveServer(t, mux)
+	g := newDriveConnector(srv)
+
+	conn, err := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	ns, err := g.ListNamespaces(context.Background(), conn)
+	if err != nil {
+		t.Fatalf("ListNamespaces: %v", err)
+	}
+	// 1 my-drive + 2 shared drives = 3 — proves pagination
+	// followed past the tricky token instead of stopping early.
+	if len(ns) != 3 {
+		t.Fatalf("namespaces: got %d, want 3 (pagination truncated?): %+v", len(ns), ns)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected 2 /drives calls, got %d", got)
+	}
+}
+
 func TestGoogleDrive_ListDocuments_Pagination(t *testing.T) {
 	t.Parallel()
 
