@@ -96,7 +96,7 @@ func (c *connection) userPath() string {
 		return "/me"
 	}
 
-	return "/users/" + c.user
+	return "/users/" + url.PathEscape(c.user)
 }
 
 // Validate parses and sanity-checks the credential blob.

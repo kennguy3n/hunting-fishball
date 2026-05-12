@@ -301,6 +301,34 @@ func TestEntraID_DeltaSync_PaginationAggregates(t *testing.T) {
 	}
 }
 
+func TestEntraID_FetchDocument_EscapesID(t *testing.T) {
+	t.Parallel()
+	var seenPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/organization", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.EscapedPath()
+		_, _ = io.WriteString(w, `{"id":"abc/def","displayName":"X","userPrincipalName":"x@acme.com"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := entraid.New(entraid.WithBaseURL(srv.URL), entraid.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	doc, err := c.FetchDocument(context.Background(), conn, connector.DocumentRef{NamespaceID: "users", ID: "abc/def"})
+	if err != nil {
+		t.Fatalf("FetchDocument: %v", err)
+	}
+	defer func() { _ = doc.Content.Close() }()
+	if strings.Contains(seenPath, "abc/def") {
+		t.Fatalf("raw ID leaked into path: %q", seenPath)
+	}
+	if !strings.Contains(seenPath, "%2F") {
+		t.Fatalf("escaped slash missing from path: %q", seenPath)
+	}
+}
+
 func TestEntraID_SubscribeNotSupported(t *testing.T) {
 	t.Parallel()
 	c := entraid.New()

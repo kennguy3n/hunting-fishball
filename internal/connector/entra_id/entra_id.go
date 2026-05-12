@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -274,7 +275,7 @@ func (g *Connector) FetchDocument(ctx context.Context, c connector.Connection, r
 	if !ok {
 		return nil, errors.New("entra_id: bad connection type")
 	}
-	resp, err := g.do(ctx, conn, http.MethodGet, "/"+ref.NamespaceID+"/"+ref.ID, nil)
+	resp, err := g.do(ctx, conn, http.MethodGet, "/"+ref.NamespaceID+"/"+url.PathEscape(ref.ID), nil)
 	if err != nil {
 		return nil, err
 	}

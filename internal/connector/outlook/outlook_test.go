@@ -328,6 +328,29 @@ func TestOutlook_DeltaSync_PaginationAggregates(t *testing.T) {
 	}
 }
 
+func TestOutlook_UserPath_EscapesUserID(t *testing.T) {
+	t.Parallel()
+	const rawUser = "weird/user@acme.com"
+	var seenPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.EscapedPath()
+		_, _ = io.WriteString(w, `{}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := outlook.New(outlook.WithBaseURL(srv.URL), outlook.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(outlook.Credentials{AccessToken: "tok", UserID: rawUser})
+	if _, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	// user_id is base64/email-shaped in production but defense-in-depth:
+	// any '/' in c.user must be %2F-escaped so it can't break the path.
+	if strings.Contains(seenPath, "weird/user") || !strings.Contains(seenPath, "%2F") {
+		t.Fatalf("server saw unescaped user_id; path=%q", seenPath)
+	}
+}
+
 func TestOutlook_SubscribeNotSupported(t *testing.T) {
 	t.Parallel()
 	c := outlook.New()
