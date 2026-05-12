@@ -16,83 +16,9 @@
 > `fast-check` / `fast-test` / `fast-build` (with per-job
 > `actions/cache` on `~/.cache/go-build`). See the Round-14
 > additions block below for the per-task breakdown.
-> Phase 1 brings the Google Drive + Slack connectors, the Go Kafka
-> consumer, the 4-stage pipeline (fetch / parse / embed / store), the
-> `POST /v1/retrieve` API, and a docker-compose CI smoke test.
-> **Phase 2** brings the admin source-management API
-> (`internal/admin/`), per-tenant Kafka partition-key routing, the
-> backfill-vs-steady pipeline (`pipeline.IngestEvent.SyncMode`), the
-> per-source Redis token-bucket rate limiter, source-health tracking,
-> and the forget-on-removal worker.
-> Phase 3 brings the four-backend retrieval fan-out (vector + BM25 +
-> graph + memory), the RRF merger and lightweight reranker, the
-> Redis semantic cache, the three Python ML microservices (Docling,
-> embedding, Mem0), Go ↔ Python integration tests, throughput /
-> latency benchmarks, and the
-> [cutover plan](docs/CUTOVER.md). **Phase 4** brings the policy
-> framework (`internal/policy/`): privacy modes
-> (`no-ai`/`local-only`/`local-api`/`hybrid`/`remote`), allow/deny
-> ACL evaluation, and recipient policy — all wired into the retrieval
-> handler via a `PolicyResolver` port — plus the policy simulator
-> (what-if retrieval, data-flow diff, conflict detection), draft
-> isolation with audited promotion (`policy.promoted` /
-> `policy.rejected` audit events), and structured `privacy_strip`
-> enrichment on every retrieval row. The admin HTTP surface lives at
-> `/v1/admin/policy/{drafts,simulate,conflicts}`.
-> **Phase 5 (server-side)** brings the on-device shard contract:
-> the manifest API (`GET /v1/shards/:tenant_id`), the policy-aware
-> generation worker, the delta sync protocol
-> (`GET /v1/shards/:tenant_id/delta?since=<v>`), the shard
-> coverage endpoint (`GET /v1/shards/:tenant_id/coverage`), the
-> client `ShardClientContract` interface
-> (`internal/shard/contract.go`) consumed by the iOS / Android /
-> desktop runtimes, the per-tier eviction policy
-> (`internal/shard/eviction.go`), and the cryptographic-forgetting
-> orchestrator (`DELETE /v1/tenants/:tenant_id/keys`) — all in
-> `internal/shard/`. The Bonsai-1.7B model catalog
-> (q4_0 / q8_0 / fp16) ships in `internal/models/` with
-> `GET /v1/models/catalog`. Per-platform contracts live in
-> [`docs/contracts/`](docs/contracts/).
-> **Phase 6 (server-side)** brings the B2C client SDK bootstrap
-> (`internal/b2c/`): `GET /v1/health`, `GET /v1/capabilities`, and
-> `GET /v1/sync/schedule`. The device-first policy
-> (`internal/policy/device_first.go`) returns a
-> `prefer_local` / `local_shard_version` / `prefer_local_reason`
-> hint on every `RetrieveResponse`. Per-platform render and
-> background-sync contracts live in
-> [`docs/contracts/`](docs/contracts/).
-> **Phase 7** brings ten new connectors (SharePoint, OneDrive,
-> Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab, Microsoft
-> Teams), bringing the production catalog to 12, plus per-connector
-> ops runbooks (`docs/runbooks/`) and an end-to-end smoke suite
-> (`tests/e2e/connector_smoke_test.go`,
-> `make test-connector-smoke`).
-> **Phase 8** brings OpenTelemetry tracing
-> (`internal/observability/`), per-stage worker pools
-> (`pipeline.StageConfig`), tunable Kafka rebalance, storage
-> connection-pool sizing, a round-robin gRPC pool with circuit
-> breaker (`internal/grpcpool/`), a capacity test harness
-> (`tests/capacity/`, `make capacity-test`), Prometheus metrics
-> + Gin middleware (`internal/observability/metrics.go`),
-> four HPA manifests (`deploy/`), Mem0 tenant-prefix
-> partitioning (`services/memory/memory_server.py::tenant_prefix`),
-> liveness / readiness probes (`/healthz`, `/readyz`), and an
-> end-to-end retrieval P95 budget enforcer
-> (`tests/benchmark/p95_e2e_test.go` for the Phase 1 round-trip,
-> `tests/benchmark/p95_retrieval_test.go` for the stricter Phase 3
-> retrieval-only budget; `make bench-e2e`). 2026-05-10 also wired
-> structured JSON logging through both binaries via
-> `internal/observability/logger.go` (with `GinLoggerMiddleware`
-> on the authed `cmd/api` route group; `cmd/ingest` uses
-> `slog.SetDefault` since it serves probes via `net/http`),
-> the DLQ observer (`internal/pipeline/dlq_observer.go`), and the
-> 5-step `TenantDeleter` workflow
-> (`internal/admin/tenant_delete.go`,
-> `DELETE /v1/admin/tenants/:tenant_id`) backed by
-> `migrations/008_tenant_status.sql`. The channel
-> `deny_local_retrieval` flag is now end-to-end
-> (`migrations/007_channel_deny_local.sql`).
-> The product thesis lives in
+>
+> Per-phase detail lives in [`docs/PROGRESS.md`](docs/PROGRESS.md)
+> and [`docs/PHASES.md`](docs/PHASES.md); the product thesis is in
 > [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target system
 > design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 

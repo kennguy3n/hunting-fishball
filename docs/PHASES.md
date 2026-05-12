@@ -19,12 +19,15 @@ phase.
 > **Phase status snapshot (2026-05-12, post-Round-14).** Phases 0,
 > 1, 2, 3, 7, and 8 are **functionally complete** — every exit
 > criterion has shipped to `main` and the supporting tests /
-> runbooks / metrics are in place. Phases 4, 5, and 6 are
-> **server-side complete**; the only remaining checkboxes are
-> client-side rendering tasks that land in the external B2C and
+> runbooks / metrics are in place. Phases 7 and 8 carry the
+> ✅ marker because they have no cross-phase or client-side
+> dependencies left. Phases 0-3 keep the 🟡 marker for the
+> cross-phase invariants they share with Phases 4-6 (audit, ACL,
+> retrieval fan-out, etc.); Phases 4, 5, and 6 are
+> **server-side complete** and stay 🟡 until the remaining
+> client-side rendering tasks land in the external B2C and
 > desktop repositories (`uneycom/b2c-kchat-portal`,
-> `uneycom/skytrack-*`, `kennguy3n/knowledge`). The phase markers
-> below remain `🟡 partial` until those client repos catch up; see
+> `uneycom/skytrack-*`, `kennguy3n/knowledge`). See
 > [`PROGRESS.md`](PROGRESS.md) for the per-task status and
 > [`README.md`](../README.md) for the round-by-round changelog.
 > Round 14 hardens the production surface from Rounds 9-13 (admin
@@ -33,364 +36,11 @@ phase.
 > lane split into `fast-check` / `fast-test` / `fast-build`).
 > Migration count is now 040.
 >
-> **Phase 5** is **🟡 partial** as of 2026-05-10 — server-side
-> shard manifest API, policy-aware shard generation worker, delta
-> sync protocol, cryptographic-forgetting orchestrator, and the
-> shard coverage endpoint have all landed (`internal/shard/`).
-> On-device contracts ship as Go interfaces + per-platform docs:
-> `ShardClientContract` (`internal/shard/contract.go`),
-> `docs/contracts/uniffi-ios.md`,
-> `docs/contracts/uniffi-android.md`,
-> `docs/contracts/napi-desktop.md`,
-> `docs/contracts/local-first-retrieval.md`,
-> `docs/contracts/bonsai-integration.md`. The model catalog
-> (`internal/models/`) backs `GET /v1/models/catalog` with three
-> Bonsai-1.7B builds and per-tier eviction policy. The actual
-> XCFramework / AAR / N-API addon implementations live in
-> `kennguy3n/knowledge`.
->
-> **Phase 7** is **🟡 partial** as of 2026-05-10 — 12 connectors are
-> implemented (Phase 1 Google Drive + Slack; Phase 7 SharePoint,
-> OneDrive, Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab,
-> Microsoft Teams). Per-connector runbooks and per-connector e2e
-> smoke tests have landed (`docs/runbooks/`,
-> `tests/e2e/connector_smoke_test.go`,
-> `make test-connector-smoke`); the only remaining gate is a
-> production rollout of the smoke suite under the docker-compose CI
-> path.
->
-> **Phase 8 production-hardening (2026-05-10 batch).** A 20-task
-> next-batch of operational + admin surfaces has landed: graceful
-> shutdown for both binaries (`internal/lifecycle/`), startup config
-> validation (`internal/config/validate.go`), a SQL migration runner
-> behind `AUTO_MIGRATE` (`internal/migrate/runner.go`), bulk
-> retrieval (`POST /v1/retrieve/batch`), audit log search/filter
-> (`/v1/admin/audit`), per-namespace sync progress
-> (`/v1/admin/sources/:id/progress`), DLQ inspection + replay
-> (`/v1/admin/dlq`), retention policy enforcement
-> (`internal/policy/retention.go` + `internal/pipeline/retention_worker.go`),
-> a reindex orchestrator (`POST /v1/admin/reindex`), per-tenant API
-> rate limit, webhook signature verification across the four
-> `WebhookReceiver` connectors (jira / github / gitlab / teams),
-> the connector dashboard (`/v1/admin/dashboard`), the request-ID
-> middleware (`internal/observability/request_id.go`), the
-> e2e tenant deletion + degradation smoke suites
-> (`tests/e2e/tenant_deletion_test.go`,
-> `tests/e2e/degradation_test.go`), and the OpenAPI spec
-> (`docs/openapi.yaml`). See `docs/PROGRESS.md` 2026-05-10
-> changelog entry for the per-task breakdown.
->
-> **Round-4 next-20 batch (2026-05-10).** Layered on top of the
-> Phase 8 batch: a retrieval evaluation harness (`internal/eval/`,
-> `migrations/012_eval_suites.sql`, `GET /v1/admin/eval/run`), an
-> opt-in GraphRAG Stage 3b (`proto/graphrag/v1/`,
-> `services/graphrag/`, `internal/pipeline/graphrag.go`), shared
-> webhook HMAC verification (`internal/connector/webhook_verify.go`)
-> across GitHub / GitLab / Jira / Teams / Slack, a retention
-> enforcement worker (`internal/admin/retention_worker.go`), a
-> source-sync cron scheduler (`internal/admin/scheduler.go` +
-> `migrations/013_sync_schedules.sql`), structured error catalog
-> (`internal/errors/`), per-tenant API rate-limit middleware
-> (`internal/admin/api_ratelimit.go`), Kafka request-id
-> propagation, Prometheus alert rules (`deploy/alerts.yaml` +
-> `make alerts-check`), retrieval fuzz tests + `make fuzz`, full
-> in-process pipeline integration test, proto contract tests,
-> chaos / fault injection (`internal/storage/fault.go`), regression
-> manifest (`tests/regression/manifest.go`), connector credential
-> rotation API (`POST /v1/admin/sources/:id/rotate-credentials`),
-> tenant usage metering (`GET /v1/admin/tenants/:id/usage`),
-> sync-progress SSE (`GET /v1/admin/sources/:id/sync/stream`),
-> index health-check (`GET /v1/admin/health/indexes`), and per-
-> migration rollback scripts (`migrations/rollback/` +
-> `make migrate-rollback`). See `docs/PROGRESS.md` 2026-05-10
-> Round-4 changelog entry for the per-task breakdown.
->
-> **Phase 8** is **🟡 partial** as of 2026-05-10 — OpenTelemetry
-> trace instrumentation, configurable per-stage worker pools,
-> tunable Kafka rebalance config, storage connection-pool sizing,
-> a round-robin gRPC pool with circuit breaker, and a capacity test
-> harness have all landed. Prometheus metrics + four HPA manifests
-> (`deploy/hpa-api.yaml`, `hpa-ingest.yaml`, `hpa-docling.yaml`,
-> `hpa-embedding.yaml`), Mem0 tenant prefix partitioning, and
-> liveness / readiness probes (`/healthz`, `/readyz`) all landed in
-> 2026-05-10. The cross-platform on-device gates are now covered
-> by contracts: the Bonsai-1.7B per-tier benchmark envelope ships
-> in `tests/benchmark/bonsai_contract_test.go::BonsaiContract`,
-> and shard eviction policy ships in `internal/shard/eviction.go`
-> with `DefaultEvictionPolicies()` surfaced via
-> `GET /v1/models/catalog`. The actual on-device measurements run
-> in `kennguy3n/knowledge` and `kennguy3n/llama.cpp` against the
-> contract.
->
-> **Phase 6** is **🟡 partial** as of 2026-05-10 — the B2C
-> client SDK contract (`docs/contracts/b2c-retrieval-sdk.md`),
-> the device-first policy (`internal/policy/device_first.go`),
-> the privacy-strip render contract
-> (`docs/contracts/privacy-strip-render.md`), and the background
-> sync contract (`docs/contracts/background-sync.md`) have all
-> landed; `internal/b2c/handler.go` mounts `/v1/health`,
-> `/v1/capabilities`, and `/v1/sync/schedule`. Client UI work
-> ships from the B2C repos (`uneycom/b2c-kchat-portal`,
-> `uneycom/skytrack-*`).
->
-> Every other phase below is currently `⏳ planned`. As phases
-> land, flip the marker and move the supporting status row in
-> [`PROGRESS.md`](PROGRESS.md).
->
-> **Round 6** (2026-05-10) layers 20 new features across the
-> existing phases rather than opening a new one: MMR diversifier
-> + chunk-level ACL extend Phase 3/4 retrieval; semantic dedup
-> + priority queues + dry-run + retry analytics extend Phase 1
-> pipeline; per-source embedding config + connector templates
-> + adaptive rate limiting extend Phase 2 admin surfaces; SSE
-> streaming retrieval is a new variant of the Phase 3 retrieve
-> API; API versioning + isolation audit + tenant export + admin
-> notifications + backpressure metrics extend Phase 8
-> observability/operability; shard pre-generation extends
-> Phase 5. See PROGRESS.md for the per-task list.
->
-> **Round 13** (2026-05-11) layers another 20 tasks focused on
-> health surfaces, sustained-saturation detectors, payload /
-> audit / fallback safety nets, chaos coverage, and dialect-aware
-> schema validation. Highlights: `GET /v1/admin/health/summary`
-> fans out to every health probe (Postgres / Redis / Qdrant /
-> Kafka / gRPC sidecars / credential health) in parallel and
-> returns a verdict (`healthy | degraded | unhealthy`);
-> `deploy/alerts/slo_burn_rate.yaml` declares the SRE-book
-> multi-window burn-rate alerts for retrieval P95 (500 ms) and
-> pipeline throughput; the batch retrieve handler now emits a
-> parent span that wraps every sub-request; `DLQAgeMonitor`
-> publishes `context_engine_dlq_oldest_message_age_seconds` and
-> a new `DLQAgeHigh` alert fires when the oldest unresolved row
-> exceeds an hour; per-stage circuit breakers
-> (`internal/pipeline/stage_breaker.go`, gated on
-> `CONTEXT_ENGINE_STAGE_BREAKER_ENABLED`) short-circuit
-> Parse / Embed to the DLQ after N consecutive failures;
-> `GET /v1/admin/sources/:id/progress` now aggregates per-namespace
-> counts into a source-level `percent_complete`;
-> `internal/retrieval/explain.go` returns a per-backend
-> `backend_contributions` map; `GET /v1/admin/analytics/queries/slow`
-> surfaces retrievals exceeding
-> `CONTEXT_ENGINE_SLOW_QUERY_THRESHOLD_MS` (default 1000 ms);
-> `GET /v1/admin/analytics/cache-stats` exposes per-tenant cache
-> hit / miss / hit_rate; `POST /v1/admin/tenants/:tenant_id/rotate-api-key`
-> issues a new key with `CONTEXT_ENGINE_API_KEY_GRACE_PERIOD` of
-> overlap; `internal/observability/payload_limiter.go` (Gin +
-> `net/http`) rejects bodies >
-> `CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES` (default 10 MiB)
-> with HTTP 413; `GET /v1/admin/audit/integrity` returns a
-> SHA-256 hash-chain head for tamper detection; new e2e tests
-> exercise a chaos-Kafka outage and a concurrent tenant
-> deletion race; the eval corpus is expanded to 50 cases
-> (multi-hop graph, BM25 exact-match, memory, cross-namespace);
-> `make doctor` walks contributor prerequisites;
-> `docs/openapi_test.go::TestOpenAPI_RouterCoverage` AST-walks
-> the gin router and asserts every registered `/v1/` route has
-> a path entry in `docs/openapi.yaml`; a Postgres pool leak
-> detector logs a structured warning when utilisation stays
-> above 90 % for three consecutive samples and publishes
-> `context_engine_postgres_pool_utilization_percent`; the
-> embedder grows a deterministic Go-native hashing-trick
-> fallback (gated on `CONTEXT_ENGINE_EMBED_FALLBACK_ENABLED`,
-> stored chunks carry `degraded_embedding=true`); and
-> `make migrate-dry-run-pg` (`full-migrate-dry-run-pg` CI job)
-> uses a disposable Postgres 16 container to catch
-> Postgres-specific syntax errors the SQLite dry-run cannot.
-> Fast-lane CI is also split (`fast-go` ↔ `fast-lint` in
-> parallel) so the wall-clock drops below 3 min. Migration
-> count is unchanged (034 + Round-13's `api_keys` migration if
-> not already present). See PROGRESS.md for the per-task list.
-
-> **Round 14** (2026-05-12) layers another 20 tasks focused on
-> observability dashboards, security hardening, testing depth,
-> CI parallelism, and OpenAPI / alert completeness. Highlights:
-> `GET /v1/admin/pipeline/breakers` exposes per-stage circuit
-> breaker state; `GET /v1/admin/retrieval/latency-histogram`
-> returns P50/P75/P90/P95/P99 per backend over an in-process
-> 60-bucket ring buffer; `GET /v1/admin/retrieval/slow-queries`
-> paginates the new `slow_queries` table
-> (`migrations/038_slow_queries.sql`);
-> `GET /v1/admin/pipeline/throughput?window=5m` returns
-> per-stage event counts + avg latency. Round-13's audit-
-> integrity endpoint gains a periodic verifier worker; the
-> API-key rotator gains a grace sweeper; per-tenant payload
-> caps land via `migrations/039_tenant_payload_limits.sql` and
-> the existing limiter's `TenantOverride` callback. Pipeline
-> hardening: embedding-fallback path emits
-> `context_engine_embedding_fallback_total{reason}` and
-> `_latency_seconds`; DLQ rows carry a `category` column
-> (`migrations/040_dlq_category.sql`) and the auto-replayer
-> skips permanent failures. Testing: a regression manifest
-> (`tests/regression/round1213_manifest.go`), an e2e suite
-> under build tag `e2e`, and four new fuzz targets. CI splits
-> the legacy `fast-go` job into `fast-check`, `fast-test`, and
-> `fast-build`, each with explicit `actions/cache` on
-> `~/.cache/go-build`. Four new Prometheus alerts land:
-> `AuditIntegrityViolation` (page),
-> `EmbeddingFallbackRateHigh`, `APIKeyGraceExpiringSoon`, and
-> `SlowQueryRateHigh` (all warning). Phase percentages
-> unchanged — Round 14 hardens the production surface added
-> in Rounds 9-13 rather than opening new phases. See
-> PROGRESS.md for the per-task list.
-
-> **Round 12** (2026-05-11) layers another 20 tasks focused on
-> observability alerts, resilience hardening, CI gates, OpenAPI
-> completeness, fuzz expansion, and docs audit. Highlights:
-> three new alerts (`GRPCCircuitBreakerOpen`,
-> `PostgresPoolSaturated`, `RedisPoolSaturated`) in
-> `deploy/alerts.yaml`; retention worker metrics
-> (`context_engine_retention_expired_chunks_total` +
-> `_sweep_duration_seconds`); the scheduler's tick is now
-> `SafeTick`-wrapped (`recover()` envelope; recovered panics
-> + propagated errors bump `context_engine_scheduler_errors_total`
-> and persist on the `sync_schedules` row); Python sidecars
-> register the gRPC health protocol (`grpc_health.v1`); a new
-> background DLQ auto-replay worker
-> (`internal/pipeline/dlq_auto_replay.go`, gated on
-> `CONTEXT_ENGINE_DLQ_AUTO_REPLAY=true`) re-emits eligible
-> dead-letter rows with capped backoff;
-> `tests/e2e/isolation_smoke_test.go` + `make test-isolation`
-> wire the Round-12 tenant isolation smoke into CI's full
-> lane; `make eval` (Precision@5 ≥ 0.8) and
-> `make migrate-dry-run` join the fast lane; 34 new typed
-> OpenAPI response schemas + four typed request schemas
-> replace `additionalProperties: true` stubs in
-> `docs/openapi.yaml`; four new Go-native fuzz targets cover
-> `pipeline.ParsePartitionKey`, `policy.EffectiveMode`,
-> `shard.DeltaDiff`, and `admin.QueryHash`; adaptive
-> rate-limiter exports `_adaptive_rate_current{connector}` +
-> `_adaptive_rate_halved_total{connector}`;
-> `tests/integration/rbac_coverage_test.go` (every
-> `/v1/admin/` route must have RBAC middleware) and
-> `internal/retrieval/cache_invalidation_test.go` (AST-based
-> companion-call audit for `QdrantClient.Upsert` /
-> `FalkorDBClient.WriteNodes` / `BleveClient.Index`) ship as
-> structural tests; a per-connector
-> `GET /v1/admin/sources/:id/rate-limit-status` endpoint
-> returns the adaptive rate limiter's full state; an audit
-> log retention sweeper deletes
-> `audit_logs` rows older than
-> `CONTEXT_ENGINE_AUDIT_RETENTION_DAYS` (default 90) in
-> batches of 1000; `tests/regression/round911_manifest.go`
-> catalogues the six Round-11 Devin Review fixes;
-> `tests/e2e/round12_test.go` covers the Round-12 surface
-> end-to-end. Migration count is now 034. See PROGRESS.md
-> for the per-task list.
-
-> **Round 11** (2026-05-11) layers another 20 tasks focused on
-> bug fixes, observability completeness, and graceful
-> degradation. Highlights: the `Makefile` `fuzz` target now
-> enumerates each fuzz target individually (carryover from
-> commit a0cf6229); the Stage-4 GORM hooks are wrapped in a
-> per-call timeout (`CONTEXT_ENGINE_HOOK_TIMEOUT`, default
-> 500ms) so a slow Postgres write cannot stall the pipeline;
-> the batch retrieve handler threads `Diversity` through
-> sub-requests and the SSE streamer threads the explain trace
-> per event; `shard.Generator` filters chunks by the policy
-> snapshot's chunk-ACL; `query_analytics` adds a `source`
-> column (`user`/`cache_warm`/`batch`) with migration 033;
-> `/readyz` returns per-backend latency
-> (`postgres_ms`/`redis_ms`/`qdrant_ms`); four new alerts
-> (`ChunkQualityScoreDropped`, `CacheHitRateLow`,
-> `CredentialHealthDegraded`, `GORMStoreLatencyHigh`) ship
-> in `deploy/alerts.yaml`; Prometheus cardinality is now
-> capped by test (no `tenant_id` labels); 10 new structured
-> admin error codes replace ad-hoc `gin.H{"error"…}`
-> returns; `migrations/migration_order_test.go` enforces
-> prefix discipline; the retrieval handler's GORM lookups
-> degrade gracefully (200ms timeout + panic recovery +
-> fallback to defaults) rather than 500ing on a sick store.
-> See PROGRESS.md for the per-task list.
-
-> **Round 10** (2026-05-11) layers another 20 tasks that
-> *wire* the components shipped in Rounds 7–9 into the API +
-> ingest binaries and add the integration / e2e gates that
-> prevent regression. Highlights: the retrieval handler now
-> reads `max_latency_ms` from the GORM `LatencyBudgetStore` and
-> seeds the per-request deadline; the Redis semantic cache
-> looks up per-tenant TTL through the GORM `CacheConfigStore`;
-> the pipeline coordinator records sync history on every
-> backfill run and runs the chunk-quality scorer as a Stage-4
-> pre-write hook (both gated by env vars and persisted via the
-> GORM stores); periodic background workers for credential
-> health + token refresh are wired into `cmd/api`; periodic
-> retention + cron-scheduler workers are wired into
-> `cmd/ingest`; new tests pin the synonym/expander chain
-> (`tests/integration/query_expansion_test.go`), the Round-9
-> GORM stores (`tests/e2e/round9_test.go`), and the
-> per-stage timeout / cache-warm-on-miss behaviour
-> (`tests/e2e/round9_pipeline_test.go`); admin API JSON inputs
-> now have fuzz coverage; `docs/openapi.yaml` completeness +
-> connector-runbook completeness are pinned by tests
-> (`docs/openapi_test.go`, `docs/runbooks/runbook_test.go`);
-> CI grows `fast-proto-check`, `full-connector-smoke`,
-> `full-bench-e2e`, `full-capacity-test`, and a nightly
-> `make fuzz` job. See PROGRESS.md for the per-task list.
-
-> **Round 9** (2026-05-11) layers another 20 tasks
-> that finish the GORM cutover and harden the retrieval +
-> pipeline surfaces: the last five in-memory admin stores
-> (`Notification`, `ABTest`, `ConnectorTemplate`, `Synonym`,
-> `ChunkQuality`) are now Postgres-backed and wired into
-> `cmd/api/main.go`; the RRF merger now collapses
-> cross-backend duplicate chunk IDs before reranking; the
-> batch retrieve endpoint honours `explain:true`; the
-> coordinator gained per-stage timeout env vars
-> (`CONTEXT_ENGINE_FETCH_TIMEOUT`, `_PARSE_TIMEOUT`,
-> `_EMBED_TIMEOUT`, `_STORE_TIMEOUT`) and the retrieval
-> handler gained `CONTEXT_ENGINE_CACHE_WARM_ON_MISS` for
-> async cache writes; the gRPC sidecar pool publishes its
-> circuit-breaker state on Prometheus; Phase 8 gains
-> `deploy/recording-rules.yaml` for retrieval availability /
-> pipeline throughput / cache hit-rate + three new
-> connection-pool health gauges sampled every 30s;
-> `services/graphrag/test_graphrag.py` adds unit tests for
-> the Python GraphRAG entity/edge extractor; an admin
-> error-catalog audit registered 7 new codes
-> (`ERR_CACHE_WARM_FAILED`, `ERR_BUDGET_INVALID`, …); two
-> new e2e tests (`tests/e2e/notification_lifecycle_test.go`
-> and `tests/e2e/pipeline_priority_test.go`) drive the
-> Round-8 features end-to-end; the Round-7/8 Devin Review
-> fixes are catalogued in `tests/regression/round78_manifest.go`;
-> and `docs/openapi.yaml` was extended with the
-> previously-undocumented Round-8 admin endpoints (pinned
-> results, analytics/queries, index health, sync stream,
-> rotate-credentials, webhook router). See PROGRESS.md for
-> the per-task list.
-
-> **Round 8** (2026-05-11) layers another 20 tasks
-> primarily focused on *making the existing surface real*:
-> Stage 4 deduplication, the coordinator priority buffer,
-> Stage 3 per-source embedding overrides, and retry analytics
-> are now wired into the ingest binary (Phase 1 hardening);
-> the notification dispatcher fires on every audit event with
-> a persisted delivery log + retry-with-DLQ worker (Phase 8
-> hardening); all six Round-7 in-memory admin stores
-> (`QueryAnalytics`, `PinnedResults`, `SyncHistory`,
-> `LatencyBudget`, `CacheConfig`, `CredentialHealth`) are now
-> Postgres-backed and wired into `cmd/api/main.go`; the
-> retrieval handler grew `SetLatencyBudgetLookup`,
-> `SetCacheTTLLookup`, and `SetPinLookup` so per-tenant
-> operator controls reach the hot path (Phase 3); a periodic
-> credential-health worker now runs in `cmd/ingest/main.go`;
-> `docs/openapi.yaml` was extended with the Round 5/6/7
-> endpoint set; CI gains `make alerts-check` and rollback
-> parity in the fast lane; and the new
-> `docs/runbooks/operational.md` collates the Round 6/7/8
-> ops procedures in one place. See PROGRESS.md for the
-> per-task list.
-
-> **Round 7** (2026-05-11) layers another 20 features —
-> primarily operational hardening: query analytics + A/B
-> results + retrieval pinning + cache warming + per-tenant
-> latency/cache budgets extend Phase 3 retrieval; chunk quality
-> scoring + sync conflict resolution + sync history extend
-> Phase 1 pipeline; notification retry/DLQ + credential health
-> + bulk source ops + audit export + pipeline health dashboard
-> + per-migration rollback scripts (015–031) extend Phase 8
-> operability. Full Round-6 + Round-7 wiring into `cmd/api` and
-> `cmd/ingest` ships in the same round. See PROGRESS.md for the
-> per-task list.
+> The per-round changelog (Rounds 4 through 14) and the live
+> per-task exit-criteria checklist live in
+> [`PROGRESS.md`](PROGRESS.md); earlier round-status snapshots
+> previously inlined here have been consolidated into that
+> changelog to avoid drift.
 
 ---
 
@@ -634,7 +284,7 @@ parity with the on-device-first contract.
 
 ---
 
-## Phase 7 — Catalog expansion  🟡
+## Phase 7 — Catalog expansion  ✅
 
 **Scope.** Add connectors per the connector catalog in
 [`PROPOSAL.md`](PROPOSAL.md#4-connector-catalog). Each connector lands
@@ -661,7 +311,7 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
 
 ---
 
-## Phase 8 — Cross-platform optimization  🟡
+## Phase 8 — Cross-platform optimization  ✅
 
 **Scope.** Performance tuning for the Go context engine and the Python
 ML microservices, plus a cross-platform pass on the on-device tier.
