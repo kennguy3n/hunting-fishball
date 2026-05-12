@@ -197,12 +197,17 @@ func connectorFromDLQ(r pipeline.DLQMessage) string {
 	return ""
 }
 
+// truncate caps s at n runes (not bytes) so the result is always
+// valid UTF-8 even when the cut falls inside a multi-byte
+// codepoint. Byte-level slicing would produce a replacement
+// character (U+FFFD) once the JSON encoder hits the split.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	rs := []rune(s)
+	if len(rs) <= n {
 		return s
 	}
 
-	return s[:n] + "…"
+	return string(rs[:n]) + "…"
 }
 
 func topErrors(counts map[string]int, k int) []DLQAnalyticsTopError {

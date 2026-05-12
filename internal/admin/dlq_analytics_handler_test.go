@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -155,5 +156,48 @@ func TestDLQAnalytics_TruncatesLongErrors(t *testing.T) {
 	}
 	if len(resp.TopErrors[0].ErrorText) > 220 {
 		t.Fatalf("expected truncated error text, got %d chars", len(resp.TopErrors[0].ErrorText))
+	}
+}
+
+// TestDLQAnalytics_TruncatesMultibyteUTF8 pins the regression
+// from Devin Review on c0846d0: byte-level truncation can split
+// a multi-byte UTF-8 codepoint and JSON-encode the result with
+// U+FFFD (REPLACEMENT CHARACTER). The fix is a rune-level cut.
+//
+// The error string is built so that the 200th *byte* falls
+// inside the 3-byte UTF-8 sequence for U+4E2D (中). With a
+// byte-level slice the JSON response would contain "\ufffd";
+// with a rune-level cut it must be free of replacement chars.
+func TestDLQAnalytics_TruncatesMultibyteUTF8(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// 198 single-byte runes, then a 3-byte rune ('中'). Byte 198
+	// is the start of the 3-byte sequence, so byte 200 lands
+	// inside it.
+	mixed := strings.Repeat("a", 198) + "中" + strings.Repeat("中", 50)
+	store := &fakeAnalyticsStore{
+		rows: []pipeline.DLQMessage{
+			{ID: "1", TenantID: "t1", Category: pipeline.DLQCategoryUnknown, ErrorText: mixed, FailedAt: now.Add(-1 * time.Hour), Payload: []byte(`{}`)},
+		},
+	}
+	r := setupAnalyticsRouter(t, store, "t1", now)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/admin/dlq/analytics", nil))
+	if strings.Contains(w.Body.String(), `\ufffd`) || strings.ContainsRune(w.Body.String(), '\uFFFD') {
+		t.Fatalf("response contains U+FFFD; truncate split a multi-byte UTF-8 sequence: %s", w.Body.String())
+	}
+	var resp admin.DLQAnalyticsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.TopErrors) != 1 {
+		t.Fatalf("expected 1 top error, got %+v", resp.TopErrors)
+	}
+	if !utf8.ValidString(resp.TopErrors[0].ErrorText) {
+		t.Fatalf("truncated error text is not valid UTF-8: %q", resp.TopErrors[0].ErrorText)
+	}
+	// 200 runes + the trailing ellipsis.
+	if got := utf8.RuneCountInString(resp.TopErrors[0].ErrorText); got != 201 {
+		t.Fatalf("expected 201 runes (200 + ellipsis), got %d (%q)", got, resp.TopErrors[0].ErrorText)
 	}
 }
