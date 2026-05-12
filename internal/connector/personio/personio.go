@@ -37,6 +37,14 @@ const (
 	Name = "personio"
 
 	defaultBaseURL = "https://api.personio.de/v1"
+
+	// maxDeltaPages caps DeltaSync's inner pagination loop. With
+	// the page size of 200 enforced below this bounds a single
+	// sync at 10,000 changes, which is well above realistic
+	// per-window churn for any tenant and prevents a runaway
+	// loop if the server's pagination terminator is broken.
+	// Mirrors google_workspace's identical guard.
+	maxDeltaPages = 50
 )
 
 // Credentials is the JSON shape Validate / Connect expects.
@@ -393,48 +401,77 @@ func (p *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 
 		return nil, time.Now().UTC().Format(time.RFC3339), nil
 	}
-	q := url.Values{}
-	q.Set("updated_from", cursor)
-	q.Set("limit", "200")
-	resp, err := p.do(ctx, conn, http.MethodGet, "/company/employees?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: personio: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("personio: delta status=%d", resp.StatusCode)
-	}
-	var body struct {
-		Data []struct {
-			Attributes struct {
-				ID struct {
-					Value int64 `json:"value"`
-				} `json:"id"`
-				Status struct {
-					Value string `json:"value"`
-				} `json:"status"`
-			} `json:"attributes"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("personio: decode delta: %w", err)
-	}
-	changes := make([]connector.DocumentChange, 0, len(body.Data))
-	for _, e := range body.Data {
-		if e.Attributes.ID.Value == 0 {
-			continue
+	// Personio /company/employees pagination is offset-based.
+	// Walk every page in the window before advancing the cursor
+	// so we never silently drop changes past the first 200 rows.
+	const pageLimit = 200
+	var (
+		changes []connector.DocumentChange
+		offset  int
+		page    int
+	)
+	for page = 0; page < maxDeltaPages; page++ {
+		q := url.Values{}
+		q.Set("updated_from", cursor)
+		q.Set("limit", fmt.Sprintf("%d", pageLimit))
+		q.Set("offset", fmt.Sprintf("%d", offset))
+		resp, err := p.do(ctx, conn, http.MethodGet, "/company/employees?"+q.Encode(), nil)
+		if err != nil {
+			return nil, "", err
 		}
-		kind := connector.ChangeUpserted
-		if strings.EqualFold(e.Attributes.Status.Value, "inactive") {
-			kind = connector.ChangeDeleted
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+
+			return nil, "", fmt.Errorf("%w: personio: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
 		}
-		changes = append(changes, connector.DocumentChange{
-			Kind: kind,
-			Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: fmt.Sprintf("%d", e.Attributes.ID.Value)},
-		})
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+
+			return nil, cursor, fmt.Errorf("personio: delta status=%d", resp.StatusCode)
+		}
+		var body struct {
+			Data []struct {
+				Attributes struct {
+					ID struct {
+						Value int64 `json:"value"`
+					} `json:"id"`
+					Status struct {
+						Value string `json:"value"`
+					} `json:"status"`
+				} `json:"attributes"`
+			} `json:"data"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, "", fmt.Errorf("personio: decode delta: %w", err)
+		}
+		for _, e := range body.Data {
+			if e.Attributes.ID.Value == 0 {
+				continue
+			}
+			kind := connector.ChangeUpserted
+			if strings.EqualFold(e.Attributes.Status.Value, "inactive") {
+				kind = connector.ChangeDeleted
+			}
+			changes = append(changes, connector.DocumentChange{
+				Kind: kind,
+				Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: fmt.Sprintf("%d", e.Attributes.ID.Value)},
+			})
+		}
+		offset += len(body.Data)
+		// A short page (or empty page) means we've drained the
+		// updated_from window. Personio doesn't return a total,
+		// so this is the only terminator.
+		if len(body.Data) < pageLimit {
+			break
+		}
+	}
+	if page == maxDeltaPages {
+		// We filled the entire safety budget without seeing a
+		// short page. Surface the truncation instead of
+		// silently advancing the cursor.
+		return nil, cursor, fmt.Errorf("personio: delta exceeded %d pages (>%d changes); cursor not advanced", maxDeltaPages, maxDeltaPages*pageLimit)
 	}
 
 	return changes, time.Now().UTC().Format(time.RFC3339), nil

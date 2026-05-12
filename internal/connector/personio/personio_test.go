@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
@@ -221,6 +223,103 @@ func TestPersonio_DeltaSync_RateLimited(t *testing.T) {
 	_, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "employees"}, "2024-01-01T00:00:00Z")
 	if !errors.Is(err, connector.ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
+// TestPersonio_DeltaSync_PaginationAggregates pins the
+// offset-based pagination loop in DeltaSync. Personio's
+// /company/employees endpoint returns at most 200 rows per
+// page; the connector must walk every page in the
+// updated_from window before advancing the cursor, otherwise
+// any change past row 200 is silently dropped. This regresses
+// Devin Review's Round-17 finding on personio.go:396-440.
+func TestPersonio_DeltaSync_PaginationAggregates(t *testing.T) {
+	t.Parallel()
+	var (
+		page1Hits atomic.Int32
+		page2Hits atomic.Int32
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth", authHandler())
+	mux.HandleFunc("/company/employees", func(w http.ResponseWriter, r *http.Request) {
+		off := r.URL.Query().Get("offset")
+		limit := r.URL.Query().Get("limit")
+		updatedFrom := r.URL.Query().Get("updated_from")
+		// Bootstrap probe (?limit=1, no updated_from / offset) —
+		// keep it out of the pagination counters.
+		if updatedFrom == "" || limit == "1" {
+			_, _ = io.WriteString(w, `{"data":[]}`)
+
+			return
+		}
+		switch off {
+		case "", "0":
+			page1Hits.Add(1)
+			// Page 1: exactly 200 rows (the page-size limit) so
+			// the loop has to fetch a second page to learn the
+			// window has been drained.
+			var b strings.Builder
+			b.WriteString(`{"data":[`)
+			for i := 1; i <= 200; i++ {
+				if i > 1 {
+					b.WriteString(",")
+				}
+				// Mark every 10th row inactive so we also
+				// verify ChangeDeleted aggregation across pages.
+				status := "active"
+				if i%10 == 0 {
+					status = "inactive"
+				}
+				b.WriteString(fmt.Sprintf(
+					`{"attributes":{"id":{"value":%d},"status":{"value":%q}}}`,
+					i, status,
+				))
+			}
+			b.WriteString("]}")
+			_, _ = io.WriteString(w, b.String())
+		case "200":
+			page2Hits.Add(1)
+			// Page 2: 3 short rows — 1 active, 1 inactive,
+			// 1 with id=0 which must be skipped by the loop.
+			_, _ = io.WriteString(w, `{"data":[
+				{"attributes":{"id":{"value":201},"status":{"value":"active"}}},
+				{"attributes":{"id":{"value":202},"status":{"value":"inactive"}}},
+				{"attributes":{"id":{"value":0},"status":{"value":"active"}}}
+			]}`)
+		default:
+			t.Errorf("unexpected pagination offset=%q", off)
+			_, _ = io.WriteString(w, `{"data":[]}`)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := personio.New(personio.WithBaseURL(srv.URL), personio.WithHTTPClient(srv.Client()))
+	conn, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "employees"}, "2024-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if got := page1Hits.Load(); got != 1 {
+		t.Fatalf("page1 hit count: got %d want 1", got)
+	}
+	if got := page2Hits.Load(); got != 1 {
+		t.Fatalf("page2 hit count: got %d want 1", got)
+	}
+	// 200 from page 1 + 2 from page 2 (the id=0 row is dropped).
+	if got := len(changes); got != 202 {
+		t.Fatalf("aggregated change count: got %d want 202", got)
+	}
+	if cur == "" {
+		t.Fatal("cursor should be populated on success")
+	}
+	// Spot-check the inactive-on-page-2 mapping survives the
+	// cross-page aggregation.
+	last := changes[len(changes)-1]
+	if last.Ref.ID != "202" || last.Kind != connector.ChangeDeleted {
+		t.Fatalf("tail change: got %+v want id=202 deleted", last)
 	}
 }
 

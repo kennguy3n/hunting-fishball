@@ -34,6 +34,14 @@ import (
 // Name is the registry-visible connector name.
 const Name = "workday"
 
+// maxDeltaPages caps DeltaSync's inner pagination loop. With
+// the page size of 200 enforced below this bounds a single
+// sync at 10,000 changes, which is well above realistic
+// per-window churn for any tenant and prevents a runaway loop
+// if the server returns an inconsistent `total` field.
+// Mirrors google_workspace / personio's identical guard.
+const maxDeltaPages = 50
+
 // Credentials is the JSON shape Validate / Connect expects.
 type Credentials struct {
 	AccessToken string `json:"access_token"`
@@ -357,45 +365,76 @@ func (w *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 
 		return nil, ts, nil
 	}
-	q := url.Values{}
-	q.Set("Updated_From", cursor)
-	q.Set("limit", "200")
-	resp, err := w.do(ctx, conn, http.MethodGet, "/workers?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: workday: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("workday: delta status=%d", resp.StatusCode)
-	}
-	var body struct {
-		Data []struct {
-			ID            string `json:"id"`
-			Active        *bool  `json:"active"`
-			LastModified  string `json:"lastModifiedDateTime"`
-			TerminationOn string `json:"terminationDate"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("workday: decode delta: %w", err)
-	}
-	newestSeen := cursor
-	changes := make([]connector.DocumentChange, 0, len(body.Data))
-	for _, wk := range body.Data {
-		kind := connector.ChangeUpserted
-		if (wk.Active != nil && !*wk.Active) || wk.TerminationOn != "" {
-			kind = connector.ChangeDeleted
+	// Workday /workers pagination is offset-based and returns
+	// the full `total` row count on every page. Walk every page
+	// in the window before advancing the cursor so we never
+	// silently drop changes past the first 200 rows.
+	const pageLimit = 200
+	var (
+		changes    []connector.DocumentChange
+		newestSeen = cursor
+		offset     int
+		page       int
+	)
+	for page = 0; page < maxDeltaPages; page++ {
+		q := url.Values{}
+		q.Set("Updated_From", cursor)
+		q.Set("limit", fmt.Sprintf("%d", pageLimit))
+		q.Set("offset", fmt.Sprintf("%d", offset))
+		resp, err := w.do(ctx, conn, http.MethodGet, "/workers?"+q.Encode(), nil)
+		if err != nil {
+			return nil, "", err
 		}
-		changes = append(changes, connector.DocumentChange{
-			Kind: kind,
-			Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: wk.ID},
-		})
-		if wk.LastModified > newestSeen {
-			newestSeen = wk.LastModified
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+
+			return nil, "", fmt.Errorf("%w: workday: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
 		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+
+			return nil, cursor, fmt.Errorf("workday: delta status=%d", resp.StatusCode)
+		}
+		var body struct {
+			Data []struct {
+				ID            string `json:"id"`
+				Active        *bool  `json:"active"`
+				LastModified  string `json:"lastModifiedDateTime"`
+				TerminationOn string `json:"terminationDate"`
+			} `json:"data"`
+			Total int `json:"total"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, "", fmt.Errorf("workday: decode delta: %w", err)
+		}
+		for _, wk := range body.Data {
+			kind := connector.ChangeUpserted
+			if (wk.Active != nil && !*wk.Active) || wk.TerminationOn != "" {
+				kind = connector.ChangeDeleted
+			}
+			changes = append(changes, connector.DocumentChange{
+				Kind: kind,
+				Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: wk.ID},
+			})
+			if wk.LastModified > newestSeen {
+				newestSeen = wk.LastModified
+			}
+		}
+		offset += len(body.Data)
+		// Two terminators: `total` (when the server populates
+		// it) and a short page (when the server omits or
+		// under-reports total). Either is sufficient.
+		if len(body.Data) == 0 || (body.Total > 0 && offset >= body.Total) || len(body.Data) < pageLimit {
+			break
+		}
+	}
+	if page == maxDeltaPages {
+		// Loop filled the entire safety budget without a
+		// terminator. Surface the truncation instead of
+		// silently advancing the cursor.
+		return nil, cursor, fmt.Errorf("workday: delta exceeded %d pages (>%d changes); cursor not advanced", maxDeltaPages, maxDeltaPages*pageLimit)
 	}
 
 	return changes, newestSeen, nil

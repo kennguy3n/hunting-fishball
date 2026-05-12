@@ -18,6 +18,7 @@
 package googleworkspace
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,54 @@ import (
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 )
+
+// isRateLimited reports whether resp represents a Google
+// Workspace throttle response. The Admin SDK signals rate
+// limiting with either HTTP 429 (canonical) or HTTP 403 whose
+// JSON body carries `error.errors[].reason` of
+// "userRateLimitExceeded", "quotaExceeded", or
+// "rateLimitExceeded". A plain HTTP 403 with a different
+// reason (e.g. "forbidden", "insufficientPermissions") is a
+// genuine authorisation error and must propagate as a hard
+// failure — wrapping it as ErrRateLimited would silently
+// trigger backoff instead of surfacing the OAuth/scope issue.
+//
+// As a side effect, when this helper inspects the 403 body it
+// re-buffers resp.Body via bytes.NewReader so callers that
+// still want to read it (e.g. for error messages) can. Callers
+// retain responsibility for closing resp.Body.
+func isRateLimited(resp *http.Response) bool {
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusForbidden:
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return false
+		}
+		// Restore the body so the caller's status-not-OK
+		// branch can still include it in the error message.
+		resp.Body = io.NopCloser(bytes.NewReader(raw))
+		var body struct {
+			Error struct {
+				Errors []struct {
+					Reason string `json:"reason"`
+				} `json:"errors"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return false
+		}
+		for _, e := range body.Error.Errors {
+			switch e.Reason {
+			case "userRateLimitExceeded", "quotaExceeded", "rateLimitExceeded":
+				return true
+			}
+		}
+	}
+
+	return false
+}
 
 const (
 	// Name is the registry-visible connector name.
@@ -134,7 +183,7 @@ func (g *Connector) Connect(ctx context.Context, cfg connector.ConnectorConfig) 
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if isRateLimited(resp) {
 		return nil, fmt.Errorf("%w: google_workspace: status=%d", connector.ErrRateLimited, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -225,7 +274,7 @@ func (it *principalIterator) fetchPage(ctx context.Context) bool {
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if isRateLimited(resp) {
 		it.err = fmt.Errorf("%w: google_workspace: list %s status=%d", connector.ErrRateLimited, it.ns.ID, resp.StatusCode)
 
 		return false
@@ -305,7 +354,7 @@ func (g *Connector) FetchDocument(ctx context.Context, c connector.Connection, r
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if isRateLimited(resp) {
 		return nil, fmt.Errorf("%w: google_workspace: fetch status=%d", connector.ErrRateLimited, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -388,7 +437,7 @@ func (g *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 			return nil, "", err
 		}
 		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if isRateLimited(resp) {
 			return nil, "", fmt.Errorf("%w: google_workspace: bootstrap status=%d", connector.ErrRateLimited, resp.StatusCode)
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -423,7 +472,7 @@ func (g *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		if err != nil {
 			return nil, "", err
 		}
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if isRateLimited(resp) {
 			_ = resp.Body.Close()
 
 			return nil, "", fmt.Errorf("%w: google_workspace: delta status=%d", connector.ErrRateLimited, resp.StatusCode)

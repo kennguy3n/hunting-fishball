@@ -307,6 +307,89 @@ func TestGoogleWorkspace_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+// TestGoogleWorkspace_DeltaSync_403QuotaExceededMappedToRateLimited
+// pins that an HTTP 403 carrying the canonical Admin SDK
+// `userRateLimitExceeded` reason is wrapped as
+// connector.ErrRateLimited (and therefore picked up by the
+// adaptive rate limiter). This regresses Devin Review's
+// Round-17 finding on google_workspace.go:426 — Google's
+// primary quota signal is 403 + reason, not 429.
+func TestGoogleWorkspace_DeltaSync_403QuotaExceededMappedToRateLimited(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	calls := 0
+	mux.HandleFunc("/users", func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			// Bootstrap auth probe (maxResults=1) must succeed.
+			_, _ = io.WriteString(w, `{"users":[]}`)
+
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{
+			"error": {
+				"code": 403,
+				"message": "Quota exceeded",
+				"errors": [{"reason": "userRateLimitExceeded", "domain": "usageLimits", "message": "Quota exceeded"}]
+			}
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := googleworkspace.New(googleworkspace.WithBaseURL(srv.URL), googleworkspace.WithHTTPClient(srv.Client()))
+	conn, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	_, _, err = c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "users"}, "2024-01-01T00:00:00Z")
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("403 userRateLimitExceeded must wrap as ErrRateLimited; got %v", err)
+	}
+}
+
+// TestGoogleWorkspace_DeltaSync_403ForbiddenNotRateLimited
+// pins the negative branch: a genuine HTTP 403 (e.g. revoked
+// OAuth grant or missing scope) must surface as a hard
+// failure, not as a rate-limit signal. Otherwise the adaptive
+// limiter would silently back off forever on a permission
+// error that the user needs to fix.
+func TestGoogleWorkspace_DeltaSync_403ForbiddenNotRateLimited(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	calls := 0
+	mux.HandleFunc("/users", func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			_, _ = io.WriteString(w, `{"users":[]}`)
+
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{
+			"error": {
+				"code": 403,
+				"message": "Insufficient Permission",
+				"errors": [{"reason": "insufficientPermissions", "domain": "global", "message": "Insufficient Permission"}]
+			}
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := googleworkspace.New(googleworkspace.WithBaseURL(srv.URL), googleworkspace.WithHTTPClient(srv.Client()))
+	conn, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	_, _, err = c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "users"}, "2024-01-01T00:00:00Z")
+	if err == nil {
+		t.Fatal("403 insufficientPermissions must surface as an error")
+	}
+	if errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("403 insufficientPermissions must NOT wrap as ErrRateLimited; got %v", err)
+	}
+}
+
 func TestGoogleWorkspace_SubscribeNotSupported(t *testing.T) {
 	t.Parallel()
 	c := googleworkspace.New()

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
@@ -245,6 +247,115 @@ func TestWorkday_DeltaSync_RateLimited(t *testing.T) {
 	_, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "workers"}, "2024-01-01T00:00:00Z")
 	if !errors.Is(err, connector.ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
+// TestWorkday_DeltaSync_PaginationAggregates pins the
+// offset-based pagination loop in DeltaSync. Workday's
+// /workers endpoint returns at most 200 rows per page and a
+// `total` row count; the connector must walk every page in
+// the Updated_From window before advancing the cursor, or
+// else any change past row 200 with a lastModifiedDateTime
+// <= the truncated page's newest entry is silently skipped on
+// the next sync. This regresses Devin Review's Round-17
+// finding on workday.go:360-401.
+func TestWorkday_DeltaSync_PaginationAggregates(t *testing.T) {
+	t.Parallel()
+	const total = 203
+	var (
+		page1Hits atomic.Int32
+		page2Hits atomic.Int32
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/workers", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("Updated_From") == "" {
+			// Bootstrap probe — keep out of pagination counters.
+			_, _ = io.WriteString(w, `{"data":[],"total":0}`)
+
+			return
+		}
+		off := q.Get("offset")
+		switch off {
+		case "", "0":
+			page1Hits.Add(1)
+			// Page 1: exactly 200 rows so the loop must hit the
+			// server again. Every 10th row is terminated to also
+			// verify ChangeDeleted aggregation across pages.
+			var b strings.Builder
+			b.WriteString(`{"data":[`)
+			for i := 1; i <= 200; i++ {
+				if i > 1 {
+					b.WriteString(",")
+				}
+				active := "true"
+				term := ""
+				if i%10 == 0 {
+					active = "false"
+					term = `,"terminationDate":"2024-06-15T00:00:00Z"`
+				}
+				b.WriteString(fmt.Sprintf(
+					`{"id":"W%d","active":%s,"lastModifiedDateTime":"2024-06-%02dT00:00:00Z"%s}`,
+					i, active, (i%28)+1, term,
+				))
+			}
+			b.WriteString(fmt.Sprintf(`],"total":%d}`, total))
+			_, _ = io.WriteString(w, b.String())
+		case "200":
+			page2Hits.Add(1)
+			// Page 2: 3 short rows. Includes a newer
+			// lastModifiedDateTime than anything on page 1 to
+			// pin that newestSeen is tracked across pages.
+			_, _ = io.WriteString(w, fmt.Sprintf(
+				`{"data":[
+					{"id":"W201","active":true,"lastModifiedDateTime":"2024-06-29T00:00:00Z"},
+					{"id":"W202","active":false,"lastModifiedDateTime":"2024-06-30T00:00:00Z","terminationDate":"2024-06-30T00:00:00Z"},
+					{"id":"W203","active":true,"lastModifiedDateTime":"2024-07-01T00:00:00Z"}
+				],"total":%d}`, total))
+		default:
+			t.Errorf("unexpected pagination offset=%q", off)
+			_, _ = io.WriteString(w, `{"data":[],"total":0}`)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := workday.New(workday.WithHTTPClient(srv.Client()))
+	conn, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL)})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	changes, newCur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "workers"}, "2024-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if got := page1Hits.Load(); got != 1 {
+		t.Fatalf("page1 hit count: got %d want 1", got)
+	}
+	if got := page2Hits.Load(); got != 1 {
+		t.Fatalf("page2 hit count: got %d want 1", got)
+	}
+	if got := len(changes); got != total {
+		t.Fatalf("aggregated change count: got %d want %d", got, total)
+	}
+	// newestSeen must reflect the page-2 newest row, not page 1.
+	if newCur != "2024-07-01T00:00:00Z" {
+		t.Fatalf("cursor: got %q want 2024-07-01T00:00:00Z", newCur)
+	}
+	last := changes[len(changes)-1]
+	if last.Ref.ID != "W203" {
+		t.Fatalf("tail change: got %+v want id=W203", last)
+	}
+	// Verify a deleted row from page 2 made it into the slice.
+	var sawW202Deleted bool
+	for _, ch := range changes {
+		if ch.Ref.ID == "W202" && ch.Kind == connector.ChangeDeleted {
+			sawW202Deleted = true
+
+			break
+		}
+	}
+	if !sawW202Deleted {
+		t.Fatal("expected ChangeDeleted for terminated worker W202 (page 2)")
 	}
 }
 
