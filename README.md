@@ -1,90 +1,24 @@
 # hunting-fishball
 
-> **Status.** Phases 0, 1, 2, 3, 4, 5, 6 (server-side), 7, and 8
-> are in `main` (all 🟡 partial — see
-> [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live checklist).
-> Round 6 (this PR) layers retrieval diversity (MMR), semantic
-> deduplication, per-source embedding model selection, query
-> expansion, chunk-level ACL, adaptive rate limiting, SSE
-> streaming retrieval, API versioning, pipeline retry analytics,
-> and 11 more admin surfaces on top of those phases.
-> Phase 1 brings the Google Drive + Slack connectors, the Go Kafka
-> consumer, the 4-stage pipeline (fetch / parse / embed / store), the
-> `POST /v1/retrieve` API, and a docker-compose CI smoke test.
-> **Phase 2** brings the admin source-management API
-> (`internal/admin/`), per-tenant Kafka partition-key routing, the
-> backfill-vs-steady pipeline (`pipeline.IngestEvent.SyncMode`), the
-> per-source Redis token-bucket rate limiter, source-health tracking,
-> and the forget-on-removal worker.
-> Phase 3 brings the four-backend retrieval fan-out (vector + BM25 +
-> graph + memory), the RRF merger and lightweight reranker, the
-> Redis semantic cache, the three Python ML microservices (Docling,
-> embedding, Mem0), Go ↔ Python integration tests, throughput /
-> latency benchmarks, and the
-> [cutover plan](docs/CUTOVER.md). **Phase 4** brings the policy
-> framework (`internal/policy/`): privacy modes
-> (`no-ai`/`local-only`/`local-api`/`hybrid`/`remote`), allow/deny
-> ACL evaluation, and recipient policy — all wired into the retrieval
-> handler via a `PolicyResolver` port — plus the policy simulator
-> (what-if retrieval, data-flow diff, conflict detection), draft
-> isolation with audited promotion (`policy.promoted` /
-> `policy.rejected` audit events), and structured `privacy_strip`
-> enrichment on every retrieval row. The admin HTTP surface lives at
-> `/v1/admin/policy/{drafts,simulate,conflicts}`.
-> **Phase 5 (server-side)** brings the on-device shard contract:
-> the manifest API (`GET /v1/shards/:tenant_id`), the policy-aware
-> generation worker, the delta sync protocol
-> (`GET /v1/shards/:tenant_id/delta?since=<v>`), the shard
-> coverage endpoint (`GET /v1/shards/:tenant_id/coverage`), the
-> client `ShardClientContract` interface
-> (`internal/shard/contract.go`) consumed by the iOS / Android /
-> desktop runtimes, the per-tier eviction policy
-> (`internal/shard/eviction.go`), and the cryptographic-forgetting
-> orchestrator (`DELETE /v1/tenants/:tenant_id/keys`) — all in
-> `internal/shard/`. The Bonsai-1.7B model catalog
-> (q4_0 / q8_0 / fp16) ships in `internal/models/` with
-> `GET /v1/models/catalog`. Per-platform contracts live in
-> [`docs/contracts/`](docs/contracts/).
-> **Phase 6 (server-side)** brings the B2C client SDK bootstrap
-> (`internal/b2c/`): `GET /v1/health`, `GET /v1/capabilities`, and
-> `GET /v1/sync/schedule`. The device-first policy
-> (`internal/policy/device_first.go`) returns a
-> `prefer_local` / `local_shard_version` / `prefer_local_reason`
-> hint on every `RetrieveResponse`. Per-platform render and
-> background-sync contracts live in
-> [`docs/contracts/`](docs/contracts/).
-> **Phase 7** brings ten new connectors (SharePoint, OneDrive,
-> Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab, Microsoft
-> Teams), bringing the production catalog to 12, plus per-connector
-> ops runbooks (`docs/runbooks/`) and an end-to-end smoke suite
-> (`tests/e2e/connector_smoke_test.go`,
-> `make test-connector-smoke`).
-> **Phase 8** brings OpenTelemetry tracing
-> (`internal/observability/`), per-stage worker pools
-> (`pipeline.StageConfig`), tunable Kafka rebalance, storage
-> connection-pool sizing, a round-robin gRPC pool with circuit
-> breaker (`internal/grpcpool/`), a capacity test harness
-> (`tests/capacity/`, `make capacity-test`), Prometheus metrics
-> + Gin middleware (`internal/observability/metrics.go`),
-> four HPA manifests (`deploy/`), Mem0 tenant-prefix
-> partitioning (`services/memory/memory_server.py::tenant_prefix`),
-> liveness / readiness probes (`/healthz`, `/readyz`), and an
-> end-to-end retrieval P95 budget enforcer
-> (`tests/benchmark/p95_e2e_test.go` for the Phase 1 round-trip,
-> `tests/benchmark/p95_retrieval_test.go` for the stricter Phase 3
-> retrieval-only budget; `make bench-e2e`). 2026-05-10 also wired
-> structured JSON logging through both binaries via
-> `internal/observability/logger.go` (with `GinLoggerMiddleware`
-> on the authed `cmd/api` route group; `cmd/ingest` uses
-> `slog.SetDefault` since it serves probes via `net/http`),
-> the DLQ observer (`internal/pipeline/dlq_observer.go`), and the
-> 5-step `TenantDeleter` workflow
-> (`internal/admin/tenant_delete.go`,
-> `DELETE /v1/admin/tenants/:tenant_id`) backed by
-> `migrations/008_tenant_status.sql`. The channel
-> `deny_local_retrieval` flag is now end-to-end
-> (`migrations/007_channel_deny_local.sql`).
-> The product thesis lives in
+> **Status (2026-05-12, post-Round-14).** Phases 0-3 and 7-8 are
+> **functionally complete** in `main`; Phases 4-6 are
+> **server-side complete** with only client-side rendering left in
+> external repos. See [`docs/PROGRESS.md`](docs/PROGRESS.md) for
+> the live checklist and the Round-by-round changelog below.
+> Migration count is at **040**. Round 14 layers observability
+> dashboards (stage breakers, latency histogram, slow-query
+> persistence, pipeline throughput), payload-schema validation,
+> the audit-integrity background worker, the API-key grace
+> sweeper, per-tenant payload caps, embedding-fallback metrics,
+> DLQ categorisation, four new Prometheus alerts, a regression
+> manifest + e2e suite + four fuzz targets, OpenAPI completeness
+> through the Round-13/14 surface, and a CI fast-lane split into
+> `fast-check` / `fast-test` / `fast-build` (with per-job
+> `actions/cache` on `~/.cache/go-build`). See the Round-14
+> additions block below for the per-task breakdown.
+>
+> Per-phase detail lives in [`docs/PROGRESS.md`](docs/PROGRESS.md)
+> and [`docs/PHASES.md`](docs/PHASES.md); the product thesis is in
 > [`docs/PROPOSAL.md`](docs/PROPOSAL.md) and the target system
 > design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -949,8 +883,14 @@ hunting-fishball/
 │   │                          # NDCG) + GET /v1/admin/eval/run
 │   ├── errors/                # Round-4 Task 7: structured error
 │   │                          # catalog + Gin middleware
-│   └── migrate/               # Phase 8: SQL migration runner backed
-│                              # by schema_migrations (AUTO_MIGRATE)
+│   ├── migrate/               # Phase 8: SQL migration runner backed
+│   │                          # by schema_migrations (AUTO_MIGRATE)
+│   └── util/                  # Internal helper packages shared by
+│                              # admin + audit handlers (Round-12).
+│                              # util/strutil holds the cursor /
+│                              # pagination helpers that both
+│                              # /v1/admin/audit and the admin list
+│                              # endpoints reuse.
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
@@ -964,7 +904,8 @@ hunting-fishball/
 │   ├── graphrag/              # Round-4 Task 2: GraphRAG gRPC server
 │   ├── memory/                # Mem0 gRPC server + Dockerfile
 │   └── gen_protos.sh          # regenerates _proto/ from proto/
-├── migrations/                # SQL migrations (audit_logs, ...)
+├── migrations/                # SQL migrations 001..040 + per-migration
+│                              # *.down.sql rollbacks (Round-4 Task 20)
 │   └── rollback/              # Round-4 Task 20: per-migration
 │                              # *.down.sql, applied via
 │                              # `make migrate-rollback`
@@ -1048,19 +989,37 @@ landed) is documented in
   Architectural changes land here *before* the code change in the relevant
   service repository (`ai-agent-platform`, `ai-agent-context-engine`,
   `ai-agent-desktop`, `knowledge`, etc.).
-- **CI lanes.** CI is split into a fast lane and a full lane (see
+- **CI lanes.** CI is split into a fast lane, a full lane, and a
+  nightly lane (see
   [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
-  - **Fast lane** (gofmt, vet, golangci-lint, race+cover unit tests, build,
-    Python services unit tests) runs on every PR push and is required for
-    merge. Branch protection should require the `Required CI (fast lane)`
-    aggregator check.
-  - **Full lane** (proto-gen check, e2e smoke against the docker-compose
-    stack, Go ↔ Python integration with the heavy ML images) runs on:
-    push to `main`, PRs labelled `full-ci` (or `run-integration` for the
-    integration job only), the nightly `27 6 * * *` cron, and manual
-    `workflow_dispatch`. Add the label when a PR touches the storage
-    plane, the gRPC contracts, or anything else that the fast lane can't
-    cover.
+  - **Fast lane** runs on every PR push and is required for merge.
+    Round 14 (Task 15) split the legacy `fast-go` job into three
+    parallel sub-jobs so the unit-test step no longer serialises
+    the build. The full fast-lane roster is:
+    `fast-check` (gofmt + vet),
+    `fast-test` (race + cover),
+    `fast-build` (cmd/ binaries),
+    `fast-lint` (golangci-lint v2.5.0),
+    `fast-eval` (golden corpus),
+    `fast-alerts` (Prometheus alert/recording-rule YAML),
+    `fast-rollback-parity` (migration ↔ rollback parity),
+    `fast-migrate-dry-run` (SQLite dry-run),
+    `fast-proto-check` (proto-gen drift), and
+    `fast-python` (Python services unit tests). Each Go fast-lane
+    job restores `~/.cache/go-build` via `actions/cache` (Round
+    14 Task 16). Branch protection should require the single
+    aggregator job — `Required CI (fast lane)` (`fast-required`)
+    — which is the only check `needs:` every fast-lane job.
+  - **Full lane** (`full-proto-gen`, `full-e2e`, `full-integration`,
+    `full-connector-smoke`, `full-bench-e2e`, `full-capacity-test`,
+    `full-migrate-dry-run-pg`) runs on push to `main`, PRs
+    labelled `full-ci` (or `run-integration` for the integration
+    job only), the nightly cron, and manual `workflow_dispatch`.
+    Add the label when a PR touches the storage plane, the gRPC
+    contracts, or anything else the fast lane can't cover.
+  - **Nightly lane** (`nightly-fuzz`) runs `make fuzz` on the
+    `27 6 * * *` cron so panics surface within 24 hours without
+    blocking PR turnaround.
 ---
 
 ## Related repositories

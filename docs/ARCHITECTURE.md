@@ -829,6 +829,14 @@ hunting-fishball/
 │   │                          # (DLQ consumer → Prometheus counter
 │   │                          # context_engine_dlq_messages_total +
 │   │                          # structured per-envelope logging)
+│   ├── util/                  # internal helper packages shared by
+│   │                          # the admin + audit handlers. Round-12
+│   │                          # carved `util/strutil` (cursor /
+│   │                          # pagination helpers) out of the
+│   │                          # `internal/admin/pagination.go` and
+│   │                          # `internal/audit/handler.go` call
+│   │                          # sites so both packages decode the
+│   │                          # same opaque cursor envelope.
 │   └── admin/                 # see Phase 2 / 4 entries. Phase 5 /
 │                              # Task E16 added tenant_delete.go:
 │                              # 5-step TenantDeleter workflow + the
@@ -894,9 +902,33 @@ hunting-fishball/
 │   │                          # table powering the cron scheduler
 │   ├── 014_tenant_usage.sql   # Round-4 Task 17: tenant_usage
 │   │                          # daily rollup table
+│   ├── 015..037_*.sql         # Rounds 5-13 admin / pipeline /
+│   │                          # retrieval surface: query analytics +
+│   │                          # source (033), pinned results,
+│   │                          # connector templates, synonyms,
+│   │                          # notification delivery log, latency
+│   │                          # + chunk-quality + cache-config,
+│   │                          # sync history + schedules, audit
+│   │                          # retention, slow query analytics,
+│   │                          # api_keys (037)
+│   ├── 038_slow_queries.sql   # Round-14 Task 3: persisted slow
+│   │                          # retrievals (tenant_id, latency_ms,
+│   │                          # created_at indexes)
+│   ├── 039_tenant_payload_limits.sql # Round-14 Task 8: per-tenant
+│   │                          # payload-cap overrides for the
+│   │                          # observability/payload_limiter.go
+│   │                          # TenantOverride callback
+│   ├── 040_dlq_category.sql   # Round-14 Task 14: category column
+│   │                          # (transient | permanent | unknown)
+│   │                          # for dlq_messages; auto-replayer
+│   │                          # skips permanent rows
 │   └── rollback/              # Round-4 Task 20: per-migration
 │                              # *.down.sql, applied via
-│                              # `make migrate-rollback`
+│                              # `make migrate-rollback`. Parity
+│                              # with the forward set is enforced
+│                              # by `migrations/migration_order_test.go`
+│                              # (Round-11 Task 14) and
+│                              # `rollback/rollback_test.go`.
 ├── tests/
 │   ├── e2e/                   # docker-compose smoke test
 │   │                          # (build tag: //go:build e2e)
@@ -931,13 +963,35 @@ hunting-fishball/
 │                              # hpa-embedding.yaml — each targets the
 │                              # CPU + custom Prometheus metric for
 │                              # its deployment
+├── scripts/                   # contributor / CI helper scripts.
+│                              # `doctor.sh` (Round-13 Task 16) walks
+│                              # the prereq checklist (Go ≥ 1.25,
+│                              # Docker, docker-compose, Python 3.11+,
+│                              # protoc, golangci-lint, e2e env vars)
+│                              # for `make doctor`; `migrate-dry-run-pg.sh`
+│                              # (Round-13 Task 20) launches a
+│                              # disposable Postgres 16 container and
+│                              # replays every up + rollback migration
+│                              # in lexical order to catch PG-specific
+│                              # syntax the SQLite dry-run misses.
 ├── docker-compose.yml         # local dev: Postgres / Redis / Kafka /
 │                              # Qdrant / FalkorDB / Docling /
 │                              # embedding / memory
 ├── Makefile                   # build / test / vet / lint / proto-gen /
-│                              # test-e2e / test-integration / bench
-├── .github/workflows/ci.yml   # CI: vet / test / lint / proto-gen /
-│                              # e2e / services-unit / integration
+│                              # test-e2e / test-integration / bench /
+│                              # eval / alerts-check / migrate-dry-run /
+│                              # doctor / fuzz / capacity-test
+├── .github/workflows/ci.yml   # CI fast lane (fast-check, fast-test,
+│                              # fast-build, fast-lint, fast-eval,
+│                              # fast-alerts, fast-rollback-parity,
+│                              # fast-migrate-dry-run, fast-proto-check,
+│                              # fast-python) gated by the
+│                              # `fast-required` aggregator + full lane
+│                              # (full-proto-gen, full-e2e,
+│                              # full-integration, full-connector-smoke,
+│                              # full-bench-e2e, full-capacity-test,
+│                              # full-migrate-dry-run-pg) + nightly
+│                              # `nightly-fuzz`.
 ├── go.mod
 └── go.sum
 ```
