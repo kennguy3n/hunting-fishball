@@ -87,7 +87,22 @@ type SummaryComponent struct {
 	Status    SummaryStatus `json:"status"`
 	LatencyMS int64         `json:"latency_ms"`
 	Error     string        `json:"error,omitempty"`
-	CheckedAt time.Time     `json:"checked_at"`
+	// Message is the operator-actionable note returned by
+	// probes that opt in to the MessageProbe interface
+	// (Round-19 Task 27). Usually paired with
+	// SummaryStatusDegraded.
+	Message   string    `json:"message,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+// MessageProbe is the optional extension of SummaryProbe that
+// returns an operator-actionable message alongside the status.
+// The aggregator queries LastMessage after Check. Probes that
+// don't implement this interface leave SummaryComponent.Message
+// blank. Round-19 Task 27.
+type MessageProbe interface {
+	SummaryProbe
+	LastMessage() string
 }
 
 // HealthSummaryResponse is the JSON shape returned by
@@ -174,6 +189,11 @@ func (h *HealthSummaryHandler) Run(ctx context.Context) HealthSummaryResponse {
 				default:
 					row.Status = SummaryStatusHealthy
 				}
+			}
+			// Round-19 Task 27 — surface an operator-actionable
+			// message from probes that opt in.
+			if mp, ok := p.(MessageProbe); ok {
+				row.Message = mp.LastMessage()
 			}
 			results[i] = row
 		}(i, p)

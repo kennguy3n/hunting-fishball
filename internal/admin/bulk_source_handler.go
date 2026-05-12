@@ -33,10 +33,27 @@ const (
 	BulkSourceActionPause      BulkSourceAction = "pause"
 	BulkSourceActionResume     BulkSourceAction = "resume"
 	BulkSourceActionDisconnect BulkSourceAction = "disconnect"
+	// Round-19 Task 25 — re-index + rotate-credentials surfaces.
+	BulkSourceActionReindex     BulkSourceAction = "reindex"
+	BulkSourceActionRotateCreds BulkSourceAction = "rotate-credentials"
 )
 
-// BulkSourceMutator narrows SourceRepository to the three actions
-// the bulk handler needs.
+// BulkSourceReindexer enqueues a re-index job for one source.
+// The admin re-index orchestrator (Round-12) satisfies this
+// interface; tests inject a fake. Round-19 Task 25.
+type BulkSourceReindexer interface {
+	EnqueueReindex(ctx context.Context, tenantID, sourceID string) error
+}
+
+// BulkSourceCredRotator triggers a credentials-rotation flow for
+// one source. The source-credentials handler (Round-5) satisfies
+// this interface; tests inject a fake. Round-19 Task 25.
+type BulkSourceCredRotator interface {
+	RotateCredentials(ctx context.Context, tenantID, sourceID string) error
+}
+
+// BulkSourceMutator narrows SourceRepository to the actions the
+// bulk handler needs.
 type BulkSourceMutator interface {
 	Update(ctx context.Context, tenantID, id string, patch UpdatePatch) (*Source, error)
 	MarkRemoving(ctx context.Context, tenantID, id string) (*Source, error)
@@ -44,8 +61,10 @@ type BulkSourceMutator interface {
 
 // BulkSourceHandler is the admin HTTP surface.
 type BulkSourceHandler struct {
-	repo  BulkSourceMutator
-	audit AuditWriter
+	repo      BulkSourceMutator
+	audit     AuditWriter
+	reindexer BulkSourceReindexer
+	rotator   BulkSourceCredRotator
 }
 
 // NewBulkSourceHandler validates inputs.
@@ -57,6 +76,24 @@ func NewBulkSourceHandler(repo BulkSourceMutator, aw AuditWriter) (*BulkSourceHa
 		aw = noopAudit{}
 	}
 	return &BulkSourceHandler{repo: repo, audit: aw}, nil
+}
+
+// WithReindexer wires the bulk handler to the admin re-index
+// orchestrator so the `reindex` action can be served. Round-19
+// Task 25.
+func (h *BulkSourceHandler) WithReindexer(r BulkSourceReindexer) *BulkSourceHandler {
+	h.reindexer = r
+
+	return h
+}
+
+// WithCredRotator wires the bulk handler to the source-credentials
+// rotation flow so the `rotate-credentials` action can be served.
+// Round-19 Task 25.
+func (h *BulkSourceHandler) WithCredRotator(r BulkSourceCredRotator) *BulkSourceHandler {
+	h.rotator = r
+
+	return h
 }
 
 // Register mounts POST /v1/admin/sources/bulk.
@@ -99,6 +136,16 @@ func (h *BulkSourceHandler) bulk(c *gin.Context) {
 	}
 	switch req.Action {
 	case BulkSourceActionPause, BulkSourceActionResume, BulkSourceActionDisconnect:
+	case BulkSourceActionReindex:
+		if h.reindexer == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "reindex action not configured"})
+			return
+		}
+	case BulkSourceActionRotateCreds:
+		if h.rotator == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "rotate-credentials action not configured"})
+			return
+		}
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid action"})
 		return
@@ -155,6 +202,16 @@ func (h *BulkSourceHandler) apply(ctx context.Context, tenantID, sourceID string
 	case BulkSourceActionDisconnect:
 		_, err := h.repo.MarkRemoving(ctx, tenantID, sourceID)
 		return err
+	case BulkSourceActionReindex:
+		if h.reindexer == nil {
+			return errors.New("reindex not configured")
+		}
+		return h.reindexer.EnqueueReindex(ctx, tenantID, sourceID)
+	case BulkSourceActionRotateCreds:
+		if h.rotator == nil {
+			return errors.New("rotate-credentials not configured")
+		}
+		return h.rotator.RotateCredentials(ctx, tenantID, sourceID)
 	}
 	return errors.New("unsupported action")
 }
@@ -168,6 +225,10 @@ func (h *BulkSourceHandler) emit(ctx context.Context, tenantID, actor, sourceID 
 		auditAction = audit.ActionSourceResumed
 	case BulkSourceActionDisconnect:
 		auditAction = audit.ActionSourcePurged
+	case BulkSourceActionReindex:
+		auditAction = audit.ActionReindexRequested
+	case BulkSourceActionRotateCreds:
+		auditAction = audit.ActionSourceCredentialsRotated
 	}
 	_ = h.audit.Create(ctx, audit.NewAuditLog(
 		tenantID, actor, auditAction, "source", sourceID,

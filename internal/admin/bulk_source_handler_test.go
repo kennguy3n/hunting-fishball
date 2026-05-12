@@ -149,3 +149,106 @@ func TestBulkSourceHandler_EmptyOrTooMany(t *testing.T) {
 		t.Fatalf("empty expected 400; got %d", w.Code)
 	}
 }
+
+// -------------------------------------------------------------
+// Round-19 Task 25 — reindex + rotate-credentials surfaces.
+// -------------------------------------------------------------
+
+type fakeBulkReindexer struct {
+	mu   sync.Mutex
+	hits []string
+	err  error
+}
+
+func (f *fakeBulkReindexer) EnqueueReindex(_ context.Context, _, sourceID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hits = append(f.hits, sourceID)
+
+	return f.err
+}
+
+type fakeBulkRotator struct {
+	mu   sync.Mutex
+	hits []string
+	err  error
+}
+
+func (f *fakeBulkRotator) RotateCredentials(_ context.Context, _, sourceID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hits = append(f.hits, sourceID)
+
+	return f.err
+}
+
+func TestBulkSourceHandler_Reindex_Round19(t *testing.T) {
+	repo := newBulkRepo()
+	audr := &recordingAudit{}
+	reindexer := &fakeBulkReindexer{}
+	h, _ := admin.NewBulkSourceHandler(repo, audr)
+	h.WithReindexer(reindexer)
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set(audit.TenantContextKey, "ta"); c.Next() })
+	h.Register(r.Group("/"))
+	body := `{"action":"reindex","source_ids":["s1","s2"]}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sources/bulk", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	if len(reindexer.hits) != 2 {
+		t.Fatalf("expected 2 reindex hits, got %v", reindexer.hits)
+	}
+	if len(audr.logs) != 2 {
+		t.Fatalf("expected 2 audit rows, got %d", len(audr.logs))
+	}
+	for _, log := range audr.logs {
+		if log.Action != audit.ActionReindexRequested {
+			t.Fatalf("expected ActionReindexRequested, got %q", log.Action)
+		}
+	}
+}
+
+func TestBulkSourceHandler_RotateCredentials_Round19(t *testing.T) {
+	repo := newBulkRepo()
+	audr := &recordingAudit{}
+	rotator := &fakeBulkRotator{}
+	h, _ := admin.NewBulkSourceHandler(repo, audr)
+	h.WithCredRotator(rotator)
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set(audit.TenantContextKey, "ta"); c.Next() })
+	h.Register(r.Group("/"))
+	body := `{"action":"rotate-credentials","source_ids":["s1"]}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sources/bulk", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	if len(rotator.hits) != 1 {
+		t.Fatalf("expected 1 rotate hit, got %v", rotator.hits)
+	}
+	if len(audr.logs) != 1 || audr.logs[0].Action != audit.ActionSourceCredentialsRotated {
+		t.Fatalf("audit expected ActionSourceCredentialsRotated, got %+v", audr.logs)
+	}
+}
+
+func TestBulkSourceHandler_ReindexUnconfiguredFails(t *testing.T) {
+	repo := newBulkRepo()
+	h, _ := admin.NewBulkSourceHandler(repo, nil)
+	// no .WithReindexer called
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set(audit.TenantContextKey, "ta"); c.Next() })
+	h.Register(r.Group("/"))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sources/bulk", strings.NewReader(`{"action":"reindex","source_ids":["s1"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unconfigured reindex expected 400, got %d body=%s", w.Code, w.Body.String())
+	}
+}
