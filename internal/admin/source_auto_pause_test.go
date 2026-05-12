@@ -4,6 +4,7 @@ package admin_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +40,28 @@ func (f *fakeAutoPauseAuditWriter) Create(_ context.Context, log *audit.AuditLog
 	defer f.mu.Unlock()
 	f.called++
 	f.last = log
+
+	return nil
+}
+
+// flakyAutoPauseAuditWriter fails its first Create call when
+// failNext is set, then succeeds. Used to exercise the rollback
+// branch when audit persistence fails after PauseSource succeeds.
+type flakyAutoPauseAuditWriter struct {
+	mu       sync.Mutex
+	called   int
+	failNext bool
+}
+
+func (f *flakyAutoPauseAuditWriter) Create(_ context.Context, _ *audit.AuditLog) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called++
+	if f.failNext {
+		f.failNext = false
+
+		return errors.New("transient audit failure")
+	}
 
 	return nil
 }
@@ -138,6 +161,89 @@ func TestSourceAutoPauser_CooldownPreventsRepeatedPauses(t *testing.T) {
 	}
 	if pauser.called != 1 {
 		t.Fatalf("cooldown must suppress second pause, got %d", pauser.called)
+	}
+}
+
+func TestSourceAutoPauser_RetriesWhenPauseSourceFails(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	pauser := &fakeAutoPausePauser{err: errors.New("transient pause failure")}
+	writer := &fakeAutoPauseAuditWriter{}
+	p, err := admin.NewSourceAutoPauser(admin.SourceAutoPauseConfig{
+		WindowDuration:     time.Minute,
+		WindowBuckets:      4,
+		ErrorRateThreshold: 0.5,
+		MinSampleSize:      4,
+		PauseCooldown:      time.Hour,
+		Now:                func() time.Time { return now },
+	}, pauser, writer)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// First breach: PauseSource fails. We expect Record to surface
+	// the error AND to leave lastPaused unset so the next breach
+	// can retry — i.e. a failed pause must not consume the cooldown.
+	for i := 0; i < 4; i++ {
+		_ = p.Record(context.Background(), "t", "s", false)
+	}
+	if pauser.called != 1 {
+		t.Fatalf("first breach should attempt pause once, got %d", pauser.called)
+	}
+	if writer.called != 0 {
+		t.Fatalf("audit must not be written when PauseSource fails, got %d", writer.called)
+	}
+	// Second breach within cooldown should retry now that the
+	// failure is resolved.
+	pauser.mu.Lock()
+	pauser.err = nil
+	pauser.mu.Unlock()
+	for i := 0; i < 4; i++ {
+		_ = p.Record(context.Background(), "t", "s", false)
+	}
+	if pauser.called < 2 {
+		t.Fatalf("pause must be retried after a failed attempt, got %d", pauser.called)
+	}
+	if writer.called != 1 {
+		t.Fatalf("audit must be written exactly once on successful retry, got %d", writer.called)
+	}
+}
+
+func TestSourceAutoPauser_RetriesWhenAuditWriterFails(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	pauser := &fakeAutoPausePauser{}
+	writer := &flakyAutoPauseAuditWriter{}
+	p, err := admin.NewSourceAutoPauser(admin.SourceAutoPauseConfig{
+		WindowDuration:     time.Minute,
+		WindowBuckets:      4,
+		ErrorRateThreshold: 0.5,
+		MinSampleSize:      4,
+		PauseCooldown:      time.Hour,
+		Now:                func() time.Time { return now },
+	}, pauser, writer)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// First breach: PauseSource succeeds but the audit write
+	// fails. Without the pendingPause rollback, lastPaused would
+	// be stamped and the next breach would be suppressed for the
+	// full cooldown window. With the fix, the second breach
+	// retries the entire pause+audit pair.
+	writer.failNext = true
+	for i := 0; i < 4; i++ {
+		_ = p.Record(context.Background(), "t", "s", false)
+	}
+	if pauser.called != 1 {
+		t.Fatalf("first breach should pause once even if audit fails, got %d", pauser.called)
+	}
+	if writer.called != 1 {
+		t.Fatalf("audit must be attempted once on first breach, got %d", writer.called)
+	}
+	for i := 0; i < 4; i++ {
+		_ = p.Record(context.Background(), "t", "s", false)
+	}
+	if pauser.called < 2 || writer.called < 2 {
+		t.Fatalf("audit-write failure must not consume cooldown: pauser=%d writer=%d", pauser.called, writer.called)
 	}
 }
 

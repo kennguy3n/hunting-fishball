@@ -97,6 +97,12 @@ type autoPauseState struct {
 	cursor     int
 	cursorTime time.Time
 	lastPaused time.Time
+	// pendingPause guards against concurrent Record callers fanning
+	// out parallel PauseSource attempts while a pause is in flight.
+	// It is set under p.mu before the pause is attempted outside
+	// the lock and cleared once the attempt commits (success) or
+	// rolls back (failure).
+	pendingPause bool
 }
 
 type autoPauseBucket struct {
@@ -169,9 +175,12 @@ func (p *SourceAutoPauser) Record(ctx context.Context, tenantID, sourceID string
 	total, errs := p.windowTotalsLocked(state)
 	breach := total >= int64(p.cfg.MinSampleSize) && float64(errs)/float64(total) >= p.cfg.ErrorRateThreshold
 	cooled := state.lastPaused.IsZero() || now.Sub(state.lastPaused) >= p.cfg.PauseCooldown
-	shouldPause := breach && cooled
+	// pendingPause dedups concurrent Record callers so we never
+	// fan out parallel PauseSource attempts. lastPaused stays
+	// zero until the pause+audit pair fully commits.
+	shouldPause := breach && cooled && !state.pendingPause
 	if shouldPause {
-		state.lastPaused = now
+		state.pendingPause = true
 	}
 	p.mu.Unlock()
 
@@ -179,6 +188,10 @@ func (p *SourceAutoPauser) Record(ctx context.Context, tenantID, sourceID string
 		return nil
 	}
 	if err := p.pauser.PauseSource(ctx, tenantID, sourceID); err != nil {
+		p.mu.Lock()
+		state.pendingPause = false
+		p.mu.Unlock()
+
 		return err
 	}
 	meta := audit.JSONMap{
@@ -190,8 +203,16 @@ func (p *SourceAutoPauser) Record(ctx context.Context, tenantID, sourceID string
 	}
 	log := audit.NewAuditLog(tenantID, "system", audit.ActionSourceAutoPaused, "source", sourceID, meta, "")
 	if err := p.writer.Create(ctx, log); err != nil {
+		p.mu.Lock()
+		state.pendingPause = false
+		p.mu.Unlock()
+
 		return err
 	}
+	p.mu.Lock()
+	state.lastPaused = p.cfg.Now()
+	state.pendingPause = false
+	p.mu.Unlock()
 
 	return nil
 }
