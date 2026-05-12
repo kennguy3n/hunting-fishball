@@ -137,14 +137,14 @@ func TestS3_ListDocuments_Pagination(t *testing.T) {
 		}
 		call++
 		if r.URL.Query().Get("continuation-token") == "" {
-			fmt.Fprintf(w, `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>TOK</NextContinuationToken>`+
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>TOK</NextContinuationToken>`+
 				`<Contents><Key>a/1</Key><ETag>"e1"</ETag><LastModified>2024-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>`+
 				`<Contents><Key>a/2</Key><ETag>"e2"</ETag><LastModified>2024-01-02T00:00:00Z</LastModified><Size>2</Size></Contents>`+
 				`</ListBucketResult>`)
 
 			return
 		}
-		fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated>`+
+		_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated>`+
 			`<Contents><Key>a/3</Key><ETag>"e3"</ETag><LastModified>2024-01-03T00:00:00Z</LastModified><Size>3</Size></Contents>`+
 			`</ListBucketResult>`)
 	}))
@@ -178,7 +178,7 @@ func TestS3_ListDocuments_EmptyAndSingle(t *testing.T) {
 
 			return
 		}
-		fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+		_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
 	}))
 	defer srv.Close()
 
@@ -229,7 +229,7 @@ func TestS3_FetchDocument(t *testing.T) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Content-Length", "5")
 		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
-		fmt.Fprint(w, "hello")
+		_, _ = fmt.Fprint(w, "hello")
 	}))
 	defer srv.Close()
 
@@ -259,14 +259,14 @@ func TestS3_DeltaSync(t *testing.T) {
 			return
 		}
 		if r.URL.Query().Get("start-after") == "" {
-			fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated>`+
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated>`+
 				`<Contents><Key>a/1</Key><ETag>"e1"</ETag><LastModified>2024-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>`+
 				`<Contents><Key>a/2</Key><ETag>"e2"</ETag><LastModified>2024-01-02T00:00:00Z</LastModified><Size>2</Size></Contents>`+
 				`</ListBucketResult>`)
 
 			return
 		}
-		fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated>`+
+		_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated>`+
 			`<Contents><Key>a/3</Key><ETag>"e3"</ETag><LastModified>2024-01-03T00:00:00Z</LastModified><Size>3</Size></Contents>`+
 			`</ListBucketResult>`)
 	}))
@@ -315,7 +315,7 @@ func TestS3_SigV4_DeterministicSignature(t *testing.T) {
 
 			return
 		}
-		fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+		_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
 	}))
 	defer srv.Close()
 	c := s3.New(s3.WithHTTPClient(srv.Client()), s3.WithNow(func() time.Time { return now }))
