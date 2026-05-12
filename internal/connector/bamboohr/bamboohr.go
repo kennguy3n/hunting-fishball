@@ -34,6 +34,16 @@ import (
 // Name is the registry-visible connector name.
 const Name = "bamboohr"
 
+// isRateLimited returns true for HTTP statuses BambooHR uses to
+// signal throttling. The API documents 429 Too Many Requests,
+// but in practice many endpoints surface 503 Service Unavailable
+// as the primary back-pressure signal (with a Retry-After
+// header). We wrap both into connector.ErrRateLimited so the
+// adaptive_rate_limiter backs off on either.
+func isRateLimited(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable
+}
+
 // Credentials is the JSON shape Validate / Connect expects.
 type Credentials struct {
 	APIKey    string `json:"api_key"`
@@ -121,7 +131,7 @@ func (b *Connector) Connect(ctx context.Context, cfg connector.ConnectorConfig) 
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if isRateLimited(resp.StatusCode) {
 		return nil, fmt.Errorf("%w: bamboohr: status=%d", connector.ErrRateLimited, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -192,7 +202,7 @@ func (it *employeeIterator) fetch(ctx context.Context) bool {
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if isRateLimited(resp.StatusCode) {
 		it.err = fmt.Errorf("%w: bamboohr: list status=%d", connector.ErrRateLimited, resp.StatusCode)
 
 		return false
@@ -244,7 +254,7 @@ func (b *Connector) FetchDocument(ctx context.Context, c connector.Connection, r
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if isRateLimited(resp.StatusCode) {
 		return nil, fmt.Errorf("%w: bamboohr: fetch status=%d", connector.ErrRateLimited, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -312,7 +322,7 @@ func (b *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 			return nil, "", err
 		}
 		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if isRateLimited(resp.StatusCode) {
 			return nil, "", fmt.Errorf("%w: bamboohr: bootstrap status=%d", connector.ErrRateLimited, resp.StatusCode)
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -328,7 +338,7 @@ func (b *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		return nil, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if isRateLimited(resp.StatusCode) {
 		return nil, "", fmt.Errorf("%w: bamboohr: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {

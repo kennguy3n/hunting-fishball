@@ -39,6 +39,13 @@ import (
 // Name is the registry-visible connector name.
 const Name = "sitemap"
 
+// maxSitemapDepth bounds recursive expansion of <sitemapindex>
+// children to guard against cycles or pathologically deep
+// indices. The sitemaps.org protocol does not formally limit
+// nesting, but in practice indices are 1–2 levels deep; we allow
+// a generous 5 and refuse to recurse further.
+const maxSitemapDepth = 5
+
 // Credentials is the JSON shape Validate / Connect expects.
 type Credentials struct {
 	SitemapURLs []string `json:"sitemap_urls"`
@@ -189,7 +196,7 @@ func (it *sitemapIterator) Err() error {
 func (it *sitemapIterator) Close() error { return nil }
 
 func (it *sitemapIterator) fetch(ctx context.Context) bool {
-	entries, err := it.s.fetchEntries(ctx, it.conn, it.ns.ID)
+	entries, err := it.s.fetchEntries(ctx, it.conn, it.ns.ID, maxSitemapDepth)
 	if err != nil {
 		it.err = err
 
@@ -272,7 +279,7 @@ func (s *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if !ok {
 		return nil, "", errors.New("sitemap: bad connection type")
 	}
-	entries, err := s.fetchEntries(ctx, conn, ns.ID)
+	entries, err := s.fetchEntries(ctx, conn, ns.ID, maxSitemapDepth)
 	if err != nil {
 		return nil, "", err
 	}
@@ -317,8 +324,14 @@ func (s *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 }
 
 // fetchEntries downloads the sitemap and recursively expands
-// any nested <sitemap> entries (a sitemap-index file).
-func (s *Connector) fetchEntries(ctx context.Context, conn *connection, url string) ([]entry, error) {
+// any nested <sitemap> entries (a sitemap-index file). The depth
+// parameter bounds recursion to prevent unbounded expansion when
+// an index references itself (directly or via a cycle) or is
+// adversarially deep; callers pass maxSitemapDepth on first call.
+func (s *Connector) fetchEntries(ctx context.Context, conn *connection, url string, depth int) ([]entry, error) {
+	if depth <= 0 {
+		return nil, fmt.Errorf("sitemap: max recursion depth exceeded at %s", url)
+	}
 	resp, err := s.do(ctx, conn, url)
 	if err != nil {
 		return nil, err
@@ -349,7 +362,7 @@ func (s *Connector) fetchEntries(ctx context.Context, conn *connection, url stri
 	if err := xml.Unmarshal(raw, &idx); err == nil && len(idx.Sitemap) > 0 {
 		var all []entry
 		for _, sm := range idx.Sitemap {
-			child, err := s.fetchEntries(ctx, conn, sm.Loc)
+			child, err := s.fetchEntries(ctx, conn, sm.Loc, depth-1)
 			if err != nil {
 				return nil, err
 			}

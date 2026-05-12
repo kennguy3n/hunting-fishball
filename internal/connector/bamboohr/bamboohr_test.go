@@ -249,3 +249,43 @@ func TestBambooHR_SubscribeNotSupported(t *testing.T) {
 		t.Fatalf("expected ErrNotSupported, got %v", err)
 	}
 }
+
+// TestBambooHR_Connect_503MappedToRateLimited pins BambooHR's
+// idiosyncratic throttle signal: many endpoints return HTTP 503
+// (often with a Retry-After header) instead of 429. The
+// connector must wrap both into connector.ErrRateLimited so the
+// adaptive rate limiter backs off on either.
+func TestBambooHR_Connect_503MappedToRateLimited(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	c := bamboohr.New(bamboohr.WithBaseURL(srv.URL), bamboohr.WithHTTPClient(srv.Client()))
+	_, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited for 503, got %v", err)
+	}
+}
+
+// TestBambooHR_DeltaSync_503MappedToRateLimited covers the
+// hottest call path (DeltaSync's /v1/employees/changed) and
+// confirms the 503 wrapping flows through there as well.
+func TestBambooHR_DeltaSync_503MappedToRateLimited(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/employees/directory", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"employees":[]}`)
+	})
+	mux.HandleFunc("/v1/employees/changed", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := bamboohr.New(bamboohr.WithBaseURL(srv.URL), bamboohr.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	_, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "employees"}, "2024-01-01T00:00:00Z")
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited for 503, got %v", err)
+	}
+}

@@ -224,3 +224,46 @@ func TestSitemap_SubscribeNotSupported(t *testing.T) {
 		t.Fatalf("expected ErrNotSupported, got %v", err)
 	}
 }
+
+// TestSitemap_CyclicIndex_BoundedRecursion verifies that a
+// sitemapindex that references itself (or otherwise forms a
+// cycle) does not cause unbounded recursion. The depth guard in
+// fetchEntries should refuse further expansion and surface an
+// error well before the Go runtime's stack limits or any
+// httptest.Server connection limits are hit.
+func TestSitemap_CyclicIndex_BoundedRecursion(t *testing.T) {
+	t.Parallel()
+	var indexURL string
+	var hits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sitemap-index.xml", func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/xml")
+		// Self-referential: the index advertises itself as a child.
+		_, _ = io.WriteString(w, `<?xml version="1.0"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<sitemap><loc>`+indexURL+`</loc></sitemap>
+</sitemapindex>`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	indexURL = srv.URL + "/sitemap-index.xml"
+
+	c := sitemap.New(sitemap.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: credsFor(t, indexURL)})
+	// DeltaSync exercises fetchEntries directly and surfaces the
+	// recursion-guard error without paging.
+	_, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: indexURL}, "")
+	if err == nil {
+		t.Fatalf("expected recursion-depth error, got nil")
+	}
+	if !strings.Contains(err.Error(), "max recursion depth") {
+		t.Fatalf("expected recursion-depth error, got %v", err)
+	}
+	// Bounded by maxSitemapDepth = 5; we must have stopped well
+	// below an unbounded-recursion blow-up. Allow generous slack
+	// for the initial call + recursive expansions.
+	if hits == 0 || hits > 16 {
+		t.Fatalf("unexpected fetch count: %d (want bounded by depth guard)", hits)
+	}
+}
