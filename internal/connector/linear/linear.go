@@ -386,22 +386,50 @@ func (l *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 // `updatedAt` value seen on this call. Empty cursor on the first
 // call returns the current cursor without backfilling — matching
 // the DeltaSyncer contract.
+//
+// To honor the no-backfill contract we must bootstrap with the
+// single most-recently-updated issue (DESCENDING sort + first:1)
+// so newCursor represents "now". Linear's `orderBy: updatedAt`
+// defaults to ascending; `first: 50` on the first call would
+// return the 50 oldest-updated issues and newCursor would be the
+// 50th-oldest timestamp — possibly months stale, causing the next
+// call's `updatedAt > <stale>` filter to backfill nearly the
+// entire team's history as "changes".
+//
+// Subsequent calls (cursor != "") use ascending so the page
+// starts with the oldest unseen change, giving stable forward-only
+// cursor advancement under the GT filter.
 func (l *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
 		return nil, "", errors.New("linear: bad connection type")
 	}
-	filter := map[string]any{}
-	if cursor != "" {
-		filter["updatedAt"] = map[string]any{"gt": cursor}
-	}
-	q := `query($teamId: String!, $filter: IssueFilter) {
-		team(id: $teamId) {
-			issues(first: 50, filter: $filter, orderBy: updatedAt) {
-				nodes { id identifier updatedAt archivedAt }
+	var (
+		q    string
+		vars map[string]any
+	)
+	if cursor == "" {
+		q = `query($teamId: String!) {
+			team(id: $teamId) {
+				issues(first: 1, orderBy: updatedAt, sort: [{updatedAt: {order: Descending}}]) {
+					nodes { id identifier updatedAt archivedAt }
+				}
 			}
+		}`
+		vars = map[string]any{"teamId": ns.ID}
+	} else {
+		q = `query($teamId: String!, $filter: IssueFilter) {
+			team(id: $teamId) {
+				issues(first: 50, filter: $filter, orderBy: updatedAt) {
+					nodes { id identifier updatedAt archivedAt }
+				}
+			}
+		}`
+		vars = map[string]any{
+			"teamId": ns.ID,
+			"filter": map[string]any{"updatedAt": map[string]any{"gt": cursor}},
 		}
-	}`
+	}
 	var out struct {
 		Data struct {
 			Team struct {
@@ -422,7 +450,7 @@ func (l *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 			} `json:"extensions"`
 		} `json:"errors"`
 	}
-	if err := l.query(ctx, conn, q, map[string]any{"teamId": ns.ID, "filter": filter}, &out); err != nil {
+	if err := l.query(ctx, conn, q, vars, &out); err != nil {
 		return nil, "", err
 	}
 	if len(out.Errors) > 0 {

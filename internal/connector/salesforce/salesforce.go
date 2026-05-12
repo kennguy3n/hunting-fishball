@@ -361,6 +361,20 @@ func (s *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 // latest SystemModstamp seen. Empty cursor on first call returns
 // the current cursor without backfilling.
 //
+// To honor the no-backfill contract the bootstrap call (cursor
+// == "") issues `ORDER BY SystemModstamp DESC LIMIT 1` so
+// newCursor represents "now". Salesforce's /query endpoint caps
+// responses at 2000 records per page; without DESC+LIMIT 1 the
+// first call would return the 2000 oldest records and newCursor
+// would be the 2000th-oldest timestamp — years stale for any org
+// of meaningful size, causing the next call's `WHERE
+// SystemModstamp > <stale>` filter to backfill nearly the entire
+// dataset as "changes".
+//
+// Subsequent calls (cursor != "") use ascending order so the page
+// starts with the oldest unseen change, giving stable forward-only
+// cursor advancement under the GT filter.
+//
 // The cursor is round-tripped through platform-managed storage
 // between calls, so before interpolating it into the SOQL WHERE
 // clause we parse it as time.RFC3339 and re-format the parsed
@@ -373,15 +387,19 @@ func (s *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if !ok {
 		return nil, "", errors.New("salesforce: bad connection type")
 	}
-	soql := fmt.Sprintf("SELECT Id, SystemModstamp FROM %s", sanitiseSObject(ns.ID))
-	if cursor != "" {
+	var soql string
+	if cursor == "" {
+		soql = fmt.Sprintf("SELECT Id, SystemModstamp FROM %s ORDER BY SystemModstamp DESC LIMIT 1", sanitiseSObject(ns.ID))
+	} else {
 		ts, err := time.Parse(time.RFC3339, cursor)
 		if err != nil {
 			return nil, "", fmt.Errorf("%w: salesforce: cursor not RFC3339: %v", connector.ErrInvalidConfig, err)
 		}
-		soql += " WHERE SystemModstamp > " + ts.UTC().Format(time.RFC3339)
+		soql = fmt.Sprintf(
+			"SELECT Id, SystemModstamp FROM %s WHERE SystemModstamp > %s ORDER BY SystemModstamp ASC",
+			sanitiseSObject(ns.ID), ts.UTC().Format(time.RFC3339),
+		)
 	}
-	soql += " ORDER BY SystemModstamp ASC"
 	q := url.Values{}
 	q.Set("q", soql)
 	resp, err := s.do(ctx, conn, http.MethodGet, "/query?"+q.Encode(), nil)

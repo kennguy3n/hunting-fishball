@@ -323,6 +323,73 @@ func TestSalesforce_DeltaSync_RejectsTamperedCursor(t *testing.T) {
 	}
 }
 
+// TestSalesforce_DeltaSync_InitialCursorIsCurrent locks in that an
+// initial DeltaSync call (cursor == "") bootstraps the cursor from
+// the single most-recently-modified record, not the page of
+// oldest records. Salesforce's /query endpoint caps responses at
+// 2000 records per page; the previous SOQL was
+//
+//	SELECT Id, SystemModstamp FROM <SObject> ORDER BY SystemModstamp ASC
+//
+// which made newCursor the 2000th-oldest timestamp — years stale
+// for any org of meaningful size, causing the next call to backfill
+// nearly the entire dataset as "changes" via `WHERE SystemModstamp
+// > <stale>`. The DeltaSyncer contract says an empty cursor returns
+// the current cursor without backfilling.
+//
+// This test fails the regression by asserting:
+//  1. The outgoing SOQL contains `ORDER BY SystemModstamp DESC`.
+//  2. The outgoing SOQL contains `LIMIT 1`.
+//  3. The outgoing SOQL has NO `WHERE` clause on the bootstrap call.
+//  4. newCursor equals the most-recent record's SystemModstamp,
+//     even when only that single record is served by the mock.
+func TestSalesforce_DeltaSync_InitialCursorIsCurrent(t *testing.T) {
+	t.Parallel()
+	var seenSOQL []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/services/data/v59.0/limits", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/services/data/v59.0/query", func(w http.ResponseWriter, r *http.Request) {
+		soql := r.URL.Query().Get("q")
+		seenSOQL = append(seenSOQL, soql)
+		// Serve only the most-recent record — newCursor must equal
+		// its SystemModstamp, not a stale 2000th-oldest timestamp.
+		_, _ = w.Write([]byte(`{"done":true,"records":[{"Id":"latest","SystemModstamp":"2024-12-31T23:59:59Z"}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	s := salesforce.New(salesforce.WithHTTPClient(srv.Client()), salesforce.WithBaseURL(srv.URL))
+	conn, err := s.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL)})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	changes, cur, err := s.DeltaSync(context.Background(), conn, connector.Namespace{ID: "Account"}, "")
+	if err != nil {
+		t.Fatalf("DeltaSync initial: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("initial DeltaSync must not emit changes (empty cursor = bootstrap only), got %d", len(changes))
+	}
+	if cur != "2024-12-31T23:59:59Z" {
+		t.Fatalf("initial cursor must equal the most-recent record's SystemModstamp, got %q", cur)
+	}
+	if len(seenSOQL) == 0 {
+		t.Fatal("expected a SOQL query to be issued during bootstrap")
+	}
+	soql := seenSOQL[0]
+	if !strings.Contains(soql, "ORDER BY SystemModstamp DESC") {
+		t.Errorf("initial DeltaSync must ORDER BY SystemModstamp DESC to bootstrap from the most-recent record, got soql=%q", soql)
+	}
+	if !strings.Contains(soql, "LIMIT 1") {
+		t.Errorf("initial DeltaSync must LIMIT 1 so cursor reflects 'now', got soql=%q", soql)
+	}
+	if strings.Contains(soql, "WHERE") {
+		t.Errorf("initial DeltaSync must not send a WHERE clause (bootstrap = no pre-cursor backfill), got soql=%q", soql)
+	}
+}
+
 func TestSalesforce_Subscribe_NotSupported(t *testing.T) {
 	t.Parallel()
 	if _, err := salesforce.New().Subscribe(context.Background(), nil, connector.Namespace{}); !errors.Is(err, connector.ErrNotSupported) {

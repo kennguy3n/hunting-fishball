@@ -339,3 +339,85 @@ func TestLinear_DeltaSync_RateLimitedOn200(t *testing.T) {
 		t.Fatalf("expected ErrRateLimited from DeltaSync, got %v", err)
 	}
 }
+
+// TestLinear_DeltaSync_InitialCursorIsCurrent locks in that an
+// initial DeltaSync call (cursor == "") bootstraps the cursor
+// from the single most-recently-updated issue, not from the 50
+// oldest. The previous query used `issues(first: 50, orderBy:
+// updatedAt)` which defaults to ascending — newCursor became the
+// 50th-oldest timestamp (potentially months stale) so the next
+// call would backfill nearly the entire team's history as
+// "changes", violating the DeltaSyncer contract.
+//
+// This test fails the regression by asserting:
+//  1. The outgoing GraphQL query contains "Descending" (bootstrap
+//     must sort newest-first to grab the latest record).
+//  2. The outgoing query contains "first: 1" (bootstrap must not
+//     fetch 50 records).
+//  3. The outgoing query does NOT contain an "updatedAt" filter
+//     (bootstrap returns the current cursor, not pre-cursor history).
+//  4. newCursor equals the most-recently-updated issue's
+//     updatedAt — not an old timestamp from the back of the queue.
+func TestLinear_DeltaSync_InitialCursorIsCurrent(t *testing.T) {
+	t.Parallel()
+
+	var seenQueries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.Unmarshal(body, &req)
+		seenQueries = append(seenQueries, req.Query)
+		switch {
+		case strings.Contains(req.Query, "viewer"):
+			_, _ = w.Write([]byte(`{"data":{"viewer":{"id":"U1"}}}`))
+		case strings.Contains(req.Query, "issues"):
+			// Serve only the most-recently-updated issue — the cursor
+			// must equal its updatedAt, NOT a stale 50th-oldest value.
+			_, _ = w.Write([]byte(`{"data":{"team":{"issues":{"nodes":[{"id":"latest","identifier":"ENG-LATEST","updatedAt":"2024-12-31T23:59:59Z"}]}}}}`))
+		default:
+			http.Error(w, "no match", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	l := linear.New(linear.WithBaseURL(srv.URL), linear.WithHTTPClient(srv.Client()))
+	conn, err := l.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	changes, cur, err := l.DeltaSync(context.Background(), conn, connector.Namespace{ID: "T1"}, "")
+	if err != nil {
+		t.Fatalf("DeltaSync initial: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("initial DeltaSync must not emit changes (empty cursor = bootstrap only), got %d", len(changes))
+	}
+	if cur != "2024-12-31T23:59:59Z" {
+		t.Fatalf("initial cursor must equal the most-recently-updated issue's updatedAt, got %q", cur)
+	}
+
+	// Find the issues query (skip the viewer connectivity check).
+	var issuesQuery string
+	for _, q := range seenQueries {
+		if strings.Contains(q, "issues") {
+			issuesQuery = q
+
+			break
+		}
+	}
+	if issuesQuery == "" {
+		t.Fatal("expected an issues GraphQL query to be issued during bootstrap")
+	}
+	if !strings.Contains(issuesQuery, "Descending") {
+		t.Errorf("initial DeltaSync must sort Descending to bootstrap from the most-recently-updated issue, got query=%s", issuesQuery)
+	}
+	if !strings.Contains(issuesQuery, "first: 1") {
+		t.Errorf("initial DeltaSync must use first: 1 (not 50) so cursor reflects 'now', got query=%s", issuesQuery)
+	}
+	if strings.Contains(issuesQuery, "updatedAt") && strings.Contains(issuesQuery, "$filter") {
+		t.Errorf("initial DeltaSync must not send an updatedAt filter (bootstrap = no pre-cursor backfill), got query=%s", issuesQuery)
+	}
+}
