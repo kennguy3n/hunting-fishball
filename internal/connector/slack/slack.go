@@ -348,6 +348,11 @@ func (it *msgIterator) fetchPage(ctx context.Context) bool {
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		it.err = fmt.Errorf("%w: slack: conversations.history status=%d", connector.ErrRateLimited, resp.StatusCode)
+
+		return false
+	}
 
 	var body struct {
 		OK       bool   `json:"ok"`
@@ -367,6 +372,14 @@ func (it *msgIterator) fetchPage(ctx context.Context) bool {
 		return false
 	}
 	if !body.OK {
+		// Slack often signals rate-limit via OK=false with error="ratelimited"
+		// rather than HTTP 429. Surface that explicitly to the adaptive
+		// rate limiter.
+		if body.Error == "ratelimited" {
+			it.err = fmt.Errorf("%w: slack: conversations.history: %s", connector.ErrRateLimited, body.Error)
+
+			return false
+		}
 		it.err = fmt.Errorf("slack: conversations.history: %s", body.Error)
 
 		return false

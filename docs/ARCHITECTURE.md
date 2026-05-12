@@ -687,9 +687,18 @@ hunting-fishball/
 ├── internal/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces (DeltaSyncer / WebhookReceiver /
-│   │   │                      # Provisioner), process-global registry
-│   │   ├── googledrive/       # Google Drive connector (Phase 1)
+│   │   │                      # Provisioner), process-global registry.
+│   │   │                      # 20 connectors after Round 15.
+│   │   ├── googledrive/       # Google Drive connector (Phase 1) +
+│   │   │                      # shared_drives.go (Round 15) which
+│   │   │                      # registers google_shared_drives as a
+│   │   │                      # dedicated registry entry filtering
+│   │   │                      # out My Drive.
 │   │   ├── slack/             # Slack connector + Events API (Phase 1)
+│   │   ├── kchat/             # KChat internal chat (Round 15,
+│   │   │                      # Phase 1): channels/messages REST +
+│   │   │                      # /channels.changes delta cursor +
+│   │   │                      # HMAC-verified webhook handler.
 │   │   ├── sharepoint/        # SharePoint Online (Phase 7, Graph delta)
 │   │   ├── onedrive/          # OneDrive personal (Phase 7, Graph delta)
 │   │   ├── dropbox/           # Dropbox v2 (Phase 7, list_folder cursor)
@@ -699,8 +708,21 @@ hunting-fishball/
 │   │   ├── jira/              # Jira Cloud (Phase 7, JQL + webhooks)
 │   │   ├── github/            # GitHub issues / PRs (Phase 7, webhooks)
 │   │   ├── gitlab/            # GitLab issues (Phase 7, webhooks)
-│   │   └── teams/             # Microsoft Teams (Phase 7, Graph delta +
-│   │                          # change notifications)
+│   │   ├── teams/             # Microsoft Teams (Phase 7, Graph delta +
+│   │   │                      # change notifications)
+│   │   ├── s3/                # S3-compatible object storage (Round 15);
+│   │   │                      # stdlib AWS-style SigV4 signing in
+│   │   │                      # sigv4.go — no vendor SDK.
+│   │   ├── linear/            # Linear GraphQL (Round 15);
+│   │   │                      # updatedAt > delta filter + webhooks.
+│   │   ├── asana/             # Asana tasks (Round 15); modified_since
+│   │   │                      # delta cursor.
+│   │   ├── discord/           # Discord channel messages (Round 15);
+│   │   │                      # after=snowflake delta cursor.
+│   │   ├── salesforce/        # Salesforce SOQL (Round 15);
+│   │   │                      # SystemModstamp delta filter.
+│   │   └── hubspot/           # HubSpot CRM v3 (Round 15);
+│   │                          # hs_lastmodifieddate search delta.
 │   ├── credential/            # AES-256-GCM envelope encryption for
 │   │                          # connector credentials
 │   ├── audit/                 # AuditLog model, repository (transactional
@@ -2479,3 +2501,84 @@ schema validation.
   disk is `migrations/040_dlq_category.sql`. The `migrations/
   rollback/` directory mirrors every up-migration with a
   matching `.down.sql`.
+
+### Tech choices added in Round 15
+
+Round 15 expands the connector catalog from 12 to 20 entries
+and adds connector-completeness hardening. No new third-party
+dependencies are introduced; every new connector uses stdlib
+`net/http` against `httptest.NewServer` fixtures in unit tests.
+
+- **Connector catalog expansion (12 → 20).** Round 15 adds
+  eight new entries to the process-global registry:
+  - `kchat` — the missing Phase-1 internal chat connector
+    listed in PROPOSAL.md §4
+    (`internal/connector/kchat/kchat.go`).
+  - `s3` — S3-compatible object storage with stdlib AWS-style
+    SigV4 request signing
+    (`internal/connector/s3/{s3,sigv4}.go`). Works against AWS
+    S3, MinIO, Cloudflare R2, Backblaze B2, and Wasabi without
+    pulling the AWS SDK.
+  - `linear` — Linear GraphQL
+    (`internal/connector/linear/linear.go`) with HMAC-verified
+    webhook handler.
+  - `asana`, `discord`, `salesforce` (SOQL), `hubspot` (CRM v3)
+    — each implements `SourceConnector` + `DeltaSyncer`.
+  - `google_shared_drives` — a wrapper around the existing
+    `googledrive` connector
+    (`internal/connector/googledrive/shared_drives.go`) that
+    filters out My Drive so it presents a shared-drive-only
+    ingestion surface. The wrapper is registered as a separate
+    registry entry; the underlying `googledrive` connector is
+    unchanged.
+
+- **`connector.ErrRateLimited` sentinel.**
+  `internal/connector/source_connector.go` adds a new error
+  sentinel that every iterator wraps on HTTP 429 (and on
+  Slack's `ok=false, error=ratelimited` 200 variant). The
+  adaptive rate limiter in
+  `internal/connector/adaptive_rate.go` matches against
+  `errors.Is(err, connector.ErrRateLimited)` to react. A
+  process-global gate
+  (`internal/connector/audit_test.go`) fails CI if any
+  connector source drops the wrap.
+
+- **`googledrive` shared-drive pagination fix.**
+  `ListNamespaces` now follows `nextPageToken` to completion
+  instead of issuing a single `/drives?pageSize=100` request.
+  Workspaces with >100 shared drives previously dropped any
+  drive beyond the first page; the fix backfills them all.
+
+- **CI `concurrency:` group + `fast-connector-unit` lane.**
+  `.github/workflows/ci.yml` adds a workflow-level
+  `concurrency` block that cancels in-progress runs when a
+  new commit lands on the same PR. The new
+  `fast-connector-unit` job runs
+  `time go test -race -count=1 ./internal/connector/...` in
+  isolation so connector-only PRs get sub-30s feedback; the
+  `fast-required` aggregator gates it alongside the existing
+  fast-lane jobs.
+
+- **Round-15 e2e + regression + integration contract tests.**
+  `tests/e2e/round15_test.go` (build tag `e2e`) exercises the
+  registry count + full KChat lifecycle + 429 propagation.
+  `tests/regression/round1415_manifest.go` + `_test.go`
+  catalogue the Round-14/15 fixes; the meta-test asserts every
+  TestRef resolves to a real `func TestName(` on disk.
+  `tests/integration/connector_contract_test.go` (build tag
+  `integration`) is the compile-time + behaviour-time contract:
+  interface assertions per connector struct, empty-cursor
+  semantics for `DeltaSyncer`, panic-safety for
+  `WebhookReceiver`.
+
+- **Seven new per-connector runbooks.**
+  `docs/runbooks/{kchat,s3,linear,asana,discord,salesforce,hubspot}.md`
+  each cover the four required sections (credential rotation,
+  quota / rate-limit, outage detection / recovery, error
+  codes) enforced by `docs/runbooks/runbook_test.go`.
+  `google_shared_drives` reuses
+  `docs/runbooks/googledrive.md`.
+
+- **Migration count unchanged.** Round 15 introduces no new
+  schema migrations; the highest migration on disk remains
+  `migrations/040_dlq_category.sql`.

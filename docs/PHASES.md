@@ -16,7 +16,7 @@ phase.
 | 🟡 partial | Some exit criteria met; gaps tracked in `PROGRESS.md` |
 | ⏳ planned | Not yet started |
 
-> **Phase status snapshot (2026-05-12, post-Round-14).** Phases 0,
+> **Phase status snapshot (2026-05-12, post-Round-15).** Phases 0,
 > 1, 2, 3, 7, and 8 are **functionally complete** — every exit
 > criterion has shipped to `main` and the supporting tests /
 > runbooks / metrics are in place. Phases 7 and 8 carry the
@@ -30,13 +30,24 @@ phase.
 > `uneycom/skytrack-*`, `kennguy3n/knowledge`). See
 > [`PROGRESS.md`](PROGRESS.md) for the per-task status and
 > [`README.md`](../README.md) for the round-by-round changelog.
-> Round 14 hardens the production surface from Rounds 9-13 (admin
-> observability dashboards, payload validation, audit-integrity
-> worker, DLQ categorisation, four new Prometheus alerts, CI fast
-> lane split into `fast-check` / `fast-test` / `fast-build`).
-> Migration count is now 040.
 >
-> The per-round changelog (Rounds 4 through 14) and the live
+> **Round 15** expands the connector catalog from 12 to **20**
+> production connectors. KChat (the missing Phase-1 chat source)
+> ships, and seven Phase-2+ targets (S3-compatible object
+> storage, Linear, Asana, Discord, Salesforce, HubSpot, and
+> Google Shared Drives as a dedicated registry entry) land
+> alongside connector-completeness hardening (a process-global
+> audit, the new `connector.ErrRateLimited` sentinel, 7 new
+> per-connector runbooks). Round 14 hardens the production
+> surface from Rounds 9-13 (admin observability dashboards,
+> payload validation, audit-integrity worker, DLQ categorisation,
+> four new Prometheus alerts, CI fast lane split into
+> `fast-check` / `fast-test` / `fast-build`); Round 15 adds a
+> `fast-connector-unit` lane and a workflow-level `concurrency`
+> group that cancels stale runs. Migration count is unchanged at
+> 040.
+>
+> The per-round changelog (Rounds 4 through 15) and the live
 > per-task exit-criteria checklist live in
 > [`PROGRESS.md`](PROGRESS.md); earlier round-status snapshots
 > previously inlined here have been consolidated into that
@@ -293,21 +304,31 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
 **Exit criteria.**
 
 - [x] At least 12 production connectors at GA (Phase-1 target met).
-      Phase 1 (Google Drive, Slack) + Phase 7 (SharePoint, OneDrive,
+      Round 15 expands the catalog to **20**: Phase 1 (Google
+      Drive, Slack, KChat) + Phase 7 (SharePoint, OneDrive,
       Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab,
-      Microsoft Teams) = 12; each lives in
-      `internal/connector/<name>/` with `httptest`-backed unit tests.
+      Microsoft Teams) + Round-15 Phase-2+ adds (S3, Linear,
+      Asana, Discord, Salesforce, HubSpot, Google Shared Drives
+      as a dedicated registry entry) = **20**; each lives in
+      `internal/connector/<name>/` with `httptest`-backed unit
+      tests.
 - [x] Each connector has its own runbook for credential rotation,
       quota incidents, and outages — see `docs/runbooks/` (one
       Markdown file per connector keyed on the connector's auth
-      model and delta-cursor mechanism).
+      model and delta-cursor mechanism). `google_shared_drives`
+      reuses `docs/runbooks/googledrive.md`.
 - [x] Per-connector capability matrix in [`PROGRESS.md`](PROGRESS.md).
 - [x] Connector code path passes the same end-to-end smoke test that
       Phase 1 introduced — `tests/e2e/connector_smoke_test.go`
       (build tag `e2e`) drives Validate → Connect → ListNamespaces
       → ListDocuments → FetchDocument for every connector and
-      asserts the registry has exactly 12 entries.
+      asserts the registry has exactly 20 entries.
       `make test-connector-smoke`.
+- [x] Connector completeness audit (Round 15, Task 9):
+      `internal/connector/audit_test.go` is a process-global
+      gate that fails CI if any connector source drops
+      `ErrInvalidConfig`, `ErrNotSupported`, `ErrRateLimited`,
+      or `http.NewRequestWithContext`.
 
 ---
 

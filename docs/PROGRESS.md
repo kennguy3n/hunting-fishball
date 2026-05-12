@@ -226,11 +226,13 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 7 — Catalog expansion
 
-**Status.** ✅ shipped | ~100% — all 12 production connectors live, per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
+**Status.** ✅ shipped | ~100% — Round 15 expands the catalog from 12 → **20** production connectors (KChat, S3, Linear, Asana, Discord, Salesforce, HubSpot, Google Shared Drives added on top of the Round 14 set). Per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
 
 - [x] ≥ 12 production connectors at GA — Phase 1 (Google Drive,
-      Slack) + Phase 7 (SharePoint, OneDrive, Dropbox, Box, Notion,
-      Confluence, Jira, GitHub, GitLab, Microsoft Teams) = 12
+      Slack, KChat) + Phase 7 (SharePoint, OneDrive, Dropbox,
+      Box, Notion, Confluence, Jira, GitHub, GitLab, Microsoft
+      Teams) + Round-15 Phase-2+ adds (S3, Linear, Asana, Discord,
+      Salesforce, HubSpot, Google Shared Drives) = **20**
 - [x] Per-connector runbooks (`docs/runbooks/` —
       one Markdown file per connector covering credential rotation,
       quota / rate-limit incidents, outage detection / recovery, and
@@ -430,11 +432,97 @@ ships, the matrix is empty. Each row records:
 | GitHub       | ❌ | ✅ (issues / PRs) | ✅ (GitHub webhooks) | ✅ (`since` filter) | ❌ | 🟡 Phase 7 |
 | GitLab       | ❌ | ✅ (issues) | ✅ (GitLab webhooks) | ✅ (`updated_after`) | ❌ | 🟡 Phase 7 |
 | Microsoft Teams | ❌ | ✅ (channel messages) | ✅ (Graph change notifications) | ✅ (`messages/delta`) | ❌ | 🟡 Phase 7 |
+| KChat        | ✅ (workspace users via `/users.me`) | ✅ (channels + messages) | ✅ (KChat Events API with HMAC verification) | ✅ (`/channels.changes` cursor) | ❌ | ✅ Round-15 (Phase 1) |
+| S3-compatible | ❌ | ✅ (objects under bucket / prefix) | ❌ | ✅ (`start-after` key / last-modified filter) | ❌ | ✅ Round-15 (Phase 2+) |
+| Linear       | ✅ (`viewer` GraphQL) | ✅ (issues by team) | ✅ (Linear webhooks with HMAC) | ✅ (`updatedAt >` filter) | ❌ | ✅ Round-15 (Phase 2+) |
+| Asana        | ✅ (`/users/me`) | ✅ (tasks by project) | ❌ (poll) | ✅ (`modified_since`) | ❌ | ✅ Round-15 (Phase 2+) |
+| Discord      | ✅ (`/users/@me`) | ✅ (channel messages) | ❌ (Gateway out of scope) | ✅ (`after` snowflake cursor) | ❌ | ✅ Round-15 (Phase 2+) |
+| Salesforce   | ❌ | ✅ (SObject records via SOQL) | ❌ (Platform Events planned) | ✅ (`SystemModstamp` filter) | ❌ | ✅ Round-15 (Phase 2+) |
+| HubSpot      | ❌ | ✅ (CRM objects: contacts, companies, deals, tickets) | ❌ (planned) | ✅ (`hs_lastmodifieddate` search) | ❌ | ✅ Round-15 (Phase 2+) |
+| Google Shared Drives | ❌ | ✅ (files in shared drives only) | ❌ | ✅ (`changes.list` cursor with `supportsAllDrives`) | ❌ | ✅ Round-15 (Phase 2+) |
 
 ---
 
 ## Changelog
 
+- 2026-05-12: **Round 15: Connector catalog expansion — 12 → 20
+  production connectors. Tasks 1-8 add KChat (the missing
+  Phase-1 chat connector), S3-compatible object storage, Linear,
+  Asana, Discord, Salesforce, HubSpot, and a Google Shared
+  Drives registry entry that filters out My Drive. Tasks 9-10
+  add a connector-completeness audit + smoke-test pin at 20.
+  Tasks 11-13 add round15 e2e, round1415 regression manifest,
+  and an integration contract test. Tasks 14-15 add a
+  `fast-connector-unit` CI lane + `concurrency` group. Tasks
+  16-17 add 7 new runbooks + OpenAPI sweep. Tasks 18-20 refresh
+  PROGRESS / README / ARCHITECTURE / PHASES.**
+  - **Task 0 (CI audit)**: `.github/workflows/ci.yml` now has a
+    `concurrency` group that cancels in-progress runs when a
+    new commit lands on the same PR. The `fast-required`
+    aggregator gained `fast-connector-unit` in its `needs:`
+    list so the connector-only lane gates the same surface.
+  - **Tasks 1-7**: Eight new connectors live under
+    `internal/connector/kchat/`,
+    `internal/connector/s3/` (with `sigv4.go` for AWS-style
+    signing — no vendor SDK),
+    `internal/connector/linear/` (GraphQL),
+    `internal/connector/asana/`,
+    `internal/connector/discord/`,
+    `internal/connector/salesforce/` (SOQL),
+    `internal/connector/hubspot/` (CRM v3). Each implements
+    `SourceConnector` + `DeltaSyncer` (and `WebhookReceiver`
+    where the source supports it) with stdlib `net/http` and
+    httptest-backed unit tests.
+  - **Task 8**: `internal/connector/googledrive/shared_drives.go`
+    wraps the existing connector and registers
+    `google_shared_drives` — its `ListNamespaces` filters out
+    My Drive so the registry exposes the shared-drive surface
+    as a separate ingestion entity. `ListNamespaces` also now
+    paginates via `nextPageToken` so workspaces with >100
+    shared drives backfill in full.
+  - **Task 9**: `internal/connector/source_connector.go` adds
+    a new `ErrRateLimited` sentinel. Every connector iterator
+    (existing + new) wraps HTTP 429 (and Slack's
+    `ok=false, error=ratelimited` 200 variant) with
+    `fmt.Errorf("%w: …", connector.ErrRateLimited, …)` so the
+    adaptive rate limiter in `internal/connector/adaptive_rate.go`
+    can react. `internal/connector/audit_test.go` is a
+    process-global gate that fails CI if any connector source
+    drops the wrap.
+  - **Task 10**: `tests/e2e/connector_smoke_test.go` asserts
+    the registry has exactly 20 entries (was 12) and adds
+    per-connector smoke tests for the 8 new entries.
+  - **Tasks 11-13**: `tests/e2e/round15_test.go` covers
+    registry count + a full KChat lifecycle + 429 propagation
+    through iterators. `tests/regression/round1415_manifest.go`
+    + `_test.go` catalogue the 5 Round-14/15 fixes; the
+    meta-test asserts every TestRef resolves on disk.
+    `tests/integration/connector_contract_test.go` (build tag
+    `integration`) is the compile-time + behaviour-time
+    contract: interface assertions for every connector struct,
+    empty-cursor semantics for DeltaSyncer, panic-safety for
+    WebhookReceiver.
+  - **Tasks 14-15**: `fast-connector-unit` job runs `time go
+    test -race -count=1 ./internal/connector/...` in isolation
+    so connector-only PRs get sub-30s feedback. Concurrency
+    group `ci-${{ github.workflow }}-${{
+    github.event.pull_request.number || github.ref }}` cancels
+    stale runs. Existing fast-lane jobs already share `setup-go`
+    cache + `actions/cache` build-cache keys (Round-14 Task
+    16) — no additional changes needed.
+  - **Tasks 16-17**: `docs/runbooks/{kchat,s3,linear,asana,
+    discord,salesforce,hubspot}.md` — seven new runbooks each
+    covering credential rotation, quota / rate-limit incidents,
+    outage detection / recovery, and the common error-code
+    surface (enforced by `docs/runbooks/runbook_test.go`).
+    `google_shared_drives` reuses the existing
+    `docs/runbooks/googledrive.md`. OpenAPI surface unchanged
+    by Round 15 (no new HTTP endpoints).
+  - **Tasks 18-20**: This Changelog entry, capability matrix,
+    README banner, `ARCHITECTURE.md` §9 directory tree, and
+    `PHASES.md` Phase-7 status all updated to reflect the
+    20-connector catalog. Stale "12 connectors" references
+    swept.
 - 2026-05-12: **Round 14: Next 20 tasks — observability dashboards
   (stage breakers, latency histogram, slow-query persistence,
   pipeline throughput), payload schema validation, audit
