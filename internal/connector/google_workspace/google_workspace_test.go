@@ -219,6 +219,71 @@ func TestGoogleWorkspace_DeltaSync_SuspendedMappedToDeleted(t *testing.T) {
 	}
 }
 
+// TestGoogleWorkspace_DeltaSync_PaginationAggregates verifies
+// that DeltaSync walks the Admin SDK's nextPageToken chain and
+// returns every changed principal in a single call. Without the
+// inner pagination loop, only the first 200 results would be
+// emitted and the rest would be silently dropped because the
+// connector advances the cursor to time.Now() on success.
+func TestGoogleWorkspace_DeltaSync_PaginationAggregates(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	var page1, page2 int
+	mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		// Connect()'s cheap auth probe also lands here with
+		// maxResults=1; ignore it so the page counters only
+		// track the DeltaSync delta-path requests.
+		if r.URL.Query().Get("maxResults") == "1" {
+			_, _ = io.WriteString(w, `{"users":[]}`)
+
+			return
+		}
+		switch r.URL.Query().Get("pageToken") {
+		case "":
+			page1++
+			_, _ = io.WriteString(w, `{"users":[
+				{"id":"U1","primaryEmail":"alice@x"},
+				{"id":"U2","primaryEmail":"bob@x"}
+			],"nextPageToken":"p2"}`)
+		case "p2":
+			page2++
+			_, _ = io.WriteString(w, `{"users":[
+				{"id":"U3","primaryEmail":"carol@x"},
+				{"id":"U4","primaryEmail":"dan@x","suspended":true}
+			]}`)
+		default:
+			t.Fatalf("unexpected pageToken=%q", r.URL.Query().Get("pageToken"))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := googleworkspace.New(googleworkspace.WithBaseURL(srv.URL), googleworkspace.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "users"}, "2024-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if page1 != 1 || page2 != 1 {
+		t.Fatalf("expected exactly one hit on each page, got page1=%d page2=%d", page1, page2)
+	}
+	if len(changes) != 4 {
+		t.Fatalf("expected 4 aggregated changes across 2 pages, got %d: %+v", len(changes), changes)
+	}
+	got := []string{changes[0].Ref.ID, changes[1].Ref.ID, changes[2].Ref.ID, changes[3].Ref.ID}
+	want := []string{"U1", "U2", "U3", "U4"}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("change[%d].ID=%q want %q (full=%v)", i, got[i], want[i], got)
+		}
+	}
+	if changes[3].Kind != connector.ChangeDeleted {
+		t.Fatalf("expected U4 (suspended) to map to ChangeDeleted, got %v", changes[3].Kind)
+	}
+	if cur == "" {
+		t.Fatalf("expected non-empty cursor after pagination completes")
+	}
+}
+
 func TestGoogleWorkspace_DeltaSync_RateLimited(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

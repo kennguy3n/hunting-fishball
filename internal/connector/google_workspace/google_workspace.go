@@ -38,6 +38,14 @@ const (
 	defaultBaseURL  = "https://admin.googleapis.com/admin/directory/v1"
 	defaultCustomer = "my_customer"
 	defaultPageSize = 200
+	// maxDeltaPages caps the inner page-walk in DeltaSync so a
+	// runaway nextPageToken loop (or a backfill that legitimately
+	// exceeds 200*N changes in one window) cannot pin a worker
+	// indefinitely. 50 pages * 200 results = 10,000 changes per
+	// sync, which is well above any realistic per-window delta.
+	// Exceeding the cap surfaces an error rather than silently
+	// truncating results.
+	maxDeltaPages = 50
 )
 
 // Credentials is the JSON shape Validate / Connect expects.
@@ -389,64 +397,87 @@ func (g *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 
 		return nil, time.Now().UTC().Format(time.RFC3339), nil
 	}
-	q := url.Values{}
-	q.Set("customer", conn.customer)
-	q.Set("maxResults", fmt.Sprintf("%d", defaultPageSize))
-	if ns.ID == "users" {
-		// Admin SDK users.list accepts `query=email:* ...` for
-		// arbitrary filters; updatedMin is the canonical delta
-		// signal documented for the directory API.
-		q.Set("query", "email:* ")
-	}
-	q.Set("updatedMin", cursor)
-	resp, err := g.do(ctx, conn, http.MethodGet, "/"+ns.ID+"?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: google_workspace: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("google_workspace: delta status=%d", resp.StatusCode)
-	}
-	var body struct {
-		Users []struct {
-			ID           string `json:"id"`
-			PrimaryEmail string `json:"primaryEmail"`
-			Suspended    bool   `json:"suspended"`
-			CreationTime string `json:"creationTime"`
-		} `json:"users"`
-		Groups []struct {
-			ID    string `json:"id"`
-			Email string `json:"email"`
-		} `json:"groups"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("google_workspace: decode delta: %w", err)
-	}
-	changes := make([]connector.DocumentChange, 0, len(body.Users)+len(body.Groups))
-	if ns.ID == "users" {
-		for _, u := range body.Users {
-			kind := connector.ChangeUpserted
-			if u.Suspended {
-				kind = connector.ChangeDeleted
+	// Walk through every page tied to this updatedMin window.
+	// Admin SDK pagination is opaque (nextPageToken), so we
+	// aggregate inside a single DeltaSync call rather than
+	// encoding the token in the public cursor; the cursor stays
+	// a clean RFC3339 timestamp, matching the other change-since
+	// connectors (BambooHR / Workday / Personio).
+	var changes []connector.DocumentChange
+	pageToken := ""
+	for page := 0; page < maxDeltaPages; page++ {
+		q := url.Values{}
+		q.Set("customer", conn.customer)
+		q.Set("maxResults", fmt.Sprintf("%d", defaultPageSize))
+		if ns.ID == "users" {
+			// Admin SDK users.list accepts `query=email:* ...`
+			// for arbitrary filters; updatedMin is the canonical
+			// delta signal documented for the directory API.
+			q.Set("query", "email:* ")
+		}
+		q.Set("updatedMin", cursor)
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		resp, err := g.do(ctx, conn, http.MethodGet, "/"+ns.ID+"?"+q.Encode(), nil)
+		if err != nil {
+			return nil, "", err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+
+			return nil, "", fmt.Errorf("%w: google_workspace: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+
+			return nil, cursor, fmt.Errorf("google_workspace: delta status=%d", resp.StatusCode)
+		}
+		var body struct {
+			Users []struct {
+				ID           string `json:"id"`
+				PrimaryEmail string `json:"primaryEmail"`
+				Suspended    bool   `json:"suspended"`
+				CreationTime string `json:"creationTime"`
+			} `json:"users"`
+			Groups []struct {
+				ID    string `json:"id"`
+				Email string `json:"email"`
+			} `json:"groups"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			_ = resp.Body.Close()
+
+			return nil, "", fmt.Errorf("google_workspace: decode delta: %w", err)
+		}
+		_ = resp.Body.Close()
+		if ns.ID == "users" {
+			for _, u := range body.Users {
+				kind := connector.ChangeUpserted
+				if u.Suspended {
+					kind = connector.ChangeDeleted
+				}
+				changes = append(changes, connector.DocumentChange{
+					Kind: kind,
+					Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: u.ID},
+				})
 			}
-			changes = append(changes, connector.DocumentChange{
-				Kind: kind,
-				Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: u.ID},
-			})
+		} else {
+			for _, gr := range body.Groups {
+				changes = append(changes, connector.DocumentChange{
+					Kind: connector.ChangeUpserted,
+					Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: gr.ID},
+				})
+			}
 		}
-	} else {
-		for _, gr := range body.Groups {
-			changes = append(changes, connector.DocumentChange{
-				Kind: connector.ChangeUpserted,
-				Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: gr.ID},
-			})
+		if body.NextPageToken == "" {
+			return changes, time.Now().UTC().Format(time.RFC3339), nil
 		}
+		pageToken = body.NextPageToken
 	}
 
-	return changes, time.Now().UTC().Format(time.RFC3339), nil
+	return changes, cursor, fmt.Errorf("google_workspace: delta exceeded max pages (%d) for updatedMin=%s; reduce sync window", maxDeltaPages, cursor)
 }
 
 // do is the shared HTTP helper.
