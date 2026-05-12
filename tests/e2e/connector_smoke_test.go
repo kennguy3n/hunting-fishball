@@ -11,8 +11,8 @@
 //   - For DeltaSyncer connectors, DeltaSync returns a fresh cursor.
 //   - For WebhookReceiver connectors, HandleWebhook decodes a sample
 //     payload into at least one DocumentChange.
-//   - The process-global connector registry has exactly 12 entries
-//     after blank-imports complete.
+//   - The process-global connector registry has exactly 20 entries
+//     after blank-imports complete (Round-15 catalog expansion).
 //
 // Run via `make test-connector-smoke` (or as part of `make test-e2e`).
 package e2e
@@ -31,15 +31,22 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 
 	// Blank-import every connector so the registry self-populates.
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/asana"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/kchat"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/linear"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/notion"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
@@ -47,15 +54,22 @@ import (
 	// Direct imports so each smoke case can call the connector's
 	// `New(With…)` option helpers without going through the registry's
 	// stripped-down factory.
+	"github.com/kennguy3n/hunting-fishball/internal/connector/asana"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
 	gh "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/jira"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/kchat"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/linear"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/notion"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/s3"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/teams"
@@ -65,15 +79,23 @@ import (
 // names. The smoke suite is the on-call's check that no connector
 // silently disappears from a binary's blank-import list.
 var expectedConnectors = []string{
+	"asana",
 	"box",
 	"confluence",
+	"discord",
 	"dropbox",
 	"github",
 	"gitlab",
 	"google_drive",
+	"google_shared_drives",
+	"hubspot",
 	"jira",
+	"kchat",
+	"linear",
 	"notion",
 	"onedrive",
+	"s3",
+	"salesforce",
 	"sharepoint",
 	"slack",
 	"teams",
@@ -560,5 +582,253 @@ func TestConnectorSmoke_Teams(t *testing.T) {
 	}
 	if len(ch) == 0 {
 		t.Fatalf("expected at least one change")
+	}
+}
+
+func TestConnectorSmoke_KChat(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users.me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"U1"}`)
+	})
+	mux.HandleFunc("/channels.list", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"channels":[{"id":"C1","name":"general"}]}`)
+	})
+	mux.HandleFunc("/channels.history", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"messages":[{"id":"M1","ts":1700000000,"user":"U1","text":"hi"}]}`)
+	})
+	mux.HandleFunc("/messages.get", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"M1","ts":1700000000,"user":"U1","text":"hi"}`)
+	})
+	mux.HandleFunc("/channels.changes", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"changes":[]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := kchat.New(kchat.WithBaseURL(srv.URL), kchat.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(kchat.Credentials{APIToken: "kc-test"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "C1"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+	ch, err := c.HandleWebhook(context.Background(), []byte(`{"type":"message.created","channel":"C1","message":{"id":"M1","updated_at":"2024-01-01T00:00:00Z"}}`))
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	if len(ch) == 0 {
+		t.Fatalf("expected at least one change")
+	}
+}
+
+func TestConnectorSmoke_S3(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+
+			return
+		}
+		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>bucket</Name>
+<KeyCount>1</KeyCount>
+<IsTruncated>false</IsTruncated>
+<Contents><Key>doc1.txt</Key><ETag>"e"</ETag><Size>5</Size><LastModified>2024-01-01T00:00:00.000Z</LastModified></Contents>
+</ListBucketResult>`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := s3.New(s3.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(s3.Credentials{AccessKeyID: "AK", SecretAccessKey: "SK", Endpoint: srv.URL, Bucket: "bucket", Region: "us-east-1"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "bucket"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Linear(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		calls++
+		s := string(body)
+		switch {
+		case strings.Contains(s, "viewer"):
+			_, _ = io.WriteString(w, `{"data":{"viewer":{"id":"u1"}}}`)
+		case strings.Contains(s, "teams {"):
+			_, _ = io.WriteString(w, `{"data":{"teams":{"nodes":[{"id":"T1","key":"K","name":"Team"}]}}}`)
+		case strings.Contains(s, "team(id:"), strings.Contains(s, "$teamId"):
+			_, _ = io.WriteString(w, `{"data":{"team":{"issues":{"nodes":[{"id":"I1","identifier":"ENG-1","title":"x","updatedAt":"2024-01-01T00:00:00Z"}],"pageInfo":{"hasNextPage":false}}}}}`)
+		case strings.Contains(s, "issue(id:"), strings.Contains(s, "$id"):
+			_, _ = io.WriteString(w, `{"data":{"issue":{"id":"I1","identifier":"ENG-1","title":"x","description":"y","updatedAt":"2024-01-01T00:00:00Z","createdAt":"2024-01-01T00:00:00Z"}}}`)
+		default:
+			_, _ = io.WriteString(w, `{"data":{}}`)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := linear.New(linear.WithBaseURL(srv.URL), linear.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(linear.Credentials{APIKey: "lin_api_test"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "T1"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+	ch, err := c.HandleWebhook(context.Background(), []byte(`{"action":"create","type":"Issue","data":{"id":"I2","identifier":"ENG-2","updatedAt":"2024-01-02T00:00:00Z"}}`))
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	if len(ch) == 0 {
+		t.Fatalf("expected at least one change")
+	}
+	_ = calls
+}
+
+func TestConnectorSmoke_Asana(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":{"gid":"U1"}}`)
+	})
+	mux.HandleFunc("/workspaces", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"gid":"W1","name":"Acme"}]}`)
+	})
+	mux.HandleFunc("/projects", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"gid":"P1","name":"Backend"}]}`)
+	})
+	mux.HandleFunc("/projects/P1/tasks", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"gid":"T1","name":"a","modified_at":"2024-01-01T00:00:00Z"}]}`)
+	})
+	mux.HandleFunc("/tasks/T1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":{"gid":"T1","name":"a","notes":"detail","created_at":"2024-01-01T00:00:00Z","modified_at":"2024-01-01T00:00:00Z"}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := asana.New(asana.WithBaseURL(srv.URL), asana.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(asana.Credentials{AccessToken: "as-test"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "P1"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Discord(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/@me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"U1"}`)
+	})
+	mux.HandleFunc("/users/@me/guilds", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":"G1","name":"Guild"}]`)
+	})
+	mux.HandleFunc("/guilds/G1/channels", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":"C1","name":"general","type":0}]`)
+	})
+	mux.HandleFunc("/channels/C1/messages", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `[{"id":"M1","timestamp":"2024-01-01T00:00:00Z"}]`)
+	})
+	mux.HandleFunc("/channels/C1/messages/M1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"M1","content":"hi","timestamp":"2024-01-01T00:00:00Z","author":{"username":"alice"}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := discord.New(discord.WithBaseURL(srv.URL), discord.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(discord.Credentials{BotToken: "bot-test"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "C1"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Salesforce(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/services/data/v59.0/limits", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/services/data/v59.0/query", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"done":true,"records":[{"Id":"a","SystemModstamp":"2024-01-01T00:00:00Z"}]}`)
+	})
+	mux.HandleFunc("/services/data/v59.0/sobjects/Account/a", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"Id":"a","Name":"Acme","SystemModstamp":"2024-01-01T00:00:00Z","CreatedDate":"2024-01-01T00:00:00Z"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := salesforce.New(salesforce.WithHTTPClient(srv.Client()), salesforce.WithBaseURL(srv.URL), salesforce.WithObjects([]string{"Account"}))
+	creds, _ := json.Marshal(salesforce.Credentials{InstanceURL: srv.URL, AccessToken: "tok"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "Account"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_HubSpot(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/integrations/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/crm/v3/objects/contacts", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"results":[{"id":"c1","updatedAt":"2024-01-01T00:00:00Z"}]}`)
+	})
+	mux.HandleFunc("/crm/v3/objects/contacts/c1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"c1","createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z","properties":{"name":"Alice"}}`)
+	})
+	mux.HandleFunc("/crm/v3/objects/contacts/search", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"results":[{"id":"c1","updatedAt":"2024-01-01T00:00:00Z","properties":{"hs_lastmodifieddate":"2024-01-01T00:00:00Z"}}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := hubspot.New(hubspot.WithBaseURL(srv.URL), hubspot.WithHTTPClient(srv.Client()), hubspot.WithObjects([]string{"contacts"}))
+	creds, _ := json.Marshal(hubspot.Credentials{AccessToken: "pat-test"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "contacts"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_GoogleSharedDrives(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/drives", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"drives":[{"id":"D1","name":"Engineering"}]}`)
+	})
+	mux.HandleFunc("/files", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"files":[{"id":"f1","name":"a","modifiedTime":"2024-01-01T00:00:00Z","version":"1"}]}`)
+	})
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("alt") == "media" {
+			_, _ = io.WriteString(w, "hi")
+
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"f1","name":"a","mimeType":"text/plain","size":"2","modifiedTime":"2024-01-01T00:00:00Z","createdTime":"2024-01-01T00:00:00Z"}`)
+	})
+	mux.HandleFunc("/changes/startPageToken", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"startPageToken":"t1"}`)
+	})
+	mux.HandleFunc("/changes", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"changes":[],"newStartPageToken":"t2"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := googledrive.NewSharedDrives(googledrive.WithBaseURL(srv.URL), googledrive.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(googledrive.Credentials{AccessToken: "tok"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "D1"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
 	}
 }

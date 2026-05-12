@@ -39,6 +39,16 @@ on:
 permissions:
   contents: read
 
+# Round-15 Task 14: cancel in-progress CI runs when a new commit
+# lands on the same PR. Pushed PRs no longer queue stale CI runs.
+# Non-PR events (push to `main`, nightly `schedule`, manual
+# `workflow_dispatch`) are scoped per-SHA via `github.sha` so a
+# new push or the nightly cron never cancels another non-PR run
+# — `github.ref` would group them all under `refs/heads/main`.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   # ===============================================================
   # Fast lane — runs on every PR, blocking
@@ -149,6 +159,39 @@ jobs:
           mkdir -p bin
           go build -o bin/context-engine-ingest ./cmd/ingest
           go build -o bin/context-engine-api    ./cmd/api
+
+  # ----------------------------------------------------------------
+  # Round-15 Task 14: fast-connector-unit narrows the race-tested
+  # surface to `internal/connector/...` so connector-only PRs get
+  # a sub-30s feedback loop. The job still runs in parallel with
+  # fast-test (which covers the full module) — callers wanting
+  # connector-scoped CI can rely on this job alone.
+  # ----------------------------------------------------------------
+  fast-connector-unit:
+    name: Fast Go test (connector unit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Restore Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-connector-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-connector-
+
+      - name: go mod download
+        run: go mod download
+
+      - name: time go test connectors only
+        run: time go test -race -count=1 ./internal/connector/...
 
   fast-lint:
     # Round-13 Task 0: golangci-lint runs in parallel with the
@@ -298,7 +341,7 @@ jobs:
   fast-required:
     name: Required CI (fast lane)
     runs-on: ubuntu-latest
-    needs: [fast-check, fast-test, fast-build, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
+    needs: [fast-check, fast-test, fast-build, fast-connector-unit, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
     if: always()
     steps:
       - name: Verify fast-lane jobs passed
@@ -309,6 +352,7 @@ jobs:
             "${{ needs.fast-check.result }}" \
             "${{ needs.fast-test.result }}" \
             "${{ needs.fast-build.result }}" \
+            "${{ needs.fast-connector-unit.result }}" \
             "${{ needs.fast-lint.result }}" \
             "${{ needs.fast-eval.result }}" \
             "${{ needs.fast-alerts.result }}" \
@@ -321,7 +365,7 @@ jobs:
             fi
           done
           if [ "$fail" = "1" ]; then
-            echo "::error::fast-check=${{ needs.fast-check.result }} fast-test=${{ needs.fast-test.result }} fast-build=${{ needs.fast-build.result }} fast-lint=${{ needs.fast-lint.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
+            echo "::error::fast-check=${{ needs.fast-check.result }} fast-test=${{ needs.fast-test.result }} fast-build=${{ needs.fast-build.result }} fast-connector-unit=${{ needs.fast-connector-unit.result }} fast-lint=${{ needs.fast-lint.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
             exit 1
           fi
           echo "fast lane green"

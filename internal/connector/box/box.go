@@ -169,6 +169,11 @@ func (it *docIterator) fetchPage(ctx context.Context) bool {
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		it.err = fmt.Errorf("%w: box: list status=%d", connector.ErrRateLimited, resp.StatusCode)
+
+		return false
+	}
 	if resp.StatusCode != http.StatusOK {
 		it.err = fmt.Errorf("box: list status=%d", resp.StatusCode)
 		return false

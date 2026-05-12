@@ -144,40 +144,72 @@ func (g *Connector) Connect(ctx context.Context, cfg connector.ConnectorConfig) 
 }
 
 // ListNamespaces returns the visible drives plus a synthetic "My
-// Drive" namespace.
+// Drive" namespace. Shared drives are paginated via
+// `nextPageToken`; large shared-drive sets (>100 drives) are
+// followed to completion. Each drive page is requested with
+// `useDomainAdminAccess=false` by default — Round-15 hardening
+// guarantees we surface every drive the calling user can see,
+// not just the first page.
 func (g *Connector) ListNamespaces(ctx context.Context, c connector.Connection) ([]connector.Namespace, error) {
 	conn, ok := c.(*connection)
 	if !ok {
 		return nil, errors.New("googledrive: bad connection type")
 	}
 
-	resp, err := g.do(ctx, conn, http.MethodGet, "/drives?pageSize=100", nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("googledrive: list drives status=%d", resp.StatusCode)
-	}
-
-	var body struct {
-		Drives []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"drives"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, fmt.Errorf("googledrive: decode drives: %w", err)
-	}
-
 	out := []connector.Namespace{
 		{ID: "my-drive", Name: "My Drive", Kind: "my_drive"},
 	}
-	for _, d := range body.Drives {
-		out = append(out, connector.Namespace{
-			ID: d.ID, Name: d.Name, Kind: "shared_drive",
-			Metadata: map[string]string{"drive_id": d.ID},
-		})
+
+	pageToken := ""
+	for {
+		// Use url.Values so pageToken is properly encoded —
+		// Google pageToken values are opaque and may contain
+		// characters (=, +, /) that break raw concatenation,
+		// silently truncating the shared-drive list. Matches
+		// the document iterator below.
+		q := url.Values{}
+		q.Set("pageSize", "100")
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		path := "/drives?" + q.Encode()
+		resp, err := g.do(ctx, conn, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+
+			return nil, fmt.Errorf("%w: googledrive: listing drives: status=%d", connector.ErrRateLimited, resp.StatusCode)
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+
+			return nil, fmt.Errorf("googledrive: list drives status=%d", resp.StatusCode)
+		}
+		var body struct {
+			NextPageToken string `json:"nextPageToken"`
+			Drives        []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"drives"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			_ = resp.Body.Close()
+
+			return nil, fmt.Errorf("googledrive: decode drives: %w", err)
+		}
+		_ = resp.Body.Close()
+		for _, d := range body.Drives {
+			out = append(out, connector.Namespace{
+				ID: d.ID, Name: d.Name, Kind: "shared_drive",
+				Metadata: map[string]string{"drive_id": d.ID},
+			})
+		}
+		if body.NextPageToken == "" {
+			break
+		}
+		pageToken = body.NextPageToken
 	}
 
 	return out, nil
@@ -265,6 +297,11 @@ func (it *docIterator) fetchPage(ctx context.Context) bool {
 		return false
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		it.err = fmt.Errorf("%w: googledrive: list files status=%d", connector.ErrRateLimited, resp.StatusCode)
+
+		return false
+	}
 	if resp.StatusCode != http.StatusOK {
 		it.err = fmt.Errorf("googledrive: list files status=%d", resp.StatusCode)
 
@@ -414,6 +451,9 @@ func (g *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 			return nil, "", err
 		}
 		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, "", fmt.Errorf("%w: googledrive: startPageToken status=%d", connector.ErrRateLimited, resp.StatusCode)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, "", fmt.Errorf("googledrive: startPageToken status=%d", resp.StatusCode)
 		}
@@ -441,6 +481,9 @@ func (g *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		return nil, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, "", fmt.Errorf("%w: googledrive: changes status=%d", connector.ErrRateLimited, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("googledrive: changes status=%d", resp.StatusCode)
 	}

@@ -21,15 +21,22 @@ import (
 
 	// Blank-imports mirror cmd/api/main.go so the registry is
 	// populated before ListSourceConnectors runs.
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/asana"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/kchat"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/linear"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/notion"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
@@ -38,9 +45,19 @@ import (
 // runbookFilename maps a registry name to its expected runbook
 // filename. The registry uses `google_drive` (underscore) while
 // the runbook is `googledrive.md`. Strip underscores/hyphens.
+//
+// Round-15 Task 16: `google_shared_drives` is a thin wrapper
+// around the existing googledrive connector (it filters out the
+// owner's My Drive). Both registry names share the same runbook
+// surface — credential rotation, quotas, outage signals, and
+// error codes are identical.
 func runbookFilename(name string) string {
+	if name == "google_shared_drives" {
+		return "googledrive.md"
+	}
 	out := strings.ReplaceAll(name, "_", "")
 	out = strings.ReplaceAll(out, "-", "")
+
 	return out + ".md"
 }
 
@@ -61,8 +78,8 @@ var requiredSections = []string{
 func TestConnectorRunbooks_ExistAndCoverRequiredSections(t *testing.T) {
 	t.Parallel()
 	names := connector.ListSourceConnectors()
-	if len(names) < 12 {
-		t.Fatalf("expected at least 12 connectors registered; got %d (%v)", len(names), names)
+	if len(names) < 20 {
+		t.Fatalf("expected at least 20 connectors registered; got %d (%v)", len(names), names)
 	}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {

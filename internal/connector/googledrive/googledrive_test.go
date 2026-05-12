@@ -122,6 +122,60 @@ func TestGoogleDrive_ListNamespaces(t *testing.T) {
 	}
 }
 
+// TestGoogleDrive_ListNamespaces_PageTokenEncoded ensures that a
+// nextPageToken containing characters that would corrupt a raw
+// URL (=, +, &, /) round-trips correctly via url.Values.Encode(),
+// so large shared-drive sets are not silently truncated.
+func TestGoogleDrive_ListNamespaces_PageTokenEncoded(t *testing.T) {
+	t.Parallel()
+
+	// Chosen to stress URL escaping: '&' would split the query
+	// string, '+' would decode to ' ', '=' would split key/value,
+	// '/' is generally safe but still echoed back.
+	const trickyToken = "abc&def+ghi=jkl/mno"
+
+	var calls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
+	mux.HandleFunc("/drives", func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		got := r.URL.Query().Get("pageToken")
+		switch n {
+		case 1:
+			if got != "" {
+				t.Errorf("first call pageToken=%q, want empty", got)
+			}
+			_, _ = w.Write([]byte(`{"nextPageToken":"` + trickyToken + `","drives":[{"id":"D1","name":"Engineering"}]}`))
+		case 2:
+			if got != trickyToken {
+				t.Errorf("second call pageToken=%q, want %q", got, trickyToken)
+			}
+			_, _ = w.Write([]byte(`{"drives":[{"id":"D2","name":"Ops"}]}`))
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	})
+	srv := newDriveServer(t, mux)
+	g := newDriveConnector(srv)
+
+	conn, err := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	ns, err := g.ListNamespaces(context.Background(), conn)
+	if err != nil {
+		t.Fatalf("ListNamespaces: %v", err)
+	}
+	// 1 my-drive + 2 shared drives = 3 — proves pagination
+	// followed past the tricky token instead of stopping early.
+	if len(ns) != 3 {
+		t.Fatalf("namespaces: got %d, want 3 (pagination truncated?): %+v", len(ns), ns)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected 2 /drives calls, got %d", got)
+	}
+}
+
 func TestGoogleDrive_ListDocuments_Pagination(t *testing.T) {
 	t.Parallel()
 
@@ -351,5 +405,170 @@ func TestGoogleDrive_FetchDocument_EscapesID(t *testing.T) {
 	want := "/files/" + url.PathEscape(id)
 	if !strings.HasPrefix(seen, want) {
 		t.Fatalf("RequestURI: %q want prefix %q", seen, want)
+	}
+}
+
+// TestGoogleDrive_ListNamespaces_LargeSharedDriveSet exercises the
+// pagination path added in Round 15: a tenant with >100 shared
+// drives should produce one namespace per drive, not just the
+// first page.
+func TestGoogleDrive_ListNamespaces_LargeSharedDriveSet(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/drives", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("pageToken") == "" {
+			_, _ = w.Write([]byte(`{"drives":[{"id":"D1","name":"A"}],"nextPageToken":"NEXT"}`))
+
+			return
+		}
+		_, _ = w.Write([]byte(`{"drives":[{"id":"D2","name":"B"},{"id":"D3","name":"C"}]}`))
+	})
+	srv := newDriveServer(t, mux)
+	g := newDriveConnector(srv)
+	conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+	ns, err := g.ListNamespaces(context.Background(), conn)
+	if err != nil {
+		t.Fatalf("ListNamespaces: %v", err)
+	}
+	// 1 my-drive + 3 shared drives.
+	if len(ns) != 4 {
+		t.Fatalf("namespaces: %d (%v)", len(ns), ns)
+	}
+	gotIDs := make([]string, 0, len(ns))
+	for _, n := range ns {
+		gotIDs = append(gotIDs, n.ID)
+	}
+	want := []string{"my-drive", "D1", "D2", "D3"}
+	for i, w := range want {
+		if gotIDs[i] != w {
+			t.Fatalf("ns[%d]=%q, want %q", i, gotIDs[i], w)
+		}
+	}
+}
+
+// TestGoogleDrive_ListNamespaces_RateLimited verifies the
+// shared-drives listing surfaces 429 responses rather than
+// silently swallowing them.
+func TestGoogleDrive_ListNamespaces_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/drives", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rate", http.StatusTooManyRequests)
+	})
+	srv := newDriveServer(t, mux)
+	g := newDriveConnector(srv)
+	conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+	_, err := g.ListNamespaces(context.Background(), conn)
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
+// TestGoogleDrive_DocIterator_RateLimited verifies that the
+// document iterator wraps 429 responses with
+// connector.ErrRateLimited so the adaptive rate limiter in
+// internal/connector/adaptive_rate.go can detect throttling on
+// the hot listing path. The audit_test.go gate is textual; this
+// test asserts the behavioural contract.
+func TestGoogleDrive_DocIterator_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/files", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rate", http.StatusTooManyRequests)
+	})
+	srv := newDriveServer(t, mux)
+	g := newDriveConnector(srv)
+	conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+	it, err := g.ListDocuments(context.Background(), conn, connector.Namespace{ID: "my-drive", Kind: "my_drive"}, connector.ListOpts{})
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	defer func() { _ = it.Close() }()
+	if it.Next(context.Background()) {
+		t.Fatal("Next must not advance on 429")
+	}
+	if !errors.Is(it.Err(), connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited from iterator, got %v", it.Err())
+	}
+}
+
+// TestGoogleDrive_DeltaSync_RateLimited verifies both DeltaSync
+// HTTP paths (initial startPageToken fetch with empty cursor,
+// and the /changes call with a non-empty cursor) wrap 429 as
+// connector.ErrRateLimited so adaptive_rate.go can react during
+// incremental sync just as it can during ListNamespaces.
+func TestGoogleDrive_DeltaSync_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		cursor string
+		path   string
+	}{
+		{"startPageToken", "", "/changes/startPageToken"},
+		{"changes", "abc", "/changes"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{}`))
+			})
+			mux.HandleFunc(tc.path, func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "rate", http.StatusTooManyRequests)
+			})
+			srv := newDriveServer(t, mux)
+			g := newDriveConnector(srv)
+			conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+			_, _, err := g.DeltaSync(context.Background(), conn, connector.Namespace{ID: "my-drive"}, tc.cursor)
+			if !errors.Is(err, connector.ErrRateLimited) {
+				t.Fatalf("expected ErrRateLimited, got %v", err)
+			}
+		})
+	}
+}
+
+// TestGoogleDrive_ListDocuments_SharedDriveFlags verifies that
+// when listing inside a shared drive, the request carries the
+// driveId + corpora=drive + supportsAllDrives=true parameters
+// required by the Drive API.
+func TestGoogleDrive_ListDocuments_SharedDriveFlags(t *testing.T) {
+	t.Parallel()
+
+	var seen string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/about", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/files", func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"files":[]}`))
+	})
+	srv := newDriveServer(t, mux)
+	g := newDriveConnector(srv)
+	conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds()})
+	it, _ := g.ListDocuments(context.Background(), conn, connector.Namespace{ID: "DRIVE_X", Kind: "shared_drive"}, connector.ListOpts{})
+	defer func() { _ = it.Close() }()
+	for it.Next(context.Background()) {
+	}
+	if !strings.Contains(seen, "driveId=DRIVE_X") {
+		t.Fatalf("query missing driveId: %q", seen)
+	}
+	if !strings.Contains(seen, "supportsAllDrives=true") {
+		t.Fatalf("query missing supportsAllDrives=true: %q", seen)
 	}
 }

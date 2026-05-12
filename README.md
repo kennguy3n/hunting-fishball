@@ -1,21 +1,34 @@
 # hunting-fishball
 
-> **Status (2026-05-12, post-Round-14).** Phases 0-3 and 7-8 are
+> **Status (2026-05-12, post-Round-15).** Phases 0-3 and 7-8 are
 > **functionally complete** in `main`; Phases 4-6 are
 > **server-side complete** with only client-side rendering left in
 > external repos. See [`docs/PROGRESS.md`](docs/PROGRESS.md) for
 > the live checklist and the Round-by-round changelog below.
-> Migration count is at **040**. Round 14 layers observability
-> dashboards (stage breakers, latency histogram, slow-query
-> persistence, pipeline throughput), payload-schema validation,
-> the audit-integrity background worker, the API-key grace
-> sweeper, per-tenant payload caps, embedding-fallback metrics,
-> DLQ categorisation, four new Prometheus alerts, a regression
+> Migration count is at **040**. **Round 15 expands the connector
+> catalog from 12 → 20**: KChat (the missing Phase-1 chat
+> source), S3-compatible object storage with stdlib SigV4,
+> Linear (GraphQL), Asana, Discord, Salesforce (SOQL), HubSpot
+> (CRM v3), and `google_shared_drives` (a registry entry for
+> shared-drive-only ingestion). Round 15 also adds a connector
+> completeness audit (`internal/connector/audit_test.go`), a
+> `connector.ErrRateLimited` sentinel propagated through every
+> iterator's 429 path, a `fast-connector-unit` CI lane, a CI
+> `concurrency` group that cancels stale runs, seven new
+> per-connector runbooks, and full sweeps of PROGRESS / PHASES
+> / ARCHITECTURE.
+>
+> Round 14 (previous round) layers observability dashboards
+> (stage breakers, latency histogram, slow-query persistence,
+> pipeline throughput), payload-schema validation, the
+> audit-integrity background worker, the API-key grace sweeper,
+> per-tenant payload caps, embedding-fallback metrics, DLQ
+> categorisation, four new Prometheus alerts, a regression
 > manifest + e2e suite + four fuzz targets, OpenAPI completeness
 > through the Round-13/14 surface, and a CI fast-lane split into
 > `fast-check` / `fast-test` / `fast-build` (with per-job
-> `actions/cache` on `~/.cache/go-build`). See the Round-14
-> additions block below for the per-task breakdown.
+> `actions/cache` on `~/.cache/go-build`). See the Round-14 +
+> Round-15 additions blocks below for the per-task breakdown.
 >
 > Per-phase detail lives in [`docs/PROGRESS.md`](docs/PROGRESS.md)
 > and [`docs/PHASES.md`](docs/PHASES.md); the product thesis is in
@@ -347,6 +360,67 @@ The full set of public + admin endpoints is documented in
   catches Postgres-specific syntax (JSONB / TIMESTAMPTZ /
   `ADD COLUMN IF NOT EXISTS`) that the SQLite dry-run misses
   (Task 20, `scripts/migrate-dry-run-pg.sh`).
+
+**Round 15 additions:**
+
+- Connector catalog expansion (12 → 20):
+  - `kchat` — KChat internal chat (`internal/connector/kchat/`).
+    The missing Phase-1 connector from PROPOSAL.md §4.
+    Implements `SourceConnector` + `DeltaSyncer` + `WebhookReceiver`
+    against a Slack-style channel/message API.
+  - `s3` — S3-compatible object storage
+    (`internal/connector/s3/` + `internal/connector/s3/sigv4.go`).
+    Stdlib AWS-style SigV4 signing — no vendor SDK.
+  - `linear` — Linear GraphQL (`internal/connector/linear/`).
+  - `asana` — Asana tasks (`internal/connector/asana/`).
+  - `discord` — Discord channel messages
+    (`internal/connector/discord/`).
+  - `salesforce` — Salesforce SOQL
+    (`internal/connector/salesforce/`).
+  - `hubspot` — HubSpot CRM v3 (`internal/connector/hubspot/`).
+  - `google_shared_drives` — shared-drive-only registry entry on
+    top of the existing googledrive connector
+    (`internal/connector/googledrive/shared_drives.go`); filters
+    out My Drive so the surface is shared-drive specific.
+- Connector hardening:
+  - `connector.ErrRateLimited` sentinel
+    (`internal/connector/source_connector.go`). Every iterator
+    (existing + new) wraps HTTP 429 (and Slack's `ok=false /
+    error=ratelimited` 200 variant) with this sentinel so the
+    adaptive rate limiter in
+    `internal/connector/adaptive_rate.go` can react.
+  - `internal/connector/audit_test.go` — process-global gate
+    that fails CI if any connector source drops the wrap, the
+    `ErrInvalidConfig` reference, the `ErrNotSupported`
+    reference, or the `http.NewRequestWithContext` call.
+  - `googledrive.ListNamespaces` now paginates via
+    `nextPageToken` so workspaces with >100 shared drives
+    backfill in full.
+- Testing:
+  - `tests/e2e/round15_test.go` — registry count + full KChat
+    lifecycle + 429 propagation through iterators (build tag
+    `e2e`).
+  - `tests/regression/round1415_manifest.go` + `_test.go` —
+    catalogues 5 Round-14/15 fixes; meta-test asserts every
+    TestRef resolves on disk.
+  - `tests/integration/connector_contract_test.go` (build tag
+    `integration`) — compile-time interface assertions per
+    connector struct, empty-cursor semantics for DeltaSyncer,
+    panic-safety for WebhookReceiver.
+- CI:
+  - New `fast-connector-unit` lane (`.github/workflows/ci.yml`)
+    runs `time go test -race -count=1 ./internal/connector/...`
+    in isolation; gated by the `fast-required` aggregator.
+  - `concurrency:` group at the workflow level cancels stale
+    runs when a new commit lands on the same PR.
+- Documentation:
+  - 7 new per-connector runbooks under `docs/runbooks/`
+    (kchat, s3, linear, asana, discord, salesforce, hubspot)
+    each with the 4 required sections (credential rotation,
+    quota / rate-limit incidents, outage detection, error
+    codes) enforced by `docs/runbooks/runbook_test.go`.
+  - `docs/PROGRESS.md` capability matrix expanded with the 8
+    new entries; Phase-7 status updated.
 
 **Round 14 additions:**
 
@@ -811,9 +885,12 @@ hunting-fishball/
 ├── internal/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces, process-global registry.
-│   │   │                      # 12 connectors at Phase 7:
-│   │   ├── googledrive/       # Google Drive (Phase 1)
+│   │   │                      # 20 connectors after Round 15:
+│   │   ├── googledrive/       # Google Drive (Phase 1) +
+│   │   │                      # google_shared_drives registry entry
+│   │   │                      # (Round 15) for shared-drive-only sync
 │   │   ├── slack/             # Slack + Events API (Phase 1)
+│   │   ├── kchat/             # KChat internal chat (Round 15, Phase 1)
 │   │   ├── sharepoint/        # SharePoint Online (Phase 7)
 │   │   ├── onedrive/          # OneDrive personal (Phase 7)
 │   │   ├── dropbox/           # Dropbox v2 (Phase 7)
@@ -823,7 +900,14 @@ hunting-fishball/
 │   │   ├── jira/              # Jira Cloud (Phase 7)
 │   │   ├── github/            # GitHub (Phase 7)
 │   │   ├── gitlab/            # GitLab (Phase 7)
-│   │   └── teams/             # Microsoft Teams (Phase 7)
+│   │   ├── teams/             # Microsoft Teams (Phase 7)
+│   │   ├── s3/                # S3-compatible object storage (Round 15);
+│   │   │                      # stdlib SigV4 in sigv4.go, no vendor SDK
+│   │   ├── linear/            # Linear GraphQL (Round 15)
+│   │   ├── asana/             # Asana tasks (Round 15)
+│   │   ├── discord/           # Discord channel messages (Round 15)
+│   │   ├── salesforce/        # Salesforce SOQL (Round 15)
+│   │   └── hubspot/           # HubSpot CRM v3 (Round 15)
 │   ├── credential/            # AES-256-GCM envelope encryption
 │   ├── audit/                 # audit_logs model + repository + Kafka
 │   │                          # outbox + Gin handler

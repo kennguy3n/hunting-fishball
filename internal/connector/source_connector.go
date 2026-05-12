@@ -248,3 +248,11 @@ var ErrNotSupported = errors.New("connector: capability not supported")
 // finished cleanly. Callers should check `errors.Is(err, ErrEndOfPage)`
 // rather than treating it as a hard failure.
 var ErrEndOfPage = errors.New("connector: end of page")
+
+// ErrRateLimited is returned by connectors when the upstream API
+// signals a quota/throttle response (HTTP 429 or equivalent). The
+// adaptive rate limiter in adaptive_rate.go reacts to errors that
+// wrap this sentinel by reducing the effective ingest rate.
+// Connectors should wrap with `fmt.Errorf("%w: …", ErrRateLimited)`
+// preserving the upstream's status code or Retry-After hint.
+var ErrRateLimited = errors.New("connector: rate limited")
