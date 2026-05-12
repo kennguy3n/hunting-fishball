@@ -226,7 +226,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 7 — Catalog expansion
 
-**Status.** ✅ shipped | ~100% — Round 16 expands the catalog from 20 → **28** production connectors (Mattermost, ClickUp, Monday.com, Pipedrive, Okta, Gmail, RSS/Atom, Confluence Server/DC on top of the Round 15 set). Per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
+**Status.** ✅ shipped | ~100% — Round 17 expands the catalog from 28 → **36** production connectors (Microsoft Entra ID, Google Workspace Directory, Microsoft 365 Outlook, Workday, BambooHR, Personio, sitemap.xml crawl, and Coda on top of the Round 15/16 set). Per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
 
 - [x] ≥ 12 production connectors at GA — Phase 1 (Google Drive,
       Slack, KChat) + Phase 7 (SharePoint, OneDrive, Dropbox,
@@ -234,7 +234,10 @@ This document tracks the *actual* state of the platform. The shape mirrors
       Teams) + Round-15 Phase-2+ adds (S3, Linear, Asana, Discord,
       Salesforce, HubSpot, Google Shared Drives) + Round-16
       Phase-2+ adds (Mattermost, ClickUp, Monday.com, Pipedrive,
-      Okta, Gmail, RSS/Atom, Confluence Server/DC) = **28**
+      Okta, Gmail, RSS/Atom, Confluence Server/DC) +
+      Round-17 Phase-2+ adds (Microsoft Entra ID, Google
+      Workspace Directory, Microsoft 365 Outlook, Workday,
+      BambooHR, Personio, Sitemap, Coda) = **36**
 - [x] Per-connector runbooks (`docs/runbooks/` —
       one Markdown file per connector covering credential rotation,
       quota / rate-limit incidents, outage detection / recovery, and
@@ -450,11 +453,114 @@ ships, the matrix is empty. Each row records:
 | Gmail        | ❌ | ✅ (messages) | ❌ (Pub/Sub planned) | ✅ (`history.list` historyId) | ❌ | ✅ Round-16 (Phase 2+, Email) |
 | RSS / Atom   | ❌ | ✅ (entries) | ❌ (poll-only) | ✅ (max `<pubDate>` / `<updated>`) | ❌ | ✅ Round-16 (Phase 2+, Generic) |
 | Confluence Server / DC | ✅ (`/rest/api/user/current`) | ✅ (pages by space) | ❌ (planned) | ✅ (CQL `lastModified`) | ❌ | ✅ Round-16 (Phase 2+, Knowledge) |
+| Microsoft Entra ID | ✅ (users + groups via Graph) | ✅ (users + groups) | ❌ (Change Notifications planned) | ✅ (Graph `$deltatoken` on `/users/delta` + `/groups/delta`) | ✅ (`accountEnabled=false`, `@removed` → ChangeDeleted) | ✅ Round-17 (Phase 2+, Identity) |
+| Google Workspace Directory | ✅ (users + groups) | ✅ (users + groups) | ❌ (Reports API webhooks planned) | ✅ (`updatedMin=<RFC3339>` filter) | ✅ (`suspended=true` → ChangeDeleted) | ✅ Round-17 (Phase 2+, Identity) |
+| Microsoft 365 Outlook | ❌ | ✅ (messages by folder) | ❌ (Graph Change Notifications planned) | ✅ (Graph `@odata.deltaLink` on `/messages/delta`) | ❌ | ✅ Round-17 (Phase 2+, Email) |
+| Workday | ❌ | ✅ (workers) | ❌ (no public webhook) | ✅ (`Updated_From=<RFC3339>` filter) | ✅ (`active=false`, `terminationDate` → ChangeDeleted) | ✅ Round-17 (Phase 2+, HR) |
+| BambooHR | ❌ | ✅ (employee directory) | ❌ | ✅ (`/v1/employees/changed?since=<ISO8601>`) | ✅ (`action="Deleted"` → ChangeDeleted) | ✅ Round-17 (Phase 2+, HR) |
+| Personio | ❌ | ✅ (employees) | ❌ | ✅ (`updated_from=<RFC3339>`) | ✅ (`status="inactive"` → ChangeDeleted) | ✅ Round-17 (Phase 2+, HR) |
+| Sitemap crawl | ❌ | ✅ (URLs in `<urlset>` / `<sitemapindex>`) | ❌ | ✅ (`<lastmod>` timestamp comparison) | ❌ | ✅ Round-17 (Phase 2+, Generic) |
+| Coda | ✅ (`/whoami`) | ✅ (docs + pages) | ❌ (planned) | ✅ (`sortBy=updatedAt&direction=DESC` walk) | ❌ | ✅ Round-17 (Phase 2+, Knowledge) |
 
 ---
 
 ## Changelog
 
+- 2026-05-12: **Round 17: Connector catalog expansion — 28 → 36
+  production connectors. Tasks 1-8 add Microsoft Entra ID
+  (Identity, Graph `$deltatoken`), Google Workspace Directory
+  (Identity, `updatedMin` RFC3339 filter), Microsoft 365 Outlook
+  (Email, Graph `@odata.deltaLink` mailbox delta), Workday (HR,
+  `Updated_From` filter + termination → `ChangeDeleted`),
+  BambooHR (HR, basic-auth with api_key/x + `/changed?since`),
+  Personio (HR, OAuth client-credentials + `updated_from`),
+  sitemap (Generic, `<urlset>` / `<sitemapindex>` recursion + per-
+  entry `<lastmod>` cursor), and Coda (Knowledge, `updatedAt`
+  DESC walk). Tasks 9-10 lift the connector-completeness audit
+  + smoke-test pin to 36. Tasks 11-13 add
+  `tests/e2e/round17_test.go`, the Round-17 regression manifest,
+  and Round-17 contract assertions (`SourceConnector` +
+  `DeltaSyncer` + heterogeneous bootstrap surfaces).
+  Task 14 confirms the Round-16 fast-lane gates
+  (`fast-connector-integration`, `fast-regression`) cover the new
+  surface without further additions. Tasks 15-17 lift the runbook
+  gate to 36 + ship 8 new runbooks. Tasks 18-20 refresh
+  PROGRESS / README / ARCHITECTURE / PHASES.**
+  - **Tasks 1-8**: Eight new connectors live under
+    `internal/connector/entra_id/` (Graph delta tokens; disabled
+    + `@removed` map to `ChangeDeleted`),
+    `internal/connector/google_workspace/` (`updatedMin`
+    RFC3339 filter; `suspended=true` maps to `ChangeDeleted`),
+    `internal/connector/outlook/` (Graph mailbox delta with
+    `@odata.deltaLink` rotation),
+    `internal/connector/workday/` (`Updated_From` + termination
+    tombstones),
+    `internal/connector/bamboohr/` (basic-auth header where
+    api_key is the username and `"x"` is the password — pinned
+    by `TestBambooHR_BasicAuthHeader`),
+    `internal/connector/personio/` (client-credentials grant +
+    `updated_from`),
+    `internal/connector/sitemap/` (XML decoder that follows
+    `<sitemapindex>` shards bounded by `maxDepth` to avoid cycles;
+    multi-format `<lastmod>` parser),
+    `internal/connector/coda/` (DESC walk with `pageToken`
+    pagination). Each connector implements
+    `SourceConnector` + `DeltaSyncer`, uses stdlib `net/http`
+    with `http.NewRequestWithContext`, wraps HTTP 429 as
+    `connector.ErrRateLimited`, and ships with full
+    httptest-backed unit tests including the Round-15/16
+    bootstrap contract (empty cursor → DESC + `limit=1` →
+    "now" cursor without history backfill).
+  - **Task 9**: `internal/connector/audit_test.go` audits 35
+    first-class connectors (excluding the `google_shared_drives`
+    wrapper that delegates to `googledrive`). Every new source
+    file references `connector.ErrInvalidConfig`,
+    `connector.ErrNotSupported`, `connector.ErrRateLimited`,
+    and `http.NewRequestWithContext`.
+  - **Task 10**: `tests/e2e/connector_smoke_test.go` pins the
+    registry at 36 entries and adds full-lifecycle smoke tests
+    (Validate → Connect → ListNamespaces → ListDocuments →
+    FetchDocument + DeltaSync) for each of the 8 new connectors.
+  - **Task 11**: `tests/e2e/round17_test.go` adds the Round-17
+    registry count assertion, Entra ID + BambooHR full
+    lifecycles as heterogeneous probes (Graph delta-token vs
+    basic-auth + `changed-since`), and a rate-limit sweep that
+    probes all 8 new connectors with a 429 fixture and verifies
+    `connector.ErrRateLimited` propagation.
+  - **Task 12**: `tests/regression/round1617_manifest.go` +
+    `_test.go` catalogue the Round-17 fixes (registry expansion
+    to 36, DeltaSync bootstrap contract for each new connector,
+    deprovisioned-identity → `ChangeDeleted`, 429 → rate-limit
+    sentinel sweep, BambooHR basic-auth header order, sitemap-
+    index recursion). The meta-test asserts every `TestRef`
+    resolves on disk.
+  - **Task 13**: `tests/integration/connector_contract_test.go`
+    adds compile-time `SourceConnector` + `DeltaSyncer`
+    assertions for each of the 8 new structs and a table-driven
+    `TestConnectorContract_Round17_DeltaSyncerEmptyCursor`
+    covering Graph delta token (Entra ID), `/v1/employees/
+    directory` (BambooHR), and sitemap `<lastmod>` (Sitemap)
+    bootstrap surfaces.
+  - **Task 14**: No CI changes — the existing
+    `fast-connector-unit` (`./internal/connector/...`),
+    `fast-connector-integration` (`integration`-tagged contract
+    tests), and `fast-regression` (manifest meta-tests) lanes
+    pick up all Round-17 surfaces automatically. The
+    `fast-required` aggregator continues to gate branch
+    protection. The `concurrency` group already cancels stale
+    runs per PR / per branch.
+  - **Tasks 15-17**: `docs/runbooks/runbook_test.go` lifts the
+    floor from 28 → 36 and blank-imports all 8 new connectors;
+    `docs/runbooks/entraid.md`, `googleworkspace.md`,
+    `outlook.md`, `workday.md`, `bamboohr.md`, `personio.md`,
+    `sitemap.md`, and `coda.md` each cover the four required
+    sections (credential rotation, quota / rate-limit incidents,
+    outage detection / recovery, common error codes).
+  - **Tasks 18-20**: PROGRESS.md changelog + matrix (this
+    expansion), README.md status banner / Round-17 additions
+    block / structure tree refresh, ARCHITECTURE.md §9 directory
+    tree + "Tech choices added in Round 17" section, PHASES.md
+    Phase 7 exit criteria refreshed to 36 connectors.
 - 2026-05-12: **Round 16: Connector catalog expansion — 20 → 28
   production connectors. Tasks 1-8 add Mattermost (Chat), ClickUp
   + Monday.com (Issue/project — REST + GraphQL), Pipedrive (CRM),

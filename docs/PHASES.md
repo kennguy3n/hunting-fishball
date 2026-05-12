@@ -16,7 +16,7 @@ phase.
 | 🟡 partial | Some exit criteria met; gaps tracked in `PROGRESS.md` |
 | ⏳ planned | Not yet started |
 
-> **Phase status snapshot (2026-05-12, post-Round-16).** Phases 0,
+> **Phase status snapshot (2026-05-12, post-Round-17).** Phases 0,
 > 1, 2, 3, 7, and 8 are **functionally complete** — every exit
 > criterion has shipped to `main` and the supporting tests /
 > runbooks / metrics are in place. Phases 7 and 8 carry the
@@ -31,18 +31,30 @@ phase.
 > [`PROGRESS.md`](PROGRESS.md) for the per-task status and
 > [`README.md`](../README.md) for the round-by-round changelog.
 >
-> **Round 16** expands the connector catalog from 20 to **28**
-> production connectors. Eight Phase-2+ targets ship: Mattermost
-> (Chat), ClickUp + Monday.com (Issue/project — REST + GraphQL),
-> Pipedrive (CRM), Okta (Identity), Gmail (Email read-only via
-> `history.list`), RSS/Atom (Generic feed polling), and
-> Confluence Server/DC (Knowledge/wiki via CQL `lastModified`).
-> Round 16 also wires two new fast-lane CI gates
-> (`fast-connector-integration` running the integration build
-> tag against the contract suite without docker-compose;
-> `fast-regression` pinning the regression manifests), the
-> Round-15/16 regression manifest, and 8 new per-connector
-> runbooks. Round 15 (previous round) expanded the catalog from
+> **Round 17** expands the connector catalog from 28 to **36**
+> production connectors. Eight new Phase-2+ targets ship:
+> Microsoft Entra ID (Identity, Graph `$deltatoken`), Google
+> Workspace Directory (Identity, `updatedMin` filter), Microsoft
+> 365 Outlook (Email, Graph `@odata.deltaLink`), Workday +
+> BambooHR + Personio (HR, with termination /
+> `action="Deleted"` / `status="inactive"` tombstones mapping to
+> `ChangeDeleted`), sitemap.xml crawl (Generic, with
+> `<sitemapindex>` recursion + `<lastmod>` cursor), and Coda
+> (Knowledge, DESC walk on `updatedAt`). Round 17 also lifts the
+> connector-completeness audit and runbook gate to 36, adds
+> `tests/e2e/round17_test.go` + the Round-17 regression manifest,
+> and ships 8 new per-connector runbooks. The Round-16 fast-lane
+> gates (`fast-connector-integration`, `fast-regression`)
+> automatically cover the new surface — no new CI lanes were
+> added in this round. Round 16 (previous round) expanded the
+> catalog from 20 to 28 — Mattermost (Chat), ClickUp +
+> Monday.com (Issue/project — REST + GraphQL), Pipedrive (CRM),
+> Okta (Identity), Gmail (Email read-only via `history.list`),
+> RSS/Atom (Generic feed polling), and Confluence Server/DC
+> (Knowledge/wiki via CQL `lastModified`) — and wired two new
+> fast-lane CI gates plus the Round-15/16 regression manifest
+> and 8 new per-connector runbooks. Round 15 (round before)
+> expanded the catalog from
 > 12 to 20 — KChat (the missing Phase-1 chat source) and seven
 > Phase-2+ targets (S3-compatible object storage, Linear, Asana,
 > Discord, Salesforce, HubSpot, Google Shared Drives as a
@@ -56,7 +68,7 @@ phase.
 > `fast-test` / `fast-build`). Migration count is unchanged at
 > 040.
 >
-> The per-round changelog (Rounds 4 through 16) and the live
+> The per-round changelog (Rounds 4 through 17) and the live
 > per-task exit-criteria checklist live in
 > [`PROGRESS.md`](PROGRESS.md); earlier round-status snapshots
 > previously inlined here have been consolidated into that
@@ -313,16 +325,18 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
 **Exit criteria.**
 
 - [x] At least 12 production connectors at GA (Phase-1 target met).
-      Round 16 expands the catalog to **28**: Phase 1 (Google
+      Round 17 expands the catalog to **36**: Phase 1 (Google
       Drive, Slack, KChat) + Phase 7 (SharePoint, OneDrive,
       Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab,
       Microsoft Teams) + Round-15 Phase-2+ adds (S3, Linear,
       Asana, Discord, Salesforce, HubSpot, Google Shared Drives
       as a dedicated registry entry) + Round-16 Phase-2+ adds
       (Mattermost, ClickUp, Monday.com, Pipedrive, Okta, Gmail,
-      RSS/Atom, Confluence Server/DC) = **28**; each lives in
-      `internal/connector/<name>/` with `httptest`-backed unit
-      tests.
+      RSS/Atom, Confluence Server/DC) + Round-17 Phase-2+ adds
+      (Microsoft Entra ID, Google Workspace Directory, Microsoft
+      365 Outlook, Workday, BambooHR, Personio, Sitemap, Coda) =
+      **36**; each lives in `internal/connector/<name>/` with
+      `httptest`-backed unit tests.
 - [x] Each connector has its own runbook for credential rotation,
       quota incidents, and outages — see `docs/runbooks/` (one
       Markdown file per connector keyed on the connector's auth
@@ -336,15 +350,17 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
       Phase 1 introduced — `tests/e2e/connector_smoke_test.go`
       (build tag `e2e`) drives Validate → Connect → ListNamespaces
       → ListDocuments → FetchDocument for every connector and
-      asserts the registry has exactly 28 entries.
+      asserts the registry has exactly 36 entries.
       `make test-connector-smoke`.
 - [x] Connector completeness audit (Round 15, Task 9 — extended
-      in Round 16, Task 9): `internal/connector/audit_test.go`
-      is a process-global gate that fails CI if any connector
-      source drops `ErrInvalidConfig`, `ErrNotSupported`,
-      `ErrRateLimited`, or `http.NewRequestWithContext`. The
-      audited list now covers all 27 first-class connectors
-      (excluding the `google_shared_drives` registry wrapper).
+      in Round 16 and Round 17, Task 9):
+      `internal/connector/audit_test.go` is a process-global
+      gate that fails CI if any connector source drops
+      `ErrInvalidConfig`, `ErrNotSupported`, `ErrRateLimited`,
+      or `http.NewRequestWithContext`. The audited list now
+      covers all 35 first-class connectors (excluding the
+      `google_shared_drives` registry wrapper which delegates
+      to the googledrive connector).
 
 ---
 

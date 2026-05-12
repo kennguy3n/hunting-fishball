@@ -1,22 +1,37 @@
 # hunting-fishball
 
-> **Status (2026-05-12, post-Round-16).** Phases 0-3 and 7-8 are
+> **Status (2026-05-12, post-Round-17).** Phases 0-3 and 7-8 are
 > **functionally complete** in `main`; Phases 4-6 are
 > **server-side complete** with only client-side rendering left in
 > external repos. See [`docs/PROGRESS.md`](docs/PROGRESS.md) for
 > the live checklist and the Round-by-round changelog below.
-> Migration count is at **040**. **Round 16 expands the connector
-> catalog from 20 → 28**: Mattermost (Chat), ClickUp + Monday.com
-> (Issue/project — REST + GraphQL), Pipedrive (CRM), Okta
-> (Identity), Gmail (Email read-only via history.list), RSS/Atom
-> (Generic feed polling), and Confluence Server/Data Center
-> (Knowledge/wiki via CQL `lastModified`). Round 16 also adds
-> two new fast-lane CI gates (`fast-connector-integration`
-> running the integration build tag against the contract suite,
-> and `fast-regression` pinning the regression manifests), the
-> `Round1516Manifest` (Round-15/16 regression catalogue with
-> meta-tests), eight new per-connector runbooks, and full sweeps
-> of PROGRESS / PHASES / ARCHITECTURE.
+> Migration count is at **040**. **Round 17 expands the connector
+> catalog from 28 → 36**: Microsoft Entra ID (Identity, Graph
+> `$deltatoken`), Google Workspace Directory (Identity,
+> `updatedMin` filter), Microsoft 365 Outlook (Email, Graph
+> mailbox delta), Workday + BambooHR + Personio (HR, with
+> termination / `action="Deleted"` / `status="inactive"` tombstones
+> mapping to `ChangeDeleted`), sitemap.xml crawl (Generic, with
+> `<sitemapindex>` recursion and `<lastmod>` cursors), and Coda
+> (Knowledge, DESC walk on `updatedAt`). Round 17 lifts the
+> connector-completeness audit and runbook gate to 36, ships eight
+> new per-connector runbooks, adds `tests/e2e/round17_test.go`
+> and `tests/regression/round1617_manifest.go`, and refreshes
+> PROGRESS / PHASES / ARCHITECTURE. The Round-16 fast-lane gates
+> (`fast-connector-integration`, `fast-regression`) pick up the
+> new surface without additional CI changes.
+>
+> Round 16 (previous round) expanded the connector catalog from
+> 20 → 28: Mattermost (Chat), ClickUp + Monday.com (Issue/project
+> — REST + GraphQL), Pipedrive (CRM), Okta (Identity), Gmail
+> (Email read-only via history.list), RSS/Atom (Generic feed
+> polling), and Confluence Server/Data Center (Knowledge/wiki via
+> CQL `lastModified`). Round 16 also added two new fast-lane CI
+> gates (`fast-connector-integration` running the integration build
+> tag against the contract suite, and `fast-regression` pinning
+> the regression manifests), the `Round1516Manifest` (Round-15/16
+> regression catalogue with meta-tests), eight new per-connector
+> runbooks, and full sweeps of PROGRESS / PHASES / ARCHITECTURE.
 >
 > Round 15 (previous round) expanded the connector catalog from
 > 12 → 20: KChat (the missing Phase-1 chat source), S3-compatible
@@ -371,6 +386,86 @@ The full set of public + admin endpoints is documented in
   catches Postgres-specific syntax (JSONB / TIMESTAMPTZ /
   `ADD COLUMN IF NOT EXISTS`) that the SQLite dry-run misses
   (Task 20, `scripts/migrate-dry-run-pg.sh`).
+
+**Round 17 additions:**
+
+- Connector catalog expansion (28 → 36):
+  - `entra_id` — Microsoft Entra ID
+    (`internal/connector/entra_id/`). Users + groups via
+    Microsoft Graph; delta via `$deltatoken` on `/users/delta`
+    and `/groups/delta`; deprovisioned / `@removed` /
+    `accountEnabled=false` map to `ConnectorChange{Type: ChangeDeleted}`.
+  - `google_workspace` — Google Workspace Directory
+    (`internal/connector/google_workspace/`). Users + groups
+    via Admin SDK; delta via `updatedMin=<RFC3339>`;
+    `suspended=true` maps to `ChangeDeleted`.
+  - `outlook` — Microsoft 365 Outlook mailboxes
+    (`internal/connector/outlook/`). Read-only ingestion via
+    `Mail.Read` scope; delta via Graph `@odata.deltaLink` on
+    `/messages/delta`.
+  - `workday` — Workday REST API
+    (`internal/connector/workday/`). Workers; delta via
+    `Updated_From=<RFC3339>`; terminated workers map to
+    `ChangeDeleted`.
+  - `bamboohr` — BambooHR
+    (`internal/connector/bamboohr/`). Employee directory via
+    basic-auth where the api_key is the username and `"x"`
+    is the password; delta via
+    `/v1/employees/changed?since=<ISO8601>`.
+  - `personio` — Personio
+    (`internal/connector/personio/`). Employees via OAuth 2.0
+    client-credentials; delta via `updated_from=<RFC3339>`;
+    `status="inactive"` maps to `ChangeDeleted`.
+  - `sitemap` — sitemap.xml crawl
+    (`internal/connector/sitemap/`). XML decoder that follows
+    `<sitemapindex>` shards bounded by `maxDepth` to avoid
+    cycles, multi-format `<lastmod>` parser (RFC3339,
+    RFC3339Nano, `2006-01-02T15:04:05`, `2006-01-02`); optional
+    basic-auth or Bearer for gated sitemaps.
+  - `coda` — Coda
+    (`internal/connector/coda/`). Docs + pages via Coda REST
+    API; delta via `sortBy=updatedAt&direction=DESC` walk with
+    `pageToken` pagination.
+- Testing:
+  - `tests/e2e/round17_test.go` — registry count fixed at 36,
+    Entra ID + BambooHR full lifecycle tests as heterogeneous
+    probes (Graph delta-token vs basic-auth + changed-since),
+    and a rate-limit sweep that probes all 8 new connectors
+    with a 429 fixture and verifies `ErrRateLimited`
+    propagation (build tag `e2e`).
+  - `tests/regression/round1617_manifest.go` + `_test.go` —
+    Round-17 regression catalogue (registry expansion to 36,
+    DeltaSync bootstrap contract for each new connector,
+    deprovisioned-identity → `ChangeDeleted`, 429 → rate-limit
+    sentinel sweep, BambooHR basic-auth header order, sitemap-
+    index recursion). Meta-test asserts every TestRef resolves
+    on disk.
+  - `tests/integration/connector_contract_test.go` extended
+    (build tag `integration`) — compile-time `SourceConnector`
+    + `DeltaSyncer` assertions per new connector struct, and
+    `TestConnectorContract_Round17_DeltaSyncerEmptyCursor`
+    covering Graph delta-token (Entra ID), `changed-since`
+    (BambooHR), and sitemap `<lastmod>` (Sitemap) bootstrap
+    surfaces.
+- CI: no workflow changes — the Round-16
+  `fast-connector-unit`, `fast-connector-integration`, and
+  `fast-regression` lanes already cover the new surface
+  (`./internal/connector/...`, `integration`-tagged contract
+  tests, and `./tests/regression/...` respectively). The
+  `fast-required` aggregator continues to gate branch
+  protection.
+- Documentation:
+  - 8 new per-connector runbooks under `docs/runbooks/`
+    (entraid, googleworkspace, outlook, workday, bamboohr,
+    personio, sitemap, coda) each with the 4 required
+    sections.
+  - `docs/PROGRESS.md` capability matrix expanded with the 8
+    new entries; Phase-7 status updated to **36 connectors**.
+  - `docs/ARCHITECTURE.md` §9 directory tree lists all 36
+    connector directories; new "Tech choices added in
+    Round 17" section.
+  - `docs/PHASES.md` Phase 7 exit criteria updated to
+    **36 connectors**.
 
 **Round 16 additions:**
 
@@ -960,7 +1055,7 @@ hunting-fishball/
 ├── internal/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces, process-global registry.
-│   │   │                      # 28 connectors after Round 16:
+│   │   │                      # 36 connectors after Round 17:
 │   │   ├── googledrive/       # Google Drive (Phase 1) +
 │   │   │                      # google_shared_drives registry entry
 │   │   │                      # (Round 15) for shared-drive-only sync
@@ -990,7 +1085,24 @@ hunting-fishball/
 │   │   ├── okta/              # Okta Management API (Round 16)
 │   │   ├── gmail/             # Gmail REST history.list (Round 16)
 │   │   ├── rss/               # Generic RSS / Atom (Round 16)
-│   │   └── confluence_server/ # Confluence Server / DC (Round 16)
+│   │   ├── confluence_server/ # Confluence Server / DC (Round 16)
+│   │   ├── entra_id/          # Microsoft Entra ID — Graph delta tokens
+│   │   │                      # (Round 17, Identity)
+│   │   ├── google_workspace/  # Google Workspace Directory — updatedMin
+│   │   │                      # filter (Round 17, Identity)
+│   │   ├── outlook/           # Microsoft 365 Outlook mailboxes — Graph
+│   │   │                      # @odata.deltaLink (Round 17, Email)
+│   │   ├── workday/           # Workday REST — Updated_From filter
+│   │   │                      # (Round 17, HR)
+│   │   ├── bamboohr/          # BambooHR — basic-auth api_key:x + changed-
+│   │   │                      # since (Round 17, HR)
+│   │   ├── personio/          # Personio — client-credentials + updated_from
+│   │   │                      # (Round 17, HR)
+│   │   ├── sitemap/           # sitemap.xml crawl — <sitemapindex>
+│   │   │                      # recursion + <lastmod> cursor (Round 17,
+│   │   │                      # Generic)
+│   │   └── coda/              # Coda — updatedAt DESC walk with pageToken
+│   │                          # (Round 17, Knowledge)
 │   ├── credential/            # AES-256-GCM envelope encryption
 │   ├── audit/                 # audit_logs model + repository + Kafka
 │   │                          # outbox + Gin handler

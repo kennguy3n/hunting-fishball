@@ -688,7 +688,7 @@ hunting-fishball/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces (DeltaSyncer / WebhookReceiver /
 │   │   │                      # Provisioner), process-global registry.
-│   │   │                      # 28 connectors after Round 16.
+│   │   │                      # 36 connectors after Round 17.
 │   │   ├── googledrive/       # Google Drive connector (Phase 1) +
 │   │   │                      # shared_drives.go (Round 15) which
 │   │   │                      # registers google_shared_drives as a
@@ -743,9 +743,39 @@ hunting-fishball/
 │   │   │                      # historyId cursor.
 │   │   ├── rss/               # Generic RSS / Atom (Round 16);
 │   │   │                      # max pubDate / updated cursor.
-│   │   └── confluence_server/ # Confluence Server / DC (Round 16);
-│   │                          # PAT or basic auth; CQL
-│   │                          # lastModified > "<RFC3339>" delta.
+│   │   ├── confluence_server/ # Confluence Server / DC (Round 16);
+│   │   │                      # PAT or basic auth; CQL
+│   │   │                      # lastModified > "<RFC3339>" delta.
+│   │   ├── entra_id/          # Microsoft Entra ID (Round 17, Identity);
+│   │   │                      # Graph delta tokens on /users/delta +
+│   │   │                      # /groups/delta; @removed and
+│   │   │                      # accountEnabled=false → ChangeDeleted.
+│   │   ├── google_workspace/  # Google Workspace Directory (Round 17,
+│   │   │                      # Identity); Admin SDK users + groups;
+│   │   │                      # updatedMin RFC3339 delta; suspended=true
+│   │   │                      # → ChangeDeleted.
+│   │   ├── outlook/           # Microsoft 365 Outlook mailboxes (Round 17,
+│   │   │                      # Email); Graph @odata.deltaLink rotation
+│   │   │                      # on /messages/delta.
+│   │   ├── workday/           # Workday REST (Round 17, HR);
+│   │   │                      # Updated_From RFC3339 filter on /workers;
+│   │   │                      # active=false → ChangeDeleted.
+│   │   ├── bamboohr/          # BambooHR (Round 17, HR); basic-auth
+│   │   │                      # with api_key as username and "x" as
+│   │   │                      # password; /v1/employees/changed?since
+│   │   │                      # ISO8601 delta; action="Deleted" →
+│   │   │                      # ChangeDeleted.
+│   │   ├── personio/          # Personio (Round 17, HR); OAuth 2.0
+│   │   │                      # client-credentials grant + updated_from
+│   │   │                      # RFC3339 delta; status="inactive" →
+│   │   │                      # ChangeDeleted.
+│   │   ├── sitemap/           # sitemap.xml crawl (Round 17, Generic);
+│   │   │                      # XML decoder follows <sitemapindex>
+│   │   │                      # shards bounded by maxDepth to avoid
+│   │   │                      # cycles; multi-format <lastmod> parser.
+│   │   └── coda/              # Coda (Round 17, Knowledge);
+│   │                          # sortBy=updatedAt&direction=DESC walk
+│   │                          # with pageToken pagination.
 │   ├── credential/            # AES-256-GCM envelope encryption for
 │   │                          # connector credentials
 │   ├── audit/                 # AuditLog model, repository (transactional
@@ -2706,5 +2736,121 @@ dependencies are introduced; every new connector uses stdlib
   registry floor in `runbook_test.go` is now 28.
 
 - **Migration count unchanged.** Round 16 introduces no new
+  schema migrations; the highest migration on disk remains
+  `migrations/040_dlq_category.sql`.
+
+### Tech choices added in Round 17
+
+Round 17 expands the connector catalog from 28 to 36 entries.
+No new third-party dependencies are introduced; every new
+connector uses stdlib `net/http` against `httptest.NewServer`
+fixtures in unit tests and continues the Round-15/16 bootstrap
+contract (empty cursor → DESC + limit=1 → populated cursor
+without history backfill).
+
+- **Connector catalog expansion (28 → 36).** Round 17 adds
+  eight new entries to the process-global registry, grouped by
+  surface family:
+
+  Identity (Graph $deltatoken + Admin SDK updatedMin):
+  - `entra_id` — Microsoft Entra ID
+    (`internal/connector/entra_id/entra_id.go`). Users + groups
+    via Microsoft Graph; delta via `$deltatoken` on
+    `/users/delta` and `/groups/delta`. The deltaLink is
+    persisted as the cursor and replayed on the next call so
+    Graph returns only changes since the last sync.
+    `accountEnabled=false` and the Graph `@removed` tombstone
+    map to `connector.ChangeDeleted`.
+  - `google_workspace` — Google Workspace Directory
+    (`internal/connector/google_workspace/google_workspace.go`).
+    Users + groups via Admin SDK; delta via
+    `updatedMin=<RFC3339>` on
+    `/admin/directory/v1/users?customer=my_customer`.
+    `suspended=true` maps to `connector.ChangeDeleted`.
+
+  Email (Graph @odata.deltaLink for mailbox messages):
+  - `outlook` — Microsoft 365 Outlook mailboxes
+    (`internal/connector/outlook/outlook.go`). Read-only
+    ingestion via the `Mail.Read` scope. Delta via Graph
+    `@odata.deltaLink` rotation on `/messages/delta`; nextLink
+    pagination via `@odata.nextLink`.
+
+  HR (updated-from / changed-since filters with explicit
+  deletion semantics):
+  - `workday` — Workday REST
+    (`internal/connector/workday/workday.go`). Workers via
+    `/workers`; delta via `Updated_From=<RFC3339>` filter.
+    `active=false` + `terminationDate` map to
+    `connector.ChangeDeleted` so the downstream directory drops
+    terminated employees automatically.
+  - `bamboohr` — BambooHR
+    (`internal/connector/bamboohr/bamboohr.go`). Employee
+    directory via `/v1/employees/directory`; delta via
+    `/v1/employees/changed?since=<ISO8601>`. The HTTP basic-auth
+    header puts the api_key as the *username* and a literal
+    `"x"` as the password — pinned by
+    `TestBambooHR_BasicAuthHeader` so a regression that flipped
+    the parameters (and would leak the key via BambooHR's
+    request logs) breaks CI.
+  - `personio` — Personio
+    (`internal/connector/personio/personio.go`). Employees via
+    OAuth 2.0 client-credentials grant (`POST /auth` →
+    bearer); delta via `updated_from=<RFC3339>` on
+    `/company/employees`. `status="inactive"` maps to
+    `connector.ChangeDeleted`.
+
+  Generic (XML sitemap recursion with multi-format lastmod):
+  - `sitemap` — sitemap.xml crawl
+    (`internal/connector/sitemap/sitemap.go`). XML decoder
+    distinguishes `<urlset>` (terminal) from `<sitemapindex>`
+    (recursive); a `maxDepth` guard prevents cycles when a
+    sitemap accidentally references itself. The `<lastmod>`
+    parser accepts RFC3339, RFC3339Nano,
+    `2006-01-02T15:04:05`, and `2006-01-02` so it tolerates the
+    variety of timestamp conventions observed in the wild.
+    Optional basic-auth or Bearer for intranet sitemaps gated
+    behind a CDN.
+
+  Knowledge (REST DESC walk with cursor-based pagination):
+  - `coda` — Coda
+    (`internal/connector/coda/coda.go`). Docs + pages via Coda
+    REST API; delta via `sortBy=updatedAt&direction=DESC` walk
+    with `pageToken` pagination, stopping at the high-water
+    `updatedAt` cursor.
+
+- **Heterogeneous DeltaSync bootstrap surfaces.** Round 17
+  extends the Round-15/16 "no backfill on first call" contract
+  across three new families: Graph `@odata.deltaLink` /
+  `$deltatoken` rotation (Entra ID, Outlook), `updated_from` /
+  `changed-since` RFC3339 filters (Google Workspace, Workday,
+  BambooHR, Personio), and XML `<lastmod>` cursors (Sitemap).
+  The Round-17 `TestConnectorContract_Round17_DeltaSyncerEmptyCursor`
+  table-driven test pins one connector per family.
+
+- **No new CI lanes.** The Round-16 fast-lane gates
+  (`fast-connector-unit` running `./internal/connector/...`,
+  `fast-connector-integration` running `integration`-tagged
+  contract tests, `fast-regression` running
+  `./tests/regression/...`) pick up the new surface
+  automatically. The `fast-required` aggregator continues to
+  gate branch protection.
+
+- **Round-17 regression manifest.**
+  `tests/regression/round1617_manifest.go` + `_test.go`
+  catalogue 6 fixes (registry expansion to 36, DeltaSync
+  bootstrap contract for each new connector, deprovisioned-
+  identity → `ChangeDeleted`, 429 → `ErrRateLimited` sweep,
+  BambooHR basic-auth header order, sitemap-index recursion).
+  The meta-test asserts every TestRef resolves to a real
+  `func TestName(` on disk.
+
+- **Eight new per-connector runbooks.**
+  `docs/runbooks/{entraid,googleworkspace,outlook,workday,bamboohr,personio,sitemap,coda}.md`
+  each cover the four required sections (credential rotation,
+  quota / rate-limit, outage detection / recovery, error
+  codes) enforced by `docs/runbooks/runbook_test.go`. The
+  registry floor in `runbook_test.go` is now 36.
+
+- **Migration count unchanged.** Round 17 introduces no new
   schema migrations; the highest migration on disk remains
   `migrations/040_dlq_category.sql`.

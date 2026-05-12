@@ -11,10 +11,10 @@
 //   - For DeltaSyncer connectors, DeltaSync returns a fresh cursor.
 //   - For WebhookReceiver connectors, HandleWebhook decodes a sample
 //     payload into at least one DocumentChange.
-//   - The process-global connector registry has exactly 28 entries
-//     after blank-imports complete (Round-16 catalog expansion adds
-//     mattermost, clickup, monday, pipedrive, okta, gmail, rss, and
-//     confluence_server on top of the Round-15 catalog).
+//   - The process-global connector registry has exactly 36 entries
+//     after blank-imports complete (Round-17 catalog expansion adds
+//     entra_id, google_workspace, outlook, workday, bamboohr,
+//     personio, sitemap, and coda on top of the Round-16 catalog).
 //
 // Run via `make test-connector-smoke` (or as part of `make test-e2e`).
 package e2e
@@ -34,15 +34,19 @@ import (
 
 	// Blank-import every connector so the registry self-populates.
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/asana"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/coda"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence_server"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/google_workspace"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
@@ -53,27 +57,35 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/notion"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/okta"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/outlook"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/personio"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sitemap"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 
 	// Direct imports so each smoke case can call the connector's
 	// `New(With…)` option helpers without going through the registry's
 	// stripped-down factory.
 	"github.com/kennguy3n/hunting-fishball/internal/connector/asana"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/coda"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
 	confluenceserver "github.com/kennguy3n/hunting-fishball/internal/connector/confluence_server"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
+	entraid "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
 	gh "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
+	googleworkspace "github.com/kennguy3n/hunting-fishball/internal/connector/google_workspace"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/jira"
@@ -84,13 +96,17 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/notion"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/okta"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/outlook"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/personio"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/sitemap"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 )
 
 // expectedConnectors is the canonical list of registered connector
@@ -98,17 +114,21 @@ import (
 // silently disappears from a binary's blank-import list.
 var expectedConnectors = []string{
 	"asana",
+	"bamboohr",
 	"box",
 	"clickup",
+	"coda",
 	"confluence",
 	"confluence_server",
 	"discord",
 	"dropbox",
+	"entra_id",
 	"github",
 	"gitlab",
 	"gmail",
 	"google_drive",
 	"google_shared_drives",
+	"google_workspace",
 	"hubspot",
 	"jira",
 	"kchat",
@@ -118,13 +138,17 @@ var expectedConnectors = []string{
 	"notion",
 	"okta",
 	"onedrive",
+	"outlook",
+	"personio",
 	"pipedrive",
 	"rss",
 	"s3",
 	"salesforce",
 	"sharepoint",
+	"sitemap",
 	"slack",
 	"teams",
+	"workday",
 }
 
 func TestConnectorSmoke_RegistryHasAllConnectors(t *testing.T) {
@@ -1075,6 +1099,201 @@ func TestConnectorSmoke_ConfluenceServer(t *testing.T) {
 	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
 	conn, _ := runListNamespacesAndFetch(t, c, cfg)
 	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "DOCS"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_EntraID(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/organization", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"value":[{"id":"O1","displayName":"Org"}]}`)
+	})
+	mux.HandleFunc("/users", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"value":[{"id":"U1","displayName":"Alice"}]}`)
+	})
+	mux.HandleFunc("/groups", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"value":[]}`)
+	})
+	mux.HandleFunc("/users/U1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"U1","displayName":"Alice","userPrincipalName":"alice@x"}`)
+	})
+	mux.HandleFunc("/users/delta", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"@odata.deltaLink":"https://graph.test/users/delta?$deltatoken=AAA","value":[]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := entraid.New(entraid.WithBaseURL(srv.URL), entraid.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(entraid.Credentials{AccessToken: "tok"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "users"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_GoogleWorkspace(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("maxResults") == "1" {
+			_, _ = io.WriteString(w, `{"users":[]}`)
+
+			return
+		}
+		_, _ = io.WriteString(w, `{"users":[{"id":"U1","primaryEmail":"alice@x"}]}`)
+	})
+	mux.HandleFunc("/groups", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"groups":[]}`)
+	})
+	mux.HandleFunc("/users/U1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"U1","primaryEmail":"alice@x","name":{"fullName":"Alice"}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := googleworkspace.New(googleworkspace.WithBaseURL(srv.URL), googleworkspace.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(googleworkspace.Credentials{AccessToken: "tok"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "users"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Outlook(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"me"}`)
+	})
+	mux.HandleFunc("/me/mailFolders", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"value":[{"id":"inbox","displayName":"Inbox"}]}`)
+	})
+	mux.HandleFunc("/me/mailFolders/inbox/messages", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"value":[{"id":"M1","subject":"Hi"}]}`)
+	})
+	mux.HandleFunc("/me/messages/M1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"M1","subject":"Hi","from":{"emailAddress":{"address":"alice@x"}}}`)
+	})
+	mux.HandleFunc("/me/mailFolders/inbox/messages/delta", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"@odata.deltaLink":"https://graph.test/delta?token=A","value":[]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := outlook.New(outlook.WithBaseURL(srv.URL), outlook.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(outlook.Credentials{AccessToken: "tok"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "inbox"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Workday(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/workers", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"id":"W1","fullName":"Alice"}],"total":1}`)
+	})
+	mux.HandleFunc("/workers/W1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"W1","fullName":"Alice"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := workday.New(workday.WithBaseURL(srv.URL), workday.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(workday.Credentials{AccessToken: "tok", TenantURL: srv.URL})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "workers"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_BambooHR(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/employees/directory", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"employees":[{"id":"1","displayName":"Alice"}]}`)
+	})
+	mux.HandleFunc("/v1/employees/1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"1","displayName":"Alice","workEmail":"alice@x"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := bamboohr.New(bamboohr.WithBaseURL(srv.URL), bamboohr.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(bamboohr.Credentials{APIKey: "k", Subdomain: "acme"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "employees"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Personio(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":{"token":"tok"}}`)
+	})
+	mux.HandleFunc("/company/employees", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"attributes":{"id":{"value":1}}}]}`)
+	})
+	mux.HandleFunc("/company/employees/1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":{"attributes":{"first_name":{"value":"Alice"},"last_name":{"value":"Lee"},"email":{"value":"alice@x"}}}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := personio.New(personio.WithBaseURL(srv.URL), personio.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(personio.Credentials{ClientID: "cid", ClientSecret: "sec"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "employees"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Sitemap(t *testing.T) {
+	t.Parallel()
+	var selfURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>`+selfURL+`/a</loc><lastmod>2024-06-01T00:00:00Z</lastmod></url></urlset>`)
+	})
+	mux.HandleFunc("/a", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `<html>hi</html>`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	selfURL = srv.URL
+	c := sitemap.New(sitemap.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(sitemap.Credentials{SitemapURLs: []string{srv.URL + "/sitemap.xml"}})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: srv.URL + "/sitemap.xml"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Coda(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/whoami", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"name":"alice"}`)
+	})
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"items":[{"id":"D1","name":"Wiki","updatedAt":"2024-06-01T00:00:00Z"}]}`)
+	})
+	mux.HandleFunc("/docs/D1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"D1","name":"Wiki","updatedAt":"2024-06-01T00:00:00Z"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := coda.New(coda.WithBaseURL(srv.URL), coda.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(coda.Credentials{AccessToken: "tok"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "docs"}, ""); err != nil {
 		t.Fatalf("delta: %v", err)
 	}
 }

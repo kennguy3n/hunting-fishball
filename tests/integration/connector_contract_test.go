@@ -30,10 +30,14 @@ import (
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/asana"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/coda"
 	confluenceserver "github.com/kennguy3n/hunting-fishball/internal/connector/confluence_server"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/discord"
+	entraid "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
+	googleworkspace "github.com/kennguy3n/hunting-fishball/internal/connector/google_workspace"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/kchat"
@@ -41,11 +45,15 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/mattermost"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/monday"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/okta"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/outlook"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/personio"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/sitemap"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/slack"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 )
 
 // TestConnectorContract_SourceConnectorAssertions is a
@@ -79,6 +87,107 @@ func TestConnectorContract_SourceConnectorAssertions(t *testing.T) {
 	var _ connector.DeltaSyncer = (*gmail.Connector)(nil)
 	var _ connector.DeltaSyncer = (*rss.Connector)(nil)
 	var _ connector.DeltaSyncer = (*confluenceserver.Connector)(nil)
+	// Round-17 additions:
+	var _ connector.SourceConnector = (*entraid.Connector)(nil)
+	var _ connector.SourceConnector = (*googleworkspace.Connector)(nil)
+	var _ connector.SourceConnector = (*outlook.Connector)(nil)
+	var _ connector.SourceConnector = (*workday.Connector)(nil)
+	var _ connector.SourceConnector = (*bamboohr.Connector)(nil)
+	var _ connector.SourceConnector = (*personio.Connector)(nil)
+	var _ connector.SourceConnector = (*sitemap.Connector)(nil)
+	var _ connector.SourceConnector = (*coda.Connector)(nil)
+	var _ connector.DeltaSyncer = (*entraid.Connector)(nil)
+	var _ connector.DeltaSyncer = (*googleworkspace.Connector)(nil)
+	var _ connector.DeltaSyncer = (*outlook.Connector)(nil)
+	var _ connector.DeltaSyncer = (*workday.Connector)(nil)
+	var _ connector.DeltaSyncer = (*bamboohr.Connector)(nil)
+	var _ connector.DeltaSyncer = (*personio.Connector)(nil)
+	var _ connector.DeltaSyncer = (*sitemap.Connector)(nil)
+	var _ connector.DeltaSyncer = (*coda.Connector)(nil)
+}
+
+// TestConnectorContract_Round17_DeltaSyncerEmptyCursor exercises
+// the bootstrap contract against heterogeneous Round-17 surfaces:
+// Graph delta-token (Entra ID), changed-since (BambooHR), and
+// sitemap lastmod (Sitemap). Each must return zero changes plus
+// a non-empty cursor on an empty-cursor call.
+func TestConnectorContract_Round17_DeltaSyncerEmptyCursor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"entra_id", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/organization", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"value":[{"id":"O1"}]}`)
+			})
+			mux.HandleFunc("/users/delta", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"@odata.deltaLink":"https://graph.test/users/delta?$deltatoken=AAA","value":[]}`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := entraid.New(entraid.WithBaseURL(srv.URL), entraid.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(entraid.Credentials{AccessToken: "tok"})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "users"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+		{"bamboohr", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/employees/directory", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"employees":[]}`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := bamboohr.New(bamboohr.WithBaseURL(srv.URL), bamboohr.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(bamboohr.Credentials{APIKey: "k", Subdomain: "acme"})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "employees"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+		{"sitemap", func(t *testing.T) {
+			var selfURL string
+			mux := http.NewServeMux()
+			mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/xml")
+				_, _ = io.WriteString(w, `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>`+selfURL+`/a</loc><lastmod>2024-06-01T00:00:00Z</lastmod></url></urlset>`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			selfURL = srv.URL
+			c := sitemap.New(sitemap.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(sitemap.Credentials{SitemapURLs: []string{srv.URL + "/sitemap.xml"}})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: srv.URL + "/sitemap.xml"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.run(t)
+		})
+	}
 }
 
 // TestConnectorContract_DeltaSyncerEmptyCursor exercises the
