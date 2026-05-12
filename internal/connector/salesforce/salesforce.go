@@ -377,6 +377,12 @@ func (s *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		return nil, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// Surface 429 as connector.ErrRateLimited so the adaptive rate
+	// limiter reacts to throttling during delta sync just like the
+	// ListDocuments iterator above does.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, "", fmt.Errorf("%w: salesforce: status=%d", connector.ErrRateLimited, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("salesforce: query status=%d", resp.StatusCode)
 	}

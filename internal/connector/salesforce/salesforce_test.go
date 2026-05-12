@@ -245,6 +245,29 @@ func TestSalesforce_DeltaSync(t *testing.T) {
 	}
 }
 
+// TestSalesforce_DeltaSync_RateLimited locks in that a 429 during a
+// delta sync surfaces as connector.ErrRateLimited so the adaptive
+// rate limiter in internal/connector/adaptive_rate.go can react —
+// matching the behaviour of the ListDocuments iterator.
+func TestSalesforce_DeltaSync_RateLimited(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/services/data/v59.0/limits", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/services/data/v59.0/query", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rate", http.StatusTooManyRequests)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	s := salesforce.New(salesforce.WithHTTPClient(srv.Client()), salesforce.WithBaseURL(srv.URL))
+	conn, _ := s.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL)})
+	_, _, err := s.DeltaSync(context.Background(), conn, connector.Namespace{ID: "Account"}, "")
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
 func TestSalesforce_Subscribe_NotSupported(t *testing.T) {
 	t.Parallel()
 	if _, err := salesforce.New().Subscribe(context.Background(), nil, connector.Namespace{}); !errors.Is(err, connector.ErrNotSupported) {

@@ -290,6 +290,29 @@ func TestKChat_DeltaSync(t *testing.T) {
 	}
 }
 
+// TestKChat_DeltaSync_RateLimited locks in that a 429 during a delta
+// sync surfaces as connector.ErrRateLimited so the adaptive rate
+// limiter can react — matching the ListDocuments iterator.
+func TestKChat_DeltaSync_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users.me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"U1"}`))
+	})
+	mux.HandleFunc("/channels.changes", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rate", http.StatusTooManyRequests)
+	})
+	srv := newKChatServer(t, mux)
+	k := newKChatConnector(srv)
+
+	conn, _ := k.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	_, _, err := k.DeltaSync(context.Background(), conn, connector.Namespace{ID: "C1"}, "")
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
 func TestKChat_HandleWebhook_MessageEvent(t *testing.T) {
 	t.Parallel()
 

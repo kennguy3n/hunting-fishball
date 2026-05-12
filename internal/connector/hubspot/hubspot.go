@@ -378,6 +378,12 @@ func (h *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		return nil, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// Surface 429 as connector.ErrRateLimited so the adaptive rate
+	// limiter reacts to HubSpot's burst-and-daily quota during delta
+	// sync, mirroring the ListDocuments iterator above.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, "", fmt.Errorf("%w: hubspot: status=%d", connector.ErrRateLimited, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("hubspot: search status=%d", resp.StatusCode)
 	}

@@ -219,6 +219,27 @@ func TestHubSpot_DeltaSync(t *testing.T) {
 	}
 }
 
+// TestHubSpot_DeltaSync_RateLimited locks in that a 429 during a
+// delta sync surfaces as connector.ErrRateLimited so the adaptive
+// rate limiter can react — matching the ListDocuments iterator.
+func TestHubSpot_DeltaSync_RateLimited(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/integrations/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/crm/v3/objects/contacts/search", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rate", http.StatusTooManyRequests)
+	})
+	srv := newHubServer(t, mux)
+	h := hubspot.New(hubspot.WithBaseURL(srv.URL), hubspot.WithHTTPClient(srv.Client()))
+	conn, _ := h.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	_, _, err := h.DeltaSync(context.Background(), conn, connector.Namespace{ID: "contacts"}, "")
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
 func TestHubSpot_Subscribe_NotSupported(t *testing.T) {
 	t.Parallel()
 	if _, err := hubspot.New().Subscribe(context.Background(), nil, connector.Namespace{}); !errors.Is(err, connector.ErrNotSupported) {

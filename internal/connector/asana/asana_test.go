@@ -229,6 +229,27 @@ func TestAsana_DeltaSync(t *testing.T) {
 	}
 }
 
+// TestAsana_DeltaSync_RateLimited locks in that a 429 during a delta
+// sync surfaces as connector.ErrRateLimited so the adaptive rate
+// limiter can react — matching the ListDocuments iterator.
+func TestAsana_DeltaSync_RateLimited(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"gid":"U1"}}`))
+	})
+	mux.HandleFunc("/projects/P1/tasks", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rate", http.StatusTooManyRequests)
+	})
+	srv := newAsanaServer(t, mux)
+	a := asana.New(asana.WithBaseURL(srv.URL), asana.WithHTTPClient(srv.Client()))
+	conn, _ := a.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	_, _, err := a.DeltaSync(context.Background(), conn, connector.Namespace{ID: "P1"}, "")
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
 func TestAsana_Subscribe_NotSupported(t *testing.T) {
 	t.Parallel()
 	if _, err := asana.New().Subscribe(context.Background(), nil, connector.Namespace{}); !errors.Is(err, connector.ErrNotSupported) {

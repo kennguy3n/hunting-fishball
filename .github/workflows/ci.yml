@@ -40,11 +40,13 @@ permissions:
   contents: read
 
 # Round-15 Task 14: cancel in-progress CI runs when a new commit
-# lands on the same ref. Pushed PRs no longer queue stale CI runs.
-# Branch `main` and tag-protected runs are scoped per-SHA so they
-# never cancel each other.
+# lands on the same PR. Pushed PRs no longer queue stale CI runs.
+# Non-PR events (push to `main`, nightly `schedule`, manual
+# `workflow_dispatch`) are scoped per-SHA via `github.sha` so a
+# new push or the nightly cron never cancels another non-PR run
+# — `github.ref` would group them all under `refs/heads/main`.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:

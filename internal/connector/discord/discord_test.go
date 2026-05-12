@@ -228,6 +228,27 @@ func TestDiscord_DeltaSync(t *testing.T) {
 	}
 }
 
+// TestDiscord_DeltaSync_RateLimited locks in that a 429 during a
+// delta sync surfaces as connector.ErrRateLimited so the adaptive
+// rate limiter can react — matching the ListDocuments iterator.
+func TestDiscord_DeltaSync_RateLimited(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/@me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"U1"}`))
+	})
+	mux.HandleFunc("/channels/C1/messages", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rate", http.StatusTooManyRequests)
+	})
+	srv := newDiscordServer(t, mux)
+	d := discord.New(discord.WithBaseURL(srv.URL), discord.WithHTTPClient(srv.Client()))
+	conn, _ := d.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	_, _, err := d.DeltaSync(context.Background(), conn, connector.Namespace{ID: "C1"}, "")
+	if !errors.Is(err, connector.ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
 func TestDiscord_Subscribe_NotSupported(t *testing.T) {
 	t.Parallel()
 	if _, err := discord.New().Subscribe(context.Background(), nil, connector.Namespace{}); !errors.Is(err, connector.ErrNotSupported) {
