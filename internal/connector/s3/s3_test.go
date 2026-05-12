@@ -302,6 +302,99 @@ func TestS3_FetchDocument(t *testing.T) {
 	}
 }
 
+// TestS3_FetchDocument_EncodesKey locks in the URL-encoding
+// contract for object keys carrying URL-significant bytes. S3
+// keys may legally contain '?', '#', spaces, '+', and non-ASCII
+// — without per-segment percent-encoding (a) Go's URL parser
+// eats '?' as query-string and '#' as fragment, (b) spaces fail
+// the parse outright, and (c) the SigV4 canonical-URI computed
+// from req.URL.EscapedPath() drifts from the path actually sent
+// on the wire, producing SignatureDoesNotMatch (403).
+//
+// The check exercises every documented hazard byte:
+//
+//   - '/' between segments must pass through un-encoded (logical
+//     path separator, not a segment byte).
+//   - '?', '#', ' ', '+', and 'é' (non-ASCII rune that encodes to
+//     two UTF-8 bytes) must each appear percent-encoded.
+//   - r.URL.RawQuery must be empty — proving '?' was treated as
+//     a literal key byte, not the query-string separator.
+//   - Authorization header must carry an AWS4-HMAC-SHA256
+//     signature, proving signing ran over the same encoded path
+//     the server received.
+func TestS3_FetchDocument_EncodesKey(t *testing.T) {
+	t.Parallel()
+
+	const rawKey = "subdir/file ?v=2+x#frag-é.txt"
+
+	captured := make(chan *http.Request, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured <- r.Clone(r.Context())
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Length", "5")
+		_, _ = fmt.Fprint(w, "hello")
+	}))
+	defer srv.Close()
+
+	c := s3.New(s3.WithHTTPClient(srv.Client()))
+	conn, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// Drain the HEAD probe from Connect.
+	<-captured
+
+	doc, err := c.FetchDocument(context.Background(), conn, connector.DocumentRef{NamespaceID: "test-bucket", ID: rawKey})
+	if err != nil {
+		t.Fatalf("FetchDocument: %v", err)
+	}
+	defer func() { _ = doc.Content.Close() }()
+	b, _ := io.ReadAll(doc.Content)
+	if string(b) != "hello" {
+		t.Fatalf("body: %q", b)
+	}
+	// The decoded `key` metadata must round-trip the raw key
+	// (proving FetchDocument did not mutate the caller-facing ID).
+	if got := doc.Metadata["key"]; got != rawKey {
+		t.Fatalf("metadata key drift: got %q want %q", got, rawKey)
+	}
+
+	req := <-captured
+	// r.URL.Path is decoded server-side; if encoding worked,
+	// every key byte (including '?' and '#') round-trips here
+	// as a literal path byte.
+	wantDecoded := "/test-bucket/" + rawKey
+	if req.URL.Path != wantDecoded {
+		t.Fatalf("decoded path mismatch:\n  got: %q\n want: %q", req.URL.Path, wantDecoded)
+	}
+	// Critical: '?' inside the key must NOT have been parsed as
+	// the query-string separator.
+	if req.URL.RawQuery != "" {
+		t.Fatalf("expected empty RawQuery, got %q", req.URL.RawQuery)
+	}
+	// SigV4 canonical-URI = req.URL.EscapedPath(); every hazard
+	// byte must appear percent-encoded here so the signature
+	// computed in signRequestV4 matches what S3 will hash.
+	enc := req.URL.EscapedPath()
+	for _, want := range []string{"%3F", "%23", "%20", "%2B", "%C3%A9"} {
+		if !strings.Contains(enc, want) {
+			t.Fatalf("encoded path missing %q: %q", want, enc)
+		}
+	}
+	// The '/' between "subdir" and "file" must survive un-encoded.
+	if !strings.Contains(enc, "subdir/file") {
+		t.Fatalf("encoded path lost '/' separator: %q", enc)
+	}
+	if got := req.Header.Get("Authorization"); !strings.Contains(got, "AWS4-HMAC-SHA256") {
+		t.Fatalf("missing SigV4 signature: %q", got)
+	}
+}
+
 func TestS3_DeltaSync(t *testing.T) {
 	t.Parallel()
 

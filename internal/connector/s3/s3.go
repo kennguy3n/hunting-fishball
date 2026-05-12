@@ -335,13 +335,20 @@ func (s *Connector) ListDocuments(_ context.Context, c connector.Connection, ns 
 }
 
 // FetchDocument downloads a single object.
+//
+// The object key flows into the request path via encodeS3Key —
+// every "/"-separated segment is percent-encoded individually so
+// keys carrying URL-significant bytes (?, #, space, +, non-ASCII)
+// are not misparsed as query strings / fragments and the SigV4
+// canonical-URI computed by req.URL.EscapedPath() matches the
+// path S3 will sign on its side.
 func (s *Connector) FetchDocument(ctx context.Context, c connector.Connection, ref connector.DocumentRef) (*connector.Document, error) {
 	conn, ok := c.(*connection)
 	if !ok {
 		return nil, errors.New("s3: bad connection type")
 	}
 
-	resp, err := s.do(ctx, conn, http.MethodGet, "/"+ref.ID, nil, nil)
+	resp, err := s.do(ctx, conn, http.MethodGet, "/"+encodeS3Key(ref.ID), nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -541,6 +548,37 @@ func (s *Connector) do(ctx context.Context, conn *connection, method, path strin
 	}
 
 	return resp, nil
+}
+
+// encodeS3Key percent-encodes an S3 object key for safe use in
+// the request path. Each "/"-separated segment is escaped via
+// encodeRFC3986 (the same RFC-3986-unreserved-only encoder used
+// for the SigV4 canonical query). Logical "/" separators pass
+// through; every other byte inside a segment is %XX-encoded.
+//
+// We must use the RFC-3986-strict encoder here — not net/url's
+// url.PathEscape — because AWS SigV4 for S3 requires the canonical
+// URI to percent-encode every byte outside the RFC-3986 unreserved
+// set (A-Z, a-z, 0-9, '-', '_', '.', '~'). Go's url.PathEscape
+// leaves '+' and other sub-delims un-encoded (legal per RFC-3986
+// for paths but rejected by S3's signature verifier), which would
+// produce a SignatureDoesNotMatch (403) for any key containing
+// '+', '=', '&', '!', etc.
+//
+// The output is suitable for direct concatenation into the
+// request URL; Go's url.Parse populates req.URL.RawPath from this
+// encoded form, and req.URL.EscapedPath() returns it verbatim —
+// keeping the wire-level path and the signed path byte-identical.
+func encodeS3Key(key string) string {
+	if key == "" {
+		return ""
+	}
+	segs := strings.Split(key, "/")
+	for i, seg := range segs {
+		segs[i] = encodeRFC3986(seg)
+	}
+
+	return strings.Join(segs, "/")
 }
 
 // pageOr returns v when caller supplied a positive page size and
