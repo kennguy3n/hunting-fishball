@@ -72,15 +72,19 @@ func (h *Handler) retrieveBatch(c *gin.Context) {
 	}
 	var req BatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(err))
 		return
 	}
-	if len(req.Requests) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "requests is required"})
-		return
-	}
+	// Round-14 Task 5: enforce per-request schema validation
+	// before fan-out. The 413 length check stays separate from
+	// schema validation so existing callers that special-case
+	// "batch too large" keep their semantics.
 	if len(req.Requests) > MaxBatchSize {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "batch too large", "max": MaxBatchSize})
+		return
+	}
+	if verr := ValidateBatchRequest(&req); verr != nil {
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(verr))
 		return
 	}
 	// Round-9 Task 7: explain mode flows through the batch fan-out
@@ -148,6 +152,10 @@ func (h *Handler) runOne(ctx context.Context, tenantID string, index int, sub Re
 	if sub.Query == "" {
 		return BatchResultItem{Index: index, Error: "query is required"}
 	}
+	// Round-14 Task 18: count every sub-request that survived
+	// schema validation so the SlowQueryRateHigh alert's
+	// denominator includes batch traffic.
+	observability.RetrievalRequestsTotal.Inc()
 	// Round-11 Task 9: tag every batch sub-request so the query
 	// analytics recorder can distinguish batch sub-requests from
 	// organic /v1/retrieve traffic. The field is internal (json:"-")

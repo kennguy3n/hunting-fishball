@@ -188,6 +188,16 @@ func (w *DLQAutoReplayer) Tick(ctx context.Context) error {
 	}
 	for i := range rows {
 		row := rows[i]
+		// Round-14 Task 14 — skip permanent failures. They will
+		// never succeed on retry; replaying them only adds load
+		// to the upstream and traps the row at MaxAttempts later.
+		// Legacy rows with category=unknown remain replayable to
+		// preserve historical behaviour (no flag day for rows
+		// inserted before migration 040).
+		if row.Category == DLQCategoryPermanent {
+			observability.DLQAutoReplaysTotal.WithLabelValues("skip_permanent").Inc()
+			continue
+		}
 		if row.AttemptCount >= w.cfg.MaxAutoRetries {
 			observability.DLQAutoReplaysTotal.WithLabelValues("skip_max_retries").Inc()
 			continue

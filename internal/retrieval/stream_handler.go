@@ -35,6 +35,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/kennguy3n/hunting-fishball/internal/audit"
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // StreamBackend is the narrow surface a backend has to satisfy to
@@ -161,9 +162,17 @@ func (h *StreamHandler) stream(c *gin.Context) {
 	}
 	var req RetrieveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(err))
 		return
 	}
+	if verr := ValidateRetrieveRequest(&req); verr != nil {
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(verr))
+		return
+	}
+	// Round-14 Task 18: count every streaming retrieve that
+	// passed validation so the SlowQueryRateHigh denominator
+	// includes SSE traffic.
+	observability.RetrievalRequestsTotal.Inc()
 	// Round-11 Devin Review fix: gate the per-event explain trace
 	// on IsExplainAuthorized, matching handler.go:611 and
 	// batch_handler.go:86. Without this, any authenticated caller

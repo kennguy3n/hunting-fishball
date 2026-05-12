@@ -91,6 +91,12 @@ const (
 	ActionAuditExported           Action = "audit.exported"
 	// Round-13 Task 10: api-key rotation lifecycle event.
 	ActionAPIKeyRotated Action = "api_key.rotated"
+	// Round-14 Task 7: api-key grace expiry sweep emits one
+	// audit event per row transitioned from grace to expired.
+	ActionAPIKeyExpired Action = "api_key.expired"
+	// Round-14 Task 6: audit log integrity worker detected a
+	// chain mismatch on the periodic verification pass.
+	ActionAuditIntegrityViolation Action = "audit.integrity_violation"
 )
 
 // AuditLog is a single audit event. The table is append-only — there is

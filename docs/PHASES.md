@@ -192,6 +192,38 @@ phase.
 > count is unchanged (034 + Round-13's `api_keys` migration if
 > not already present). See PROGRESS.md for the per-task list.
 
+> **Round 14** (2026-05-12) layers another 20 tasks focused on
+> observability dashboards, security hardening, testing depth,
+> CI parallelism, and OpenAPI / alert completeness. Highlights:
+> `GET /v1/admin/pipeline/breakers` exposes per-stage circuit
+> breaker state; `GET /v1/admin/retrieval/latency-histogram`
+> returns P50/P75/P90/P95/P99 per backend over an in-process
+> 60-bucket ring buffer; `GET /v1/admin/retrieval/slow-queries`
+> paginates the new `slow_queries` table
+> (`migrations/038_slow_queries.sql`);
+> `GET /v1/admin/pipeline/throughput?window=5m` returns
+> per-stage event counts + avg latency. Round-13's audit-
+> integrity endpoint gains a periodic verifier worker; the
+> API-key rotator gains a grace sweeper; per-tenant payload
+> caps land via `migrations/039_tenant_payload_limits.sql` and
+> the existing limiter's `TenantOverride` callback. Pipeline
+> hardening: embedding-fallback path emits
+> `context_engine_embedding_fallback_total{reason}` and
+> `_latency_seconds`; DLQ rows carry a `category` column
+> (`migrations/040_dlq_category.sql`) and the auto-replayer
+> skips permanent failures. Testing: a regression manifest
+> (`tests/regression/round1213_manifest.go`), an e2e suite
+> under build tag `e2e`, and four new fuzz targets. CI splits
+> the legacy `fast-go` job into `fast-check`, `fast-test`, and
+> `fast-build`, each with explicit `actions/cache` on
+> `~/.cache/go-build`. Four new Prometheus alerts land:
+> `AuditIntegrityViolation` (page),
+> `EmbeddingFallbackRateHigh`, `APIKeyGraceExpiringSoon`, and
+> `SlowQueryRateHigh` (all warning). Phase percentages
+> unchanged — Round 14 hardens the production surface added
+> in Rounds 9-13 rather than opening new phases. See
+> PROGRESS.md for the per-task list.
+
 > **Round 12** (2026-05-11) layers another 20 tasks focused on
 > observability alerts, resilience hardening, CI gates, OpenAPI
 > completeness, fuzz expansion, and docs audit. Highlights:

@@ -103,6 +103,17 @@ func (h *DLQHandler) list(c *gin.Context) {
 	if v := c.Query("include_replayed"); v != "" {
 		filter.IncludeReplayed = v == "true" || v == "1"
 	}
+	// Round-14 Task 14 — DLQ category filter. Reject unknown
+	// values so operators don't silently get an empty page.
+	if v := c.Query("category"); v != "" {
+		switch v {
+		case pipeline.DLQCategoryTransient, pipeline.DLQCategoryPermanent, pipeline.DLQCategoryUnknown:
+			filter.Category = v
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "category must be transient | permanent | unknown"})
+			return
+		}
+	}
 	// Reuse the shared parsePageLimit helper so the DLQ handler
 	// behaves the same as the sources/audit handlers: limit=0
 	// falls back to the store's default page size, negatives are

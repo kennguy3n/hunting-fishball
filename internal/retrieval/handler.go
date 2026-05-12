@@ -430,15 +430,21 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 	var req RetrieveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(err))
 
 		return
 	}
-	if req.Query == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "query is required"})
+	if verr := ValidateRetrieveRequest(&req); verr != nil {
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(verr))
 
 		return
 	}
+	// Round-14 Task 18: count every accepted retrieve request so
+	// the SlowQueryRateHigh alert's denominator reflects real
+	// traffic instead of the clamp_min(...,1) floor. Counted
+	// after validation so malformed requests do not inflate the
+	// denominator.
+	observability.RetrievalRequestsTotal.Inc()
 	// Round-7 Task 4 / Round-8 Task 15: record per-retrieval
 	// analytics on every successful response. reqStart is captured
 	// before any work so the latency_ms column reflects total

@@ -35,6 +35,14 @@ type PayloadLimiterConfig struct {
 	// SkipPaths lists exact path strings that should never be
 	// rate-limited. Probe endpoints fit here.
 	SkipPaths []string
+	// TenantOverride — Round-14 Task 8. Optional per-tenant
+	// override of MaxBytes. The lookup runs after the
+	// SkipMethods / SkipPaths fast-path so an oversize GET is
+	// still bypassed. Returning (cap, true) substitutes cap
+	// for MaxBytes on this request only; (anything, false) or
+	// nil falls back to the global MaxBytes. The lookup MUST be
+	// goroutine-safe — it runs on the request hot-path.
+	TenantOverride func(c *gin.Context) (int64, bool)
 }
 
 // PayloadSizeLimiter returns a Gin middleware enforcing cfg.
@@ -62,16 +70,22 @@ func PayloadSizeLimiter(cfg PayloadLimiterConfig) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if c.Request.ContentLength > cfg.MaxBytes {
+		limit := cfg.MaxBytes
+		if cfg.TenantOverride != nil {
+			if override, ok := cfg.TenantOverride(c); ok && override > 0 {
+				limit = override
+			}
+		}
+		if c.Request.ContentLength > limit {
 			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
 				"error":          "payload too large",
-				"max_bytes":      cfg.MaxBytes,
+				"max_bytes":      limit,
 				"content_length": c.Request.ContentLength,
 			})
 			return
 		}
 		if c.Request.Body != nil {
-			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, cfg.MaxBytes)
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
 		}
 		c.Next()
 	}
@@ -83,9 +97,16 @@ const DefaultMaxRequestBodyBytes int64 = 10 * 1024 * 1024
 
 // PayloadSizeLimiterHTTP returns an http.Handler-style wrapper of
 // the limiter for callers that don't use Gin (e.g. the ingest
-// probe mux). The semantics match the Gin variant — oversized
-// Content-Length yields HTTP 413, GET/HEAD/DELETE bypass, the
-// body is wrapped with http.MaxBytesReader.
+// probe mux). It mirrors the Gin variant's global behaviour —
+// oversized Content-Length yields HTTP 413, GET/HEAD/DELETE
+// bypass, the body is wrapped with http.MaxBytesReader.
+//
+// Note: cfg.TenantOverride is Gin-only and is ignored here. The
+// HTTP variant runs on transport-level handlers (ingest probe
+// mux, metrics) that don't carry per-tenant identity. If a
+// caller ever needs per-tenant caps on a non-Gin handler, add a
+// TenantOverrideHTTP func(*http.Request) field rather than
+// reusing the Gin closure.
 func PayloadSizeLimiterHTTP(cfg PayloadLimiterConfig, next http.Handler) http.Handler {
 	if cfg.MaxBytes <= 0 {
 		return next

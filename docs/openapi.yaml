@@ -1848,3 +1848,117 @@ paths:
                   first_entry_id: { type: string }
                   last_entry_id:  { type: string }
                   algorithm:      { type: string }
+
+  /v1/admin/pipeline/breakers:
+    get:
+      summary: Per-stage circuit breaker dashboard (Round-14 Task 1).
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  breakers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        stage:           { type: string }
+                        state:           { type: string, enum: [closed, open, half-open] }
+                        fail_count:      { type: integer }
+                        opened_at:       { type: string, format: date-time }
+                        probe_in_flight: { type: boolean }
+                        threshold:       { type: integer }
+                        open_for:        { type: string }
+
+  /v1/admin/retrieval/latency-histogram:
+    get:
+      summary: Per-backend P50/P75/P90/P95/P99 retrieval latency (Round-14 Task 2).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: query
+          name: window_minutes
+          schema: { type: integer, minimum: 1, maximum: 1440, default: 60 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  window_minutes: { type: integer }
+                  backends:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        backend: { type: string }
+                        count:   { type: integer }
+                        p50_ms:  { type: number }
+                        p75_ms:  { type: number }
+                        p90_ms:  { type: number }
+                        p95_ms:  { type: number }
+                        p99_ms:  { type: number }
+
+  /v1/admin/retrieval/slow-queries:
+    get:
+      summary: Persisted slow retrieval queries (Round-14 Task 3, table slow_queries).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:         { type: string }
+                        tenant_id:  { type: string }
+                        query_hash: { type: string }
+                        query_text: { type: string }
+                        latency_ms: { type: integer }
+                        top_k:      { type: integer }
+                        hit_count:  { type: integer }
+                        created_at: { type: string, format: date-time }
+
+  /v1/admin/pipeline/throughput:
+    get:
+      summary: Per-stage pipeline throughput sparkline data (Round-14 Task 4).
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - in: query
+          name: window
+          schema: { type: string, default: 5m }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  window: { type: string }
+                  stages:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        stage:           { type: string }
+                        event_count:     { type: integer }
+                        avg_latency_ms:  { type: number }

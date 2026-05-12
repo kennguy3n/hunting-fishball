@@ -27,7 +27,10 @@ import (
 	"math"
 	"os"
 	"strings"
+	"time"
 	"unicode"
+
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 )
 
 // FallbackDim is the fixed dimensionality of fallback vectors.
@@ -72,10 +75,51 @@ func (f *FallbackEmbedder) Embed(_ context.Context, _ string, chunks []string) (
 	if f == nil || !f.enabled {
 		return nil, "", ErrFallbackDisabled
 	}
+	return f.EmbedWithReason(context.Background(), chunks, FallbackReasonUnknown)
+}
+
+// FallbackReason names the reason the caller fell back to the
+// in-process embedder. Used as the value of the `reason` label
+// on the Round-14 fallback counter so dashboards can split fast
+// path failures (gRPC down, timeout, breaker open).
+type FallbackReason string
+
+const (
+	FallbackReasonUnknown      FallbackReason = "unknown"
+	FallbackReasonGRPCDown     FallbackReason = "grpc_down"
+	FallbackReasonTimeout      FallbackReason = "timeout"
+	FallbackReasonCircuitOpen  FallbackReason = "circuit_open"
+	FallbackReasonExplicitFlag FallbackReason = "explicit_flag"
+)
+
+// EmbedWithReason is the metric-aware entry point. The
+// coordinator-side wiring (added in a follow-up task) labels the
+// trigger reason so the operator can see why fallback fired in
+// production. The legacy Embed wrapper keeps existing callers
+// working by attributing the trigger to "unknown".
+func (f *FallbackEmbedder) EmbedWithReason(_ context.Context, chunks []string, reason FallbackReason) ([][]float32, string, error) {
+	if f == nil || !f.enabled {
+		return nil, "", ErrFallbackDisabled
+	}
+	if reason == "" {
+		reason = FallbackReasonUnknown
+	}
+	start := time.Now()
 	out := make([][]float32, len(chunks))
 	for i, text := range chunks {
 		out[i] = hashEmbed(text)
 	}
+	// Round-14 Task 18 follow-up: EmbeddingRequestsTotal is
+	// owned by Embedder.embedWithModel (the single entry point
+	// for every embed call in the pipeline). Incrementing it
+	// here would double-count whenever a deployment wires the
+	// FallbackEmbedder into Embedder.cfg.Remote, since the
+	// outer path increments first and then delegates to
+	// Remote.Embed. The fallback-specific counter below is
+	// still incremented here so the numerator of the
+	// EmbeddingFallbackRateHigh alert remains accurate.
+	observability.EmbeddingFallbackByReason.WithLabelValues(string(reason)).Inc()
+	observability.EmbeddingFallbackLatency.Observe(time.Since(start).Seconds())
 	return out, FallbackModelID, nil
 }
 

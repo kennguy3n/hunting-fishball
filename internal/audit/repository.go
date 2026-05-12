@@ -47,6 +47,19 @@ type ListFilter struct {
 	// PageToken is the opaque "before this ULID" cursor. Empty starts at
 	// the most recent row.
 	PageToken string
+
+	// IDMinInclusive, when non-empty, narrows the result set to
+	// rows whose `id >= IDMinInclusive`. Used by the audit
+	// integrity worker to recompute a previously-observed
+	// chain slice exactly, without picking up rows appended
+	// since the last sweep.
+	IDMinInclusive string
+
+	// IDMaxInclusive, when non-empty, narrows the result set to
+	// rows whose `id <= IDMaxInclusive`. Pairs with
+	// IDMinInclusive to fetch the exact (FirstEntry, LastEntry]
+	// slice the integrity worker observed on its previous run.
+	IDMaxInclusive string
 }
 
 const (
@@ -195,6 +208,12 @@ func (r *Repository) List(ctx context.Context, f ListFilter) (*ListResult, error
 	}
 	if f.PageToken != "" {
 		q = q.Where("id < ?", f.PageToken)
+	}
+	if f.IDMinInclusive != "" {
+		q = q.Where("id >= ?", f.IDMinInclusive)
+	}
+	if f.IDMaxInclusive != "" {
+		q = q.Where("id <= ?", f.IDMaxInclusive)
 	}
 
 	var rows []AuditLog
