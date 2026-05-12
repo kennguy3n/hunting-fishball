@@ -271,3 +271,38 @@ func TestPipedrive_SubscribeNotSupported(t *testing.T) {
 		t.Fatalf("expected ErrNotSupported, got %v", err)
 	}
 }
+
+// TestPipedrive_DeltaSync_ActivitiesNamespaceEmitsChanges regresses against a
+// Round-16 review finding: DeltaSync used strings.TrimSuffix(ns.ID, "s") to
+// derive the per-record "item" key for filtering /recents responses. That
+// produces "activitie" for the "activities" namespace, while Pipedrive
+// returns item="activity", so every activity change was silently dropped.
+// This test runs the steady-state DeltaSync path against an "activities"
+// namespace and asserts the change is emitted.
+func TestPipedrive_DeltaSync_ActivitiesNamespaceEmitsChanges(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/recents", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"item":"activity","data":{"id":42,"update_time":"2024-02-01 12:00:00"}}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	p := pipedrive.New(pipedrive.WithBaseURL(srv.URL), pipedrive.WithHTTPClient(srv.Client()))
+	conn, _ := p.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	changes, newCur, err := p.DeltaSync(context.Background(), conn, connector.Namespace{ID: "activities"}, "2024-01-01 00:00:00")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Ref.ID != "42" {
+		t.Fatalf("expected 1 activity change with id=42, got %+v", changes)
+	}
+	if changes[0].Kind != connector.ChangeUpserted {
+		t.Fatalf("expected ChangeUpserted, got %v", changes[0].Kind)
+	}
+	if newCur != "2024-02-01 12:00:00" {
+		t.Fatalf("newCur=%q want %q", newCur, "2024-02-01 12:00:00")
+	}
+}

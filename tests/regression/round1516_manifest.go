@@ -119,4 +119,48 @@ var Round1516Manifest = []Bug{
 			Source:   "internal/connector/audit_test.go",
 		}},
 	},
+	{
+		PR:      "round-16-review",
+		Finding: 7,
+		Title:   "Pipedrive api_token redacted from transport-level error strings",
+		Symptom: "Pipedrive's REST v1 personal-token auth requires the api_token in the query string. Go's net/http embeds the full request URL in *url.Error.Error() on transport failures (EOF, connection refused, TLS errors), so the token would leak into structured logs via slog.Error in cmd/api and cmd/ingest. The do() helper now wraps every transport error through redactToken() which strips both the raw and url.QueryEscape'd forms.",
+		Tests: []TestRef{{
+			PkgRel:   "internal/connector/pipedrive",
+			TestName: "TestPipedrive_NetworkErrorDoesNotLeakAPIToken",
+			Source:   "internal/connector/pipedrive/pipedrive_test.go",
+		}},
+	},
+	{
+		PR:      "round-16-review",
+		Finding: 8,
+		Title:   "Confluence-Server DeltaSync CQL cursor preserves seconds precision",
+		Symptom: "The CQL `lastModified > \"...\"` filter was formatted with `2006-01-02 15:04`, dropping seconds. Subsequent polls re-emitted every page updated in the trailing minute as duplicate ChangeUpserted events. Cursor advancement already uses full RFC3339 — only the outbound filter was lossy. Fixed by switching to `2006-01-02 15:04:05`.",
+		Tests: []TestRef{{
+			PkgRel:   "internal/connector/confluence_server",
+			TestName: "TestConfluenceServer_DeltaSync_CursorPreservesSecondsPrecision",
+			Source:   "internal/connector/confluence_server/confluence_server_test.go",
+		}},
+	},
+	{
+		PR:      "round-16-review",
+		Finding: 9,
+		Title:   "Gmail FetchDocument requests both Subject and From metadata headers",
+		Symptom: "FetchDocument used url.Values.Set twice for the `metadataHeaders` key; the second call overwrote the first, so the outbound query only requested `From`. The Gmail API never returned the Subject header and doc.Title silently fell back to the snippet on every document. Switched the second call to url.Values.Add to allow repeated keys.",
+		Tests: []TestRef{{
+			PkgRel:   "internal/connector/gmail",
+			TestName: "TestGmail_FetchDocument_RequestsBothSubjectAndFromHeaders",
+			Source:   "internal/connector/gmail/gmail_test.go",
+		}},
+	},
+	{
+		PR:      "round-16-review",
+		Finding: 10,
+		Title:   "Pipedrive DeltaSync activities namespace emits changes (ies→y singular)",
+		Symptom: "DeltaSync filtered /recents responses by `strings.TrimSuffix(ns.ID, \"s\")` to derive a singular item key. That gave \"activitie\" for the \"activities\" namespace, while Pipedrive returns item=\"activity\". Every activity change was silently dropped. Now strips \"ies\"→\"y\" before falling back to trimming \"s\", correctly handling deals/persons/activities.",
+		Tests: []TestRef{{
+			PkgRel:   "internal/connector/pipedrive",
+			TestName: "TestPipedrive_DeltaSync_ActivitiesNamespaceEmitsChanges",
+			Source:   "internal/connector/pipedrive/pipedrive_test.go",
+		}},
+	},
 }

@@ -294,7 +294,7 @@ func (g *Connector) FetchDocument(ctx context.Context, c connector.Connection, r
 	q := url.Values{}
 	q.Set("format", "metadata")
 	q.Set("metadataHeaders", "Subject")
-	q.Set("metadataHeaders", "From")
+	q.Add("metadataHeaders", "From")
 	resp, err := g.do(ctx, conn, http.MethodGet, "/users/me/messages/"+ref.ID+"?"+q.Encode(), nil)
 	if err != nil {
 		return nil, err

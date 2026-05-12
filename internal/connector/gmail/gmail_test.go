@@ -263,3 +263,44 @@ func TestGmail_SubscribeNotSupported(t *testing.T) {
 		t.Fatalf("expected ErrNotSupported, got %v", err)
 	}
 }
+
+// TestGmail_FetchDocument_RequestsBothSubjectAndFromHeaders regresses against a
+// Round-16 review finding: FetchDocument used url.Values.Set twice for the
+// same key "metadataHeaders", which silently overwrote "Subject" with "From"
+// so the Gmail API never returned the subject line. This test asserts that
+// both headers are present on the outbound query string.
+func TestGmail_FetchDocument_RequestsBothSubjectAndFromHeaders(t *testing.T) {
+	t.Parallel()
+	var gotHeaders []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/me/profile", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"historyId":"42"}`)
+	})
+	mux.HandleFunc("/users/me/messages/M1", func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.URL.Query()["metadataHeaders"]
+		_, _ = io.WriteString(w, `{"id":"M1","internalDate":"1700000000000","snippet":"Hello","historyId":"100","payload":{"headers":[{"name":"Subject","value":"Hi"},{"name":"From","value":"bob@x"}]}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	g := gmail.New(gmail.WithBaseURL(srv.URL), gmail.WithHTTPClient(srv.Client()))
+	conn, _ := g.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	doc, err := g.FetchDocument(context.Background(), conn, connector.DocumentRef{NamespaceID: "INBOX", ID: "M1"})
+	if err != nil {
+		t.Fatalf("FetchDocument: %v", err)
+	}
+	defer func() { _ = doc.Content.Close() }()
+	wantSet := map[string]bool{"Subject": false, "From": false}
+	for _, h := range gotHeaders {
+		if _, ok := wantSet[h]; ok {
+			wantSet[h] = true
+		}
+	}
+	for name, seen := range wantSet {
+		if !seen {
+			t.Fatalf("metadataHeaders query missing %q (got %v)", name, gotHeaders)
+		}
+	}
+	if doc.Title != "Hi" {
+		t.Fatalf("Title=%q want %q (subject header must round-trip)", doc.Title, "Hi")
+	}
+}

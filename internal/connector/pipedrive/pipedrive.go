@@ -396,10 +396,16 @@ func (p *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil, "", fmt.Errorf("pipedrive: decode delta: %w", err)
 	}
+	singular := ns.ID
+	if trimmed := strings.TrimSuffix(ns.ID, "ies"); trimmed != ns.ID {
+		singular = trimmed + "y"
+	} else if trimmed := strings.TrimSuffix(ns.ID, "s"); trimmed != ns.ID {
+		singular = trimmed
+	}
 	newCursor := cursor
 	var changes []connector.DocumentChange
 	for _, d := range body.Data {
-		if d.Item != strings.TrimSuffix(ns.ID, "s") && d.Item != ns.ID {
+		if d.Item != singular && d.Item != ns.ID {
 			continue
 		}
 		var item struct {
