@@ -1,25 +1,55 @@
 # hunting-fishball
 
-> **Status (2026-05-12, post-Round-17).** Phases 0-3 and 7-8 are
+> **Status (2026-05-12, post-Round-18/19).** Phases 0-3 and 7-8 are
 > **functionally complete** in `main`; Phases 4-6 are
 > **server-side complete** with only client-side rendering left in
 > external repos. See [`docs/PROGRESS.md`](docs/PROGRESS.md) for
 > the live checklist and the Round-by-round changelog below.
-> Migration count is at **040**. **Round 17 expands the connector
-> catalog from 28 → 36**: Microsoft Entra ID (Identity, Graph
-> `$deltatoken`), Google Workspace Directory (Identity,
-> `updatedMin` filter), Microsoft 365 Outlook (Email, Graph
-> mailbox delta), Workday + BambooHR + Personio (HR, with
-> termination / `action="Deleted"` / `status="inactive"` tombstones
-> mapping to `ChangeDeleted`), sitemap.xml crawl (Generic, with
-> `<sitemapindex>` recursion and `<lastmod>` cursors), and Coda
-> (Knowledge, DESC walk on `updatedAt`). Round 17 lifts the
-> connector-completeness audit and runbook gate to 36, ships eight
-> new per-connector runbooks, adds `tests/e2e/round17_test.go`
-> and `tests/regression/round1617_manifest.go`, and refreshes
-> PROGRESS / PHASES / ARCHITECTURE. The Round-16 fast-lane gates
-> (`fast-connector-integration`, `fast-regression`) pick up the
-> new surface without additional CI changes.
+> Migration count is at **042**. **Round 18/19 expands the
+> connector catalog from 36 → 42** and layers production-grade
+> hardening on top. Six new Phase-2+ targets ship: SharePoint
+> Server / on-prem (ECM, NTLM / app-password REST,
+> `Modified gt datetime'<ISO8601>'` cursor), Azure Blob (Storage,
+> SAS-signed REST + `x-ms-blob-last-modified` cursor), Google
+> Cloud Storage (Storage, OAuth bearer JSON API +
+> `timeCreated` / `updated` filter), Egnyte (ECM, OAuth +
+> `/pubapi/v1/fs` + events cursor), BookStack (Knowledge,
+> Token-ID + Token-Secret header + `/api/pages` sort), and the
+> signed-upload portal (Receiver, HMAC-verified multipart
+> webhook implementing `WebhookReceiver`). Round 18 hardens
+> production: gRPC cross-encoder reranker (proto +
+> `services/reranker/` Python sidecar stub), retrieval query-
+> routing `QueryClassifier`, per-chunk embedding-model
+> versioning + `041_chunk_embedding_version.sql`, DLQ analytics
+> at `GET /v1/admin/dlq/analytics`, tenant onboarding wizard
+> at `POST /v1/admin/tenants/:tenant_id/onboarding`, per-chunk
+> scoring breakdown in the `explain: true` response,
+> `tests/e2e/round18_test.go`, the Round-17/18 regression
+> manifest, integration-contract test expansion for the new
+> connectors, a security test suite, and the `fast-govulncheck`
+> + `fast-openapi` CI fast-lane jobs (with `make vulncheck`).
+> Round 19 (Tasks 21-30) layers advanced retrieval and ops on
+> top: per-source semantic-cache invalidation +
+> background-refresh cache-aside
+> (`SemanticCache.InvalidateBySources`,
+> `SemanticCache.GetOrRefresh`), multi-modal prep
+> (`DocumentContentType` + `042_document_content_type.sql`),
+> the `ChunkMerger` post-rerank step
+> (`CONTEXT_ENGINE_CHUNK_MERGE_ENABLED`),
+> per-connector health auto-pause (`source.auto_paused` audit +
+> Prometheus `SourceAutopaused` alert), bulk `reindex` +
+> `rotate-credentials` actions on `POST /v1/admin/sources/bulk`,
+> a daily tenant-usage billing webhook
+> (`CONTEXT_ENGINE_BILLING_WEBHOOK_URL`), and four new
+> `MessageProbe` health checks on `GET /v1/admin/health/summary`
+> (stale connectors, DLQ growth, embedding-model availability,
+> Tantivy disk usage). The Round-16 fast-lane gates continue to
+> cover the new surface — Round 18 adds two more lanes.
+>
+> Round 17 (previous round) expanded the connector catalog from
+> 28 → 36: Microsoft Entra ID, Google Workspace Directory,
+> Microsoft 365 Outlook, Workday + BambooHR + Personio,
+> sitemap.xml crawl, and Coda.
 >
 > Round 16 (previous round) expanded the connector catalog from
 > 20 → 28: Mattermost (Chat), ClickUp + Monday.com (Issue/project
@@ -386,6 +416,86 @@ The full set of public + admin endpoints is documented in
   catches Postgres-specific syntax (JSONB / TIMESTAMPTZ /
   `ADD COLUMN IF NOT EXISTS`) that the SQLite dry-run misses
   (Task 20, `scripts/migrate-dry-run-pg.sh`).
+
+**Round 18/19 additions:**
+
+- Connector catalog expansion (36 → 42):
+  - `sharepoint_onprem` — SharePoint Server / on-prem
+    (`internal/connector/sharepoint_onprem/`). NTLM / app-
+    password against `/_api/web/lists`; delta via
+    `Modified gt datetime'<ISO8601>'`.
+  - `azure_blob` — Azure Blob Storage
+    (`internal/connector/azure_blob/`). SAS / shared-key auth
+    with stdlib HMAC signing; container listing via
+    `?comp=list&restype=container`; delta via
+    `x-ms-blob-last-modified`.
+  - `gcs` — Google Cloud Storage (`internal/connector/gcs/`).
+    OAuth bearer; object enumeration via JSON API
+    `storage.googleapis.com/storage/v1/b/<bucket>/o`; delta via
+    `timeCreated` / `updated` filter.
+  - `egnyte` — Egnyte (`internal/connector/egnyte/`). OAuth
+    bearer; `/pubapi/v1/fs/<path>`; delta via
+    `/pubapi/v2/events/cursor`.
+  - `bookstack` — BookStack wiki
+    (`internal/connector/bookstack/`). Token-ID + Token-Secret
+    header; `/api/pages` with `updated_at` filter / sort.
+  - `upload_portal` — signed-upload portal
+    (`internal/connector/upload_portal/`). HMAC-verified
+    multipart receiver implementing `WebhookReceiver`.
+- Round-18 hardening:
+  - gRPC cross-encoder reranker
+    (`proto/reranker/v1/reranker.proto` + Python sidecar stub
+    at `services/reranker/`), gated behind
+    `CONTEXT_ENGINE_CROSS_ENCODER_ENABLED`.
+  - Retrieval `QueryClassifier`
+    (`internal/retrieval/query_classifier.go`), gated behind
+    `CONTEXT_ENGINE_QUERY_ROUTING_ENABLED`.
+  - Embedding-model versioning per chunk + migration
+    `041_chunk_embedding_version.sql` + `StaleEmbeddingDetector`.
+  - DLQ analytics aggregation at
+    `GET /v1/admin/dlq/analytics`
+    (`internal/admin/dlq_analytics_handler.go`).
+  - Tenant onboarding wizard at
+    `POST /v1/admin/tenants/:tenant_id/onboarding`
+    (`internal/admin/onboarding_handler.go`).
+  - Per-chunk scoring breakdown in
+    `internal/retrieval/explain.go` (vector similarity, BM25
+    tf-idf, graph hop depth, memory recency, RRF contribution,
+    pin boost, MMR diversity penalty).
+  - `tests/e2e/round18_test.go`,
+    `tests/regression/round1718_manifest*.go`,
+    integration-contract expansion for the new connectors, and
+    `tests/e2e/security_test.go` (credential redaction +
+    cross-tenant isolation + RBAC coverage + upload-portal
+    HMAC verification).
+  - CI: `fast-govulncheck` + `fast-openapi` fast-lane jobs and
+    `make vulncheck`.
+- Round-19 additions:
+  - `SemanticCache.InvalidateBySources` (per-source tag-based
+    cache invalidation) + `SemanticCache.GetOrRefresh` (cache-
+    aside with background refresh).
+  - Multi-modal document prep: `DocumentContentType` +
+    `ContentTypeFromMIME` + migration
+    `042_document_content_type.sql`.
+  - `internal/retrieval/chunk_merger.go` — adjacent-short-chunk
+    merging post-rerank, gated behind
+    `CONTEXT_ENGINE_CHUNK_MERGE_ENABLED`.
+  - `internal/admin/source_auto_pause.go` — sliding-window
+    per-connector error-rate detector that auto-pauses the
+    source and emits a `source.auto_paused` audit row; new
+    Prometheus alert `SourceAutopaused` in
+    `deploy/alerts.yaml`.
+  - Bulk-operation expansion at
+    `POST /v1/admin/sources/bulk` — `reindex` and
+    `rotate-credentials` actions with per-source error
+    isolation and dedicated audit events.
+  - `internal/admin/billing_webhook.go` — daily tenant-usage
+    POST to `CONTEXT_ENGINE_BILLING_WEBHOOK_URL` with
+    `X-Idempotency-Key`.
+  - Four new `MessageProbe` implementations on
+    `GET /v1/admin/health/summary` —
+    `stale_connectors`, `dlq_growth`, `embedding_model`,
+    `tantivy_disk` — with operator-actionable messages.
 
 **Round 17 additions:**
 
@@ -1055,7 +1165,7 @@ hunting-fishball/
 ├── internal/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces, process-global registry.
-│   │   │                      # 36 connectors after Round 17:
+│   │   │                      # 42 connectors after Round 18:
 │   │   ├── googledrive/       # Google Drive (Phase 1) +
 │   │   │                      # google_shared_drives registry entry
 │   │   │                      # (Round 15) for shared-drive-only sync
@@ -1101,8 +1211,25 @@ hunting-fishball/
 │   │   ├── sitemap/           # sitemap.xml crawl — <sitemapindex>
 │   │   │                      # recursion + <lastmod> cursor (Round 17,
 │   │   │                      # Generic)
-│   │   └── coda/              # Coda — updatedAt DESC walk with pageToken
-│   │                          # (Round 17, Knowledge)
+│   │   ├── coda/              # Coda — updatedAt DESC walk with pageToken
+│   │   │                      # (Round 17, Knowledge)
+│   │   ├── sharepoint_onprem/ # SharePoint Server / on-prem — NTLM /
+│   │   │                      # app-password REST + Modified-cursor
+│   │   │                      # (Round 18, ECM)
+│   │   ├── azure_blob/        # Azure Blob Storage — SAS-signed REST +
+│   │   │                      # x-ms-blob-last-modified cursor
+│   │   │                      # (Round 18, Storage)
+│   │   ├── gcs/               # Google Cloud Storage — OAuth bearer JSON
+│   │   │                      # API + timeCreated / updated filter
+│   │   │                      # (Round 18, Storage)
+│   │   ├── egnyte/            # Egnyte — OAuth + /pubapi/v1/fs + events
+│   │   │                      # cursor delta (Round 18, ECM)
+│   │   ├── bookstack/         # BookStack wiki — Token-ID + Token-Secret
+│   │   │                      # header + /api/pages updated_at sort
+│   │   │                      # (Round 18, Knowledge)
+│   │   └── upload_portal/     # Signed-upload portal — HMAC-verified
+│   │                          # multipart WebhookReceiver
+│   │                          # (Round 18, Receiver)
 │   ├── credential/            # AES-256-GCM envelope encryption
 │   ├── audit/                 # audit_logs model + repository + Kafka
 │   │                          # outbox + Gin handler
