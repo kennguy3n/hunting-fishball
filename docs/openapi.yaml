@@ -1880,8 +1880,8 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/TenantHeader' }
         - in: query
-          name: window
-          schema: { type: string, default: 5m }
+          name: window_minutes
+          schema: { type: integer, minimum: 1, maximum: 1440, default: 60 }
       responses:
         '200':
           description: OK
@@ -1890,19 +1890,19 @@ paths:
               schema:
                 type: object
                 properties:
-                  window: { type: string }
+                  window_minutes: { type: integer }
                   backends:
                     type: array
                     items:
                       type: object
                       properties:
                         backend: { type: string }
-                        sample_count: { type: integer }
-                        p50_ms: { type: number }
-                        p75_ms: { type: number }
-                        p90_ms: { type: number }
-                        p95_ms: { type: number }
-                        p99_ms: { type: number }
+                        count:   { type: integer }
+                        p50_ms:  { type: number }
+                        p75_ms:  { type: number }
+                        p90_ms:  { type: number }
+                        p95_ms:  { type: number }
+                        p99_ms:  { type: number }
 
   /v1/admin/retrieval/slow-queries:
     get:
