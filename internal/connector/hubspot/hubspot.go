@@ -331,10 +331,20 @@ func (h *Connector) Subscribe(_ context.Context, _ connector.Connection, _ conne
 // Disconnect is a no-op.
 func (h *Connector) Disconnect(_ context.Context, _ connector.Connection) error { return nil }
 
-// DeltaSync uses the search API with a `hs_lastmodifieddate >=
+// DeltaSync uses the search API with a `hs_lastmodifieddate >
 // cursor` filter. The cursor is an ISO-8601 timestamp; the new
-// cursor returned is the latest updatedAt seen. Empty cursor on
-// the first call returns the current cursor without backfilling.
+// cursor returned is the latest hs_lastmodifieddate seen. Empty
+// cursor on the first call returns the current cursor without
+// backfilling — to honor that contract we must bootstrap with the
+// single most-recently-modified record (DESCENDING + limit=1) so
+// newCursor represents "now". With ASCENDING + limit=100, the
+// first page is the 100 oldest records and newCursor would be
+// years stale, causing the next call to backfill nearly the entire
+// dataset as "changes".
+//
+// Subsequent calls (cursor != "") use ASCENDING so the page starts
+// with the oldest unseen change, giving stable forward-only cursor
+// advancement under the GT filter.
 func (h *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
@@ -352,10 +362,13 @@ func (h *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		Properties []string            `json:"properties"`
 		Limit      int                 `json:"limit"`
 	}
-	req.Sorts = []map[string]string{{"propertyName": "hs_lastmodifieddate", "direction": "ASCENDING"}}
 	req.Properties = []string{"hs_lastmodifieddate"}
-	req.Limit = 100
-	if cursor != "" {
+	if cursor == "" {
+		req.Sorts = []map[string]string{{"propertyName": "hs_lastmodifieddate", "direction": "DESCENDING"}}
+		req.Limit = 1
+	} else {
+		req.Sorts = []map[string]string{{"propertyName": "hs_lastmodifieddate", "direction": "ASCENDING"}}
+		req.Limit = 100
 		req.FilterGroups = append(req.FilterGroups, struct {
 			Filters []struct {
 				PropertyName string `json:"propertyName"`

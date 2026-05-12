@@ -240,6 +240,54 @@ func TestHubSpot_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+// TestHubSpot_DeltaSync_InitialCursorIsCurrent locks in that an
+// initial DeltaSync call (cursor == "") bootstraps the cursor from
+// the single most-recently-modified record, not from the 100
+// oldest. The previous ASCENDING + limit=100 bootstrap returned a
+// cursor pointing at the 100th-oldest record (potentially years
+// stale), causing the next call to backfill nearly the entire
+// dataset as "changes" — violating the DeltaSyncer contract.
+//
+// This test fails the regression by asserting:
+//  1. The request body explicitly carries `"direction":"DESCENDING"`.
+//  2. The request body carries `"limit":1`.
+//  3. newCursor equals the most-recent record's timestamp.
+func TestHubSpot_DeltaSync_InitialCursorIsCurrent(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/integrations/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/crm/v3/objects/contacts/search", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body := string(raw)
+		if strings.Contains(body, "filterGroups") {
+			t.Errorf("initial DeltaSync must not send a GT filter, got body=%s", body)
+		}
+		if !strings.Contains(body, `"direction":"DESCENDING"`) {
+			t.Errorf("initial DeltaSync must sort DESCENDING to bootstrap from most-recent, got body=%s", body)
+		}
+		if !strings.Contains(body, `"limit":1`) {
+			t.Errorf("initial DeltaSync must use limit=1 (not 100) so cursor reflects 'now', got body=%s", body)
+		}
+		// Serve only the most-recent record — the cursor must equal its hs_lastmodifieddate.
+		_, _ = w.Write([]byte(`{"results":[{"id":"latest","updatedAt":"2024-12-31T23:59:59Z","properties":{"hs_lastmodifieddate":"2024-12-31T23:59:59Z"}}]}`))
+	})
+	srv := newHubServer(t, mux)
+	h := hubspot.New(hubspot.WithBaseURL(srv.URL), hubspot.WithHTTPClient(srv.Client()))
+	conn, _ := h.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	changes, cur, err := h.DeltaSync(context.Background(), conn, connector.Namespace{ID: "contacts"}, "")
+	if err != nil {
+		t.Fatalf("DeltaSync initial: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("initial DeltaSync must not emit changes (empty cursor = bootstrap only), got %d", len(changes))
+	}
+	if cur != "2024-12-31T23:59:59Z" {
+		t.Fatalf("initial cursor must equal the most-recent record's hs_lastmodifieddate, got %q", cur)
+	}
+}
+
 func TestHubSpot_Subscribe_NotSupported(t *testing.T) {
 	t.Parallel()
 	if _, err := hubspot.New().Subscribe(context.Background(), nil, connector.Namespace{}); !errors.Is(err, connector.ErrNotSupported) {
