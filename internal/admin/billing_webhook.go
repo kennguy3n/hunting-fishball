@@ -91,8 +91,8 @@ func NewBillingWebhookDispatcher(cfg BillingWebhookConfig, tenants BillingTenant
 // BillingWebhookPayload is the JSON shape the dispatcher POSTs.
 // Exported so downstream billing systems can pin the schema.
 type BillingWebhookPayload struct {
-	TenantID string         `json:"tenant_id"`
-	Day      string         `json:"day"`
+	TenantID string           `json:"tenant_id"`
+	Day      string           `json:"day"`
 	Usage    map[string]int64 `json:"usage"`
 }
 
@@ -160,7 +160,7 @@ func (d *BillingWebhookDispatcher) dispatchOne(ctx context.Context, tenantID str
 	if err != nil {
 		return false, fmt.Errorf("billing-webhook: post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return false, fmt.Errorf("billing-webhook: %s -> %d", tenantID, resp.StatusCode)
 	}

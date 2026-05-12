@@ -80,11 +80,11 @@ type SourceAutoPauseConfig struct {
 // pause + audit when a source breaches the configured threshold.
 // Round-19 Task 24.
 type SourceAutoPauser struct {
-	cfg     SourceAutoPauseConfig
-	pauser  SourcePauser
-	writer  AutoPauseAuditWriter
-	mu      sync.Mutex
-	state   map[autoPauseKey]*autoPauseState
+	cfg    SourceAutoPauseConfig
+	pauser SourcePauser
+	writer AutoPauseAuditWriter
+	mu     sync.Mutex
+	state  map[autoPauseKey]*autoPauseState
 }
 
 type autoPauseKey struct {

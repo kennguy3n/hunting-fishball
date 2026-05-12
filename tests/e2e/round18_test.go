@@ -7,17 +7,17 @@
 // upload_portal. This file exercises the Round-18 surface as an
 // integrated bundle:
 //
-//   (a) Registry now reports exactly 42 entries (36 → 42).
-//   (b) Two heterogeneous Round-18 connector lifecycles
-//       (azure_blob / bookstack as a SAS-signed object store and a
-//       token-header wiki) walk Validate → Connect →
-//       ListNamespaces → ListDocuments → DeltaSync.
-//   (c) connector.ErrRateLimited propagates through Connect when
-//       each new connector's upstream returns 429.
-//   (d) The cross-encoder reranker round-trip survives an in-process
-//       gRPC sidecar (gated by CONTEXT_ENGINE_CROSS_ENCODER_ENABLED).
-//   (e) The query routing classifier emits per-source weights that
-//       match the documented exact / semantic / entity intents.
+//	(a) Registry now reports exactly 42 entries (36 → 42).
+//	(b) Two heterogeneous Round-18 connector lifecycles
+//	    (azure_blob / bookstack as a SAS-signed object store and a
+//	    token-header wiki) walk Validate → Connect →
+//	    ListNamespaces → ListDocuments → DeltaSync.
+//	(c) connector.ErrRateLimited propagates through Connect when
+//	    each new connector's upstream returns 429.
+//	(d) The cross-encoder reranker round-trip survives an in-process
+//	    gRPC sidecar (gated by CONTEXT_ENGINE_CROSS_ENCODER_ENABLED).
+//	(e) The query routing classifier emits per-source weights that
+//	    match the documented exact / semantic / entity intents.
 package e2e
 
 import (

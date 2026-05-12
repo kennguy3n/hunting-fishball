@@ -92,10 +92,10 @@ type DLQGrowthReader interface {
 // DLQGrowthProbe degrades the summary when DLQ growth crosses a
 // configurable threshold over the last hour.
 type DLQGrowthProbe struct {
-	Reader         DLQGrowthReader
-	Window         time.Duration
-	DegradeAt      int
-	UnhealthyAt    int
+	Reader      DLQGrowthReader
+	Window      time.Duration
+	DegradeAt   int
+	UnhealthyAt int
 
 	mu      sync.Mutex
 	message string

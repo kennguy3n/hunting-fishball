@@ -147,10 +147,10 @@ func (o *Connector) ListNamespaces(_ context.Context, c connector.Connection) ([
 
 type emptyIterator struct{}
 
-func (emptyIterator) Next(_ context.Context) bool      { return false }
-func (emptyIterator) Doc() connector.DocumentRef       { return connector.DocumentRef{} }
-func (emptyIterator) Err() error                       { return connector.ErrEndOfPage }
-func (emptyIterator) Close() error                     { return nil }
+func (emptyIterator) Next(_ context.Context) bool { return false }
+func (emptyIterator) Doc() connector.DocumentRef  { return connector.DocumentRef{} }
+func (emptyIterator) Err() error                  { return connector.ErrEndOfPage }
+func (emptyIterator) Close() error                { return nil }
 
 // ListDocuments is a no-op iterator. Upload-portal documents are
 // delivered via HandleWebhook and stored in the platform's object
