@@ -233,6 +233,16 @@ func TestAzureBlob_DeltaSync_StopsAtCursor(t *testing.T) {
 
 			return
 		}
+		if r.Header.Get("x-ms-version") == "" {
+			http.Error(w, "missing x-ms-version", http.StatusBadRequest)
+
+			return
+		}
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "SharedKey ") {
+			http.Error(w, "missing SharedKey auth", http.StatusUnauthorized)
+
+			return
+		}
 		_, _ = io.WriteString(w, listXML)
 	})
 	srv := httptest.NewServer(mux)

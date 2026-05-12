@@ -382,6 +382,7 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		return nil, "", fmt.Errorf("azure_blob: build delta: %w", err)
 	}
 	r.Header.Set("If-Modified-Since", cursorTime.UTC().Format(http.TimeFormat))
+	r.Header.Set("x-ms-version", "2021-04-10")
 	if conn.sasToken == "" {
 		o.signRequest(r, conn)
 	}
@@ -522,16 +523,18 @@ func canonicalizedResource(account string, u *url.URL) string {
 		b.WriteString(u.Path)
 	}
 	if q := u.Query(); len(q) > 0 {
-		keys := make([]string, 0, len(q))
-		for k := range q {
-			keys = append(keys, strings.ToLower(k))
+		lowerQ := make(url.Values, len(q))
+		for k, v := range q {
+			lk := strings.ToLower(k)
+			lowerQ[lk] = append(lowerQ[lk], v...)
+		}
+		keys := make([]string, 0, len(lowerQ))
+		for k := range lowerQ {
+			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			vals := q[k]
-			if len(vals) == 0 {
-				vals = q[strings.ToLower(k)]
-			}
+			vals := append([]string(nil), lowerQ[k]...)
 			sort.Strings(vals)
 			b.WriteByte('\n')
 			b.WriteString(k)
