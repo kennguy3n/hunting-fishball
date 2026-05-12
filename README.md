@@ -414,6 +414,75 @@ The full set of public + admin endpoints is documented in
   `ADD COLUMN IF NOT EXISTS`) that the SQLite dry-run misses
   (Task 20, `scripts/migrate-dry-run-pg.sh`).
 
+**Round 14 additions:**
+
+- New observability admin endpoints:
+  - `GET /v1/admin/pipeline/breakers` — Round-14 Task 1.
+    Per-stage circuit-breaker dashboard (state, fail_count,
+    opened_at, probe_in_flight) backed by an in-process
+    `StageBreakerRegistry`
+    (`internal/admin/stage_breaker_handler.go`).
+  - `GET /v1/admin/retrieval/latency-histogram` — Round-14
+    Task 2. P50/P75/P90/P95/P99 per backend (vector / bm25 /
+    graph / memory / merge / rerank / total) over a configurable
+    window, computed from a 60-bucket in-process ring buffer
+    (`internal/admin/latency_histogram_handler.go`).
+  - `GET /v1/admin/retrieval/slow-queries` — Round-14 Task 3.
+    Lists persisted slow queries from the new `slow_queries`
+    table (`migrations/038_slow_queries.sql`,
+    `internal/admin/slow_query_log_handler.go`).
+  - `GET /v1/admin/pipeline/throughput?window=5m` — Round-14
+    Task 4. Per-stage event counts + avg latency from a
+    1-minute-bucket ring buffer
+    (`internal/admin/pipeline_throughput_handler.go`).
+- Security & resilience:
+  - Two-layer request payload validator (JSON decode +
+    struct-field check) for `/v1/retrieve`, `/v1/retrieve/batch`,
+    and `/v1/retrieve/stream`; rejection emits
+    `ERR_INVALID_PAYLOAD` (Task 5).
+  - Audit log integrity background worker gated on
+    `CONTEXT_ENGINE_AUDIT_INTEGRITY_CHECK=true` and
+    `CONTEXT_ENGINE_AUDIT_INTEGRITY_CHECK_INTERVAL`
+    (default 1 h). Increments
+    `context_engine_audit_integrity_violations_total` via a
+    callback so the audit package has no observability
+    dependency (Task 6).
+  - API-key grace sweeper transitions rotated keys past
+    `grace_until` to `expired`; new
+    `context_engine_api_keys_expired_total` and
+    `_grace_expiring_soon` metrics (Task 7).
+  - Per-tenant payload size overrides via
+    `migrations/039_tenant_payload_limits.sql` and the new
+    `TenantPayloadLookup` adapter pluggable into the existing
+    payload limiter (Task 8).
+- Testing depth: regression manifest
+  `tests/regression/round1213_manifest.go` (Task 9), Round-13
+  e2e suite under `e2e` build tag in
+  `tests/e2e/round13_test.go` (Task 10), four new fuzz targets
+  for API-key JSON, stage breaker concurrency, health-summary
+  JSON, and slow-query threshold parsing wired into
+  `make fuzz` (Task 11), and a re-audited cache invalidation
+  baseline through Round 13 (Task 12).
+- Pipeline hardening: embedding-fallback path now emits
+  `context_engine_embedding_fallback_total{reason}` +
+  `_embedding_fallback_latency_seconds` (Task 13). DLQ rows
+  carry a `category` column (`transient` | `permanent` |
+  `unknown`) via `migrations/040_dlq_category.sql`; the auto
+  replayer skips permanent rows and the admin list endpoint
+  exposes a `?category=` filter (Task 14).
+- CI: `.github/workflows/ci.yml` splits `fast-go` into three
+  parallel sub-jobs (`fast-check`, `fast-test`, `fast-build`)
+  and pins `actions/cache` on `~/.cache/go-build` per job
+  (Tasks 15-16). `full-e2e` now provisions Docker Buildx so
+  pulled image layers persist across runs.
+- OpenAPI: typed schemas for the Round-13 admin surface plus
+  the new Round-14 endpoints, pinned via
+  `docs/openapi_test.go` (Task 17).
+- Alerts: four new entries in `deploy/alerts.yaml` —
+  `AuditIntegrityViolation` (page), `EmbeddingFallbackRateHigh`,
+  `APIKeyGraceExpiringSoon`, and `SlowQueryRateHigh` (all
+  warning). Validated by `make alerts-check` (Task 18).
+
 **Round 12 additions:**
 
 - Three new Prometheus alerts in `deploy/alerts.yaml`:

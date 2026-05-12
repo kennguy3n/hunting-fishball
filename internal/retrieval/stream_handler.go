@@ -161,7 +161,11 @@ func (h *StreamHandler) stream(c *gin.Context) {
 	}
 	var req RetrieveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(err))
+		return
+	}
+	if verr := ValidateRetrieveRequest(&req); verr != nil {
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(verr))
 		return
 	}
 	// Round-11 Devin Review fix: gate the per-event explain trace

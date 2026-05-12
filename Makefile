@@ -146,6 +146,11 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz='^FuzzEffectiveMode$$' -fuzztime=30s ./internal/policy/
 	$(GO) test -run='^$$' -fuzz='^FuzzDeltaDiff$$' -fuzztime=30s ./internal/shard/
 	$(GO) test -run='^$$' -fuzz='^FuzzQueryHash$$' -fuzztime=30s ./internal/admin/
+	# Round-14 Task 11: Round-13 input fuzzers.
+	$(GO) test -run='^$$' -fuzz='^FuzzAPIKeyRowDecode$$' -fuzztime=30s ./internal/admin/
+	$(GO) test -run='^$$' -fuzz='^FuzzStageBreakerConcurrent$$' -fuzztime=30s ./internal/pipeline/
+	$(GO) test -run='^$$' -fuzz='^FuzzHealthSummaryRequest$$' -fuzztime=30s ./internal/admin/
+	$(GO) test -run='^$$' -fuzz='^FuzzSlowQueryThreshold$$' -fuzztime=30s ./internal/retrieval/
 
 # Round-12 Task 7: tenant isolation smoke. Runs the e2e isolation
 # manifest against the live storage plane.

@@ -435,6 +435,135 @@ ships, the matrix is empty. Each row records:
 
 ## Changelog
 
+- 2026-05-12: **Round 14: Next 20 tasks — observability dashboards
+  (stage breakers, latency histogram, slow-query persistence,
+  pipeline throughput), payload schema validation, audit
+  integrity worker, API-key grace sweeper, per-tenant payload
+  limits, regression manifest, e2e + fuzz testing, cache
+  invalidation audit refresh, embedding fallback metrics, DLQ
+  categorisation, CI parallel split + caching, OpenAPI Round-13
+  schemas, four new Prometheus alerts, doc audit**.
+  - **Task 0 (CI)**: `docs/PROGRESS.md` already records the
+    `DLQAgeHigh` alert at `severity: warning` matching
+    `deploy/alerts.yaml` — confirmed in commit `94034c7`.
+  - **Task 1**: `internal/admin/stage_breaker_handler.go`
+    serves `GET /v1/admin/pipeline/breakers` with per-stage
+    `StageBreakerSnapshot` rows (state, fail_count, opened_at,
+    probe_in_flight, threshold, open_for). Backed by a new
+    `Snapshot()` method on `StageCircuitBreaker` + an
+    in-process `StageBreakerRegistry` so the admin handler
+    reads state without coupling to the producer. Test in
+    `internal/admin/stage_breaker_handler_test.go`. OpenAPI
+    pinned.
+  - **Task 2**: `internal/admin/latency_histogram_handler.go`
+    serves `GET /v1/admin/retrieval/latency-histogram` returning
+    P50/P75/P90/P95/P99 per backend (vector / bm25 / graph /
+    memory / merge / rerank / total) over a configurable
+    rolling window. Implementation is an in-process 60-bucket
+    1-minute ring buffer feeding nearest-rank percentile maths;
+    no Prometheus query path on the hot retrieve loop. Test
+    asserts percentile shape across 1000 deterministic samples.
+  - **Task 3**: `migrations/038_slow_queries.sql` adds the
+    `slow_queries` table with `(tenant_id, created_at DESC)` +
+    `(tenant_id, latency_ms DESC)` indexes; rollback in
+    `migrations/rollback/038_slow_queries.down.sql`.
+    `internal/admin/slow_query_store.go` adds a GORM store +
+    SQLite-backed test. `internal/admin/slow_query_log_handler.go`
+    serves `GET /v1/admin/retrieval/slow-queries?since=&limit=`.
+  - **Task 4**: `internal/admin/pipeline_throughput_handler.go`
+    + `internal/admin/pipeline_throughput_recorder.go` track
+    per-stage event counts and average latency in a 60-bucket
+    1-minute ring buffer. `GET /v1/admin/pipeline/throughput?
+    window=5m` returns the rolled-up totals. OpenAPI pinned.
+  - **Task 5**: `internal/retrieval/payload_validator.go` runs
+    the two-layer payload check (JSON well-formed → struct
+    field validation) on `/v1/retrieve`, `/v1/retrieve/batch`,
+    and `/v1/retrieve/stream`. Rejection emits structured
+    `ERR_INVALID_PAYLOAD` (new entry in
+    `internal/errors/catalog.go`). Test covers malformed JSON,
+    empty query, oversize top-k.
+  - **Task 6**: `internal/audit/integrity_worker.go` adds a
+    background hash-chain verification loop, gated on
+    `CONTEXT_ENGINE_AUDIT_INTEGRITY_CHECK=true` and configurable
+    via `CONTEXT_ENGINE_AUDIT_INTEGRITY_CHECK_INTERVAL`. On a
+    detected break it emits an `audit.integrity_violation`
+    audit event and invokes a `ObserveFn` callback so
+    `cmd/api/main.go` can increment
+    `context_engine_audit_integrity_violations_total` without
+    creating an `audit → observability` import cycle. Test
+    exercises pass and fail paths.
+  - **Task 7**: `internal/admin/api_key_sweeper.go` sweeps
+    grace-period keys past their `grace_until` deadline and
+    transitions them to `expired`. Counters:
+    `context_engine_api_keys_expired_total`. Gauge:
+    `context_engine_api_keys_grace_expiring_soon` for the new
+    APIKeyGraceExpiringSoon alert. Time-controlled clock in
+    the test.
+  - **Task 8**: `migrations/039_tenant_payload_limits.sql` adds
+    a per-tenant payload-cap table. `internal/admin/tenant_pay
+    load_limits.go` implements the GORM store + cache + a
+    `TenantPayloadLookup` adapter that plugs into the existing
+    payload limiter's `TenantOverride` callback. SQLite-backed
+    CRUD test + middleware integration test.
+  - **Task 9**: `tests/regression/round1213_manifest.go`
+    catalogues six PR #22 review fixes (stage breaker probe
+    gate, SLO burn-rate multi-window fix, BackendContributions
+    in runPipelineFromVec, API-key atomic Rotate, stage breaker
+    early-exit release, batch trace_id echo). Meta-test
+    verifies every TestRef exists in the tree.
+  - **Task 10**: `tests/e2e/round13_test.go` (build tag `e2e`)
+    covers slow-query log, API-key rotation → grace → sweep,
+    pipeline throughput endpoint, stage breaker dashboard, and
+    payload size limiter 413.
+  - **Task 11**: Four fuzz targets:
+    `FuzzAPIKeyRowDecode` (admin), `FuzzStageBreakerConcurrent`
+    (pipeline), `FuzzHealthSummaryRequest` (admin),
+    `FuzzSlowQueryThreshold` (retrieval). Added to `make fuzz`.
+  - **Task 12**: `internal/retrieval/cache_invalidation_test.go`
+    re-audited through Round 13; the baseline manifest is
+    unchanged because no Round-9..13 task added a new
+    cache-affecting write path. Comment block now reflects the
+    audit window so the next round knows where to start.
+  - **Task 13**: `internal/pipeline/embed_fallback.go` exports
+    `EmbedWithReason(reason)` and instruments the fallback path
+    with `context_engine_embedding_fallback_total{reason}` +
+    `context_engine_embedding_fallback_latency_seconds`. Test
+    in `internal/pipeline/embed_fallback_metrics_test.go`.
+  - **Task 14**: `migrations/040_dlq_category.sql` adds a
+    `category` column to `dlq_messages` (transient | permanent
+    | unknown). `CategoriseDLQError` populates it at insert
+    time; the auto-replayer skips `permanent` rows and the
+    admin list endpoint exposes a `?category=` filter. Test
+    asserts skip behaviour + categorisation table.
+  - **Task 15**: `.github/workflows/ci.yml` splits the legacy
+    `fast-go` job into `fast-check` (gofmt + vet),
+    `fast-test` (race + cover), and `fast-build` (cmd binaries)
+    so the long-pole test step no longer serialises the build.
+    The `fast-required` aggregator's `needs:` list is updated.
+  - **Task 16**: Each new fast-lane Go job restores
+    `~/.cache/go-build` via `actions/cache` keyed on
+    `go.sum`. The `full-e2e` job sets up Docker Buildx so
+    `docker compose up` reuses cached image layers.
+  - **Task 17**: `docs/openapi.yaml` gains typed schemas for
+    `/v1/admin/pipeline/breakers`,
+    `/v1/admin/retrieval/latency-histogram`,
+    `/v1/admin/retrieval/slow-queries`, and
+    `/v1/admin/pipeline/throughput`. The Round-13 surface
+    (health summary, slow queries, cache stats, API-key
+    rotation, audit integrity) is now pinned by
+    `docs/openapi_test.go`.
+  - **Task 18**: `deploy/alerts.yaml` gains four alerts:
+    `AuditIntegrityViolation` (page),
+    `EmbeddingFallbackRateHigh` (warning, > 10% over 15m),
+    `APIKeyGraceExpiringSoon` (warning), and
+    `SlowQueryRateHigh` (warning, > 5% over 15m). Each is
+    backed by a metric registered in
+    `internal/observability/metrics.go`. `make alerts-check`
+    is green.
+  - **Tasks 19-20**: This changelog entry, plus a refresh of
+    `README.md` / `docs/ARCHITECTURE.md` / `docs/PHASES.md`
+    Round-14 banners. Migration count now reads 040.
+
 - 2026-05-11: **Round 13: Next 20 tasks — health summary, SLO
   burn-rate alerts, batch tracing, DLQ age monitor, stage
   breakers, percent_complete, backend contributions, slow-query

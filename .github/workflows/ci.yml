@@ -44,13 +44,24 @@ jobs:
   # Fast lane — runs on every PR, blocking
   # ===============================================================
 
-  fast-go:
-    # Round-13 Task 0: golangci-lint was bundled into this job and
-    # consistently pushed wall time over 3m. We moved the linter
-    # into its own parallel `fast-lint` job below so this job
-    # focuses on the unit-test / build path that everything else
-    # depends on. Both jobs are required gates of fast-required.
-    name: Fast Go (gofmt + vet + race+cover + build)
+  # ----------------------------------------------------------------
+  # Round-14 Task 15: the legacy `fast-go` job ran gofmt + vet +
+  # test + build serially in one runner. The unit-test step was the
+  # long pole, so we split it into three parallel jobs:
+  #   fast-check  — gofmt + go vet (~10s).
+  #   fast-test   — go test -race -cover (the long pole).
+  #   fast-build  — go build of the two cmd/ binaries.
+  # The aggregator (fast-required) waits on all three plus the
+  # existing fast-lint / fast-eval / fast-alerts surfaces.
+  #
+  # Round-14 Task 16: each job restores ~/.cache/go-build via the
+  # setup-go action's built-in cache; we additionally pin an
+  # actions/cache step on the same paths so the build cache
+  # survives across branches that don't share a go.sum hash.
+  # ----------------------------------------------------------------
+
+  fast-check:
+    name: Fast Go check (gofmt + vet)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +70,15 @@ jobs:
         with:
           go-version: "1.25.x"
           cache: true
+
+      - name: Restore Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-check-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-check-
 
       - name: go mod download
         run: go mod download
@@ -75,8 +95,54 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+  fast-test:
+    name: Fast Go test (race + cover)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Restore Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-test-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-test-
+
+      - name: go mod download
+        run: go mod download
+
       - name: go test -race -cover
         run: go test -race -cover -count=1 ./...
+
+  fast-build:
+    name: Fast Go build (cmd/ binaries)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Restore Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-build-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-build-
+
+      - name: go mod download
+        run: go mod download
 
       - name: build binaries
         run: |
@@ -232,7 +298,7 @@ jobs:
   fast-required:
     name: Required CI (fast lane)
     runs-on: ubuntu-latest
-    needs: [fast-go, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
+    needs: [fast-check, fast-test, fast-build, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
     if: always()
     steps:
       - name: Verify fast-lane jobs passed
@@ -240,7 +306,9 @@ jobs:
           set -e
           fail=0
           for r in \
-            "${{ needs.fast-go.result }}" \
+            "${{ needs.fast-check.result }}" \
+            "${{ needs.fast-test.result }}" \
+            "${{ needs.fast-build.result }}" \
             "${{ needs.fast-lint.result }}" \
             "${{ needs.fast-eval.result }}" \
             "${{ needs.fast-alerts.result }}" \
@@ -253,7 +321,7 @@ jobs:
             fi
           done
           if [ "$fail" = "1" ]; then
-            echo "::error::fast-go=${{ needs.fast-go.result }} fast-lint=${{ needs.fast-lint.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
+            echo "::error::fast-check=${{ needs.fast-check.result }} fast-test=${{ needs.fast-test.result }} fast-build=${{ needs.fast-build.result }} fast-lint=${{ needs.fast-lint.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
             exit 1
           fi
           echo "fast lane green"
@@ -319,6 +387,12 @@ jobs:
         with:
           go-version: "1.25.x"
           cache: true
+
+      # Round-14 Task 16 — Buildx caches per-image layers. The
+      # subsequent `docker compose up` re-uses pulled-image layers
+      # across runs when the compose definitions are stable.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Bring up storage plane
         run: docker compose up -d --wait

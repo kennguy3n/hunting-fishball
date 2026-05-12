@@ -430,12 +430,12 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 	var req RetrieveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(err))
 
 		return
 	}
-	if req.Query == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "query is required"})
+	if verr := ValidateRetrieveRequest(&req); verr != nil {
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(verr))
 
 		return
 	}

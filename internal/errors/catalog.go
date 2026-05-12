@@ -75,6 +75,14 @@ const (
 	CodeSimulatorEvalFail     Code = "ERR_SIMULATOR_EVAL_FAILED"
 	CodeSimulatorDraftMissing Code = "ERR_SIMULATOR_DRAFT_MISSING"
 	CodeSyncStreamFailed      Code = "ERR_SYNC_STREAM_FAILED"
+
+	// CodeInvalidPayload — Round-14 Task 5. Distinguishes a
+	// schema-validation failure (a required field missing, an
+	// out-of-range integer, a wrong-type value) from the broader
+	// ERR_INVALID_REQUEST_BODY (malformed JSON envelope).
+	// Callers can branch on the typed code to decide whether
+	// retrying with a corrected payload is worth attempting.
+	CodeInvalidPayload Code = "ERR_INVALID_PAYLOAD"
 )
 
 // Entry is one entry in the catalogue.
@@ -122,6 +130,9 @@ var DefaultCatalog = map[Code]Entry{
 	CodeSimulatorEvalFail:     {http.StatusInternalServerError, "simulator evaluation failed", "retry; if it persists, inspect the draft snapshot"},
 	CodeSimulatorDraftMissing: {http.StatusNotFound, "simulator draft not found", ""},
 	CodeSyncStreamFailed:      {http.StatusInternalServerError, "sync progress stream failed", "retry; if persistent, check ingest service health"},
+
+	// Round-14 Task 5.
+	CodeInvalidPayload: {http.StatusBadRequest, "request payload failed schema validation", "fix the named field(s) and retry"},
 }
 
 // Error is the typed application error. Handlers create it via

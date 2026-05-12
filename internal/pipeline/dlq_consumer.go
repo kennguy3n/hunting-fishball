@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -42,6 +43,44 @@ type DLQMessage struct {
 	ReplayedAt    *time.Time `gorm:"column:replayed_at" json:"replayed_at,omitempty"`
 	ReplayError   string     `gorm:"type:text;column:replay_error" json:"replay_error,omitempty"`
 	CreatedAt     time.Time  `gorm:"not null;column:created_at" json:"created_at"`
+	// Category — Round-14 Task 14. Distinguishes auto-replayable
+	// transient failures (timeouts, 5xx, connection refused) from
+	// permanent failures (parse errors, poison messages). Legacy
+	// rows have the default "unknown" assigned by migration 040
+	// and are treated as transient by the auto-replay worker for
+	// backwards compatibility.
+	Category string `gorm:"type:varchar(16);not null;default:unknown;column:category" json:"category"`
+}
+
+// DLQ category constants. Used both by the categoriser at insert
+// time and the auto-replay worker at fetch time.
+const (
+	DLQCategoryTransient = "transient"
+	DLQCategoryPermanent = "permanent"
+	DLQCategoryUnknown   = "unknown"
+)
+
+// CategoriseDLQError maps an error message to a DLQ category. The
+// matching is intentionally substring-based: the upstream error
+// surface is heterogeneous (Kafka, HTTP, parser libs, gRPC) and
+// canonicalising every shape is fragile. Patterns are documented
+// in migrations/040_dlq_category.sql.
+func CategoriseDLQError(errText string) string {
+	if errText == "" {
+		return DLQCategoryUnknown
+	}
+	lower := strings.ToLower(errText)
+	for _, k := range []string{"parse", "poison", "schema", "validation", "decode"} {
+		if strings.Contains(lower, k) {
+			return DLQCategoryPermanent
+		}
+	}
+	for _, k := range []string{"timeout", "connection refused", "429", "503", "502", "504", "deadline", "unavailable", "dns"} {
+		if strings.Contains(lower, k) {
+			return DLQCategoryTransient
+		}
+	}
+	return DLQCategoryUnknown
 }
 
 // TableName overrides the GORM default pluralisation.
@@ -74,6 +113,9 @@ type DLQListFilter struct {
 	SourceID     string
 	MinCreatedAt time.Time // inclusive lower bound; zero = unset
 	MaxCreatedAt time.Time // exclusive upper bound; zero = unset
+	// Category — Round-14 Task 14. When non-empty, narrows the
+	// list to rows whose Category column matches verbatim.
+	Category string
 	// PageSize is the LIMIT clause. <=0 falls back to
 	// DefaultDLQPageSize. Values > MaxDLQPageSize are clamped.
 	PageSize  int
@@ -215,6 +257,7 @@ func (c *DLQConsumer) persist(ctx context.Context, msg *sarama.ConsumerMessage) 
 		FailedAt:      env.FailedAt,
 		AttemptCount:  env.AttemptCount,
 		CreatedAt:     time.Now().UTC(),
+		Category:      CategoriseDLQError(env.Error),
 	}
 	if row.FailedAt.IsZero() {
 		row.FailedAt = time.Now().UTC()

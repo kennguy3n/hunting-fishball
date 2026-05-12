@@ -535,6 +535,101 @@ var (
 			Help: "Events that used the degraded-mode embedding fallback.",
 		},
 	)
+
+	// EmbeddingFallbackByReason — Round-14 Task 13. Labels
+	// EmbedFallbackTotal with the trigger reason so operators
+	// can break down fallback churn by root cause. Bounded label
+	// values (`grpc_down`, `timeout`, `circuit_open`) match the
+	// enum exported from internal/pipeline/embed_fallback.go.
+	EmbeddingFallbackByReason = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "context_engine_embedding_fallback_total",
+			Help: "Embedding fallback triggers, broken down by reason.",
+		},
+		[]string{"reason"},
+	)
+
+	// EmbeddingFallbackLatency — Round-14 Task 13. Wall-clock
+	// duration of the degraded fallback embedder. The histogram
+	// is intentionally narrow (under 500ms): the fallback is a
+	// pure-Go hashing-trick embedder so anything over a few
+	// hundred ms indicates a host-level CPU starvation problem.
+	EmbeddingFallbackLatency = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "context_engine_embedding_fallback_latency_seconds",
+			Help:    "Wall-clock latency of the degraded embedding fallback.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+		},
+	)
+
+	// AuditIntegrityViolationsTotal — Round-14 Task 6. Counts
+	// audit-log chain mismatches detected by the periodic
+	// integrity worker. Every increment SHOULD page; the alert
+	// in deploy/alerts.yaml fires on any positive rate.
+	AuditIntegrityViolationsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_audit_integrity_violations_total",
+			Help: "Audit log integrity-chain mismatches detected by the periodic worker.",
+		},
+	)
+
+	// APIKeysExpiredTotal — Round-14 Task 7. Counts API-key
+	// rows transitioned from `grace` to `expired` by the
+	// background sweeper. Operators alert when this metric
+	// stops increasing (suggesting the sweeper has crashed and
+	// grace keys are accumulating).
+	APIKeysExpiredTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_api_keys_expired_total",
+			Help: "API key rows transitioned from grace to expired by the background sweeper.",
+		},
+	)
+
+	// APIKeysGraceExpiringSoon — Round-14 Task 18 gauge.
+	// Refreshed by the sweeper on every tick: rows in `grace`
+	// status whose `grace_until` is within one hour are counted.
+	// The matching alert fires when this gauge is non-zero for
+	// 5m so the operator can notify the tenant before the
+	// sweeper transitions the row to `expired`.
+	APIKeysGraceExpiringSoon = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "context_engine_api_keys_grace_expiring_soon",
+			Help: "API key rows in grace status whose grace_until is within one hour of now.",
+		},
+	)
+
+	// RetrievalSlowQueriesTotal — Round-14 Task 18.
+	// Counts retrievals whose total latency crossed the
+	// configured slow threshold (LogSlowQuery emits the
+	// structured row). The SlowQueryRateHigh alert fires when
+	// the slow share against the total retrieval volume
+	// exceeds 5% over 15m.
+	RetrievalSlowQueriesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_retrieval_slow_queries_total",
+			Help: "Retrievals that crossed the configured slow-query threshold.",
+		},
+	)
+
+	// RetrievalRequestsTotal — Round-14 Task 18 denominator
+	// for slow-query ratio alerts. Incremented once per
+	// /v1/retrieve and /v1/retrieve/batch sub-request.
+	RetrievalRequestsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_retrieval_requests_total",
+			Help: "Total retrieval requests served (per sub-request for batch).",
+		},
+	)
+
+	// EmbeddingRequestsTotal — Round-14 Task 18 denominator
+	// for the embedding-fallback ratio alert. Incremented once
+	// per embed call regardless of fast / fallback path.
+	EmbeddingRequestsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "context_engine_embedding_requests_total",
+			Help: "Total embed-stage requests (fast path + fallback path combined).",
+		},
+	)
 )
 
 // SetGRPCCircuitBreakerState records the current breaker state for
@@ -584,6 +679,14 @@ func init() {
 		StageBreakerStatesTotal,
 		StageBreakerShortCircuitsTotal,
 		EmbedFallbackTotal,
+		EmbeddingFallbackByReason,
+		EmbeddingFallbackLatency,
+		AuditIntegrityViolationsTotal,
+		APIKeysExpiredTotal,
+		APIKeysGraceExpiringSoon,
+		RetrievalSlowQueriesTotal,
+		RetrievalRequestsTotal,
+		EmbeddingRequestsTotal,
 	)
 }
 
@@ -656,6 +759,14 @@ func ResetForTest() {
 	Registry.Unregister(StageBreakerStatesTotal)
 	Registry.Unregister(StageBreakerShortCircuitsTotal)
 	Registry.Unregister(EmbedFallbackTotal)
+	Registry.Unregister(EmbeddingFallbackByReason)
+	Registry.Unregister(EmbeddingFallbackLatency)
+	Registry.Unregister(AuditIntegrityViolationsTotal)
+	Registry.Unregister(APIKeysExpiredTotal)
+	Registry.Unregister(APIKeysGraceExpiringSoon)
+	Registry.Unregister(RetrievalSlowQueriesTotal)
+	Registry.Unregister(RetrievalRequestsTotal)
+	Registry.Unregister(EmbeddingRequestsTotal)
 	APIRequestsTotal.Reset()
 	APIRequestDurationSeconds.Reset()
 	KafkaConsumerLag.Reset()
@@ -731,6 +842,14 @@ func ResetForTest() {
 		StageBreakerStatesTotal,
 		StageBreakerShortCircuitsTotal,
 		EmbedFallbackTotal,
+		EmbeddingFallbackByReason,
+		EmbeddingFallbackLatency,
+		AuditIntegrityViolationsTotal,
+		APIKeysExpiredTotal,
+		APIKeysGraceExpiringSoon,
+		RetrievalSlowQueriesTotal,
+		RetrievalRequestsTotal,
+		EmbeddingRequestsTotal,
 	)
 }
 

@@ -86,6 +86,19 @@ var requiredPaths = []string{
 	"/v1/admin/sources/{id}/embedding",
 	"/v1/admin/isolation-check",
 	"/v1/admin/chunks/{chunk_id}",
+
+	// Round-13 additions.
+	"/v1/admin/health/summary",
+	"/v1/admin/analytics/queries/slow",
+	"/v1/admin/analytics/cache-stats",
+	"/v1/admin/tenants/{tenant_id}/rotate-api-key",
+	"/v1/admin/audit/integrity",
+
+	// Round-14 additions.
+	"/v1/admin/pipeline/breakers",
+	"/v1/admin/retrieval/latency-histogram",
+	"/v1/admin/retrieval/slow-queries",
+	"/v1/admin/pipeline/throughput",
 }
 
 // TestOpenAPI_RequiredPathsDocumented confirms every path on

@@ -107,6 +107,94 @@ func (b *StageCircuitBreaker) State() StageBreakerState {
 	return b.state
 }
 
+// StageBreakerSnapshot is the immutable observation shape returned
+// by Snapshot. Round-14 Task 1 — the admin dashboard endpoint
+// consumes a slice of these to render the per-stage state table.
+//
+// We pin a struct rather than expose the breaker's mutex-protected
+// internals so the snapshot can be marshalled, logged, or cached
+// without coupling to the breaker's locking discipline.
+type StageBreakerSnapshot struct {
+	Stage         string    `json:"stage"`
+	State         string    `json:"state"`
+	FailCount     int       `json:"fail_count"`
+	OpenedAt      time.Time `json:"opened_at,omitempty"`
+	ProbeInFlight bool      `json:"probe_in_flight"`
+	Threshold     int       `json:"threshold"`
+	OpenFor       string    `json:"open_for"`
+}
+
+// Snapshot returns a point-in-time view of the breaker state.
+// Safe for concurrent use; the snapshot is copied under the
+// breaker's mutex so callers never observe a half-updated row.
+func (b *StageCircuitBreaker) Snapshot() StageBreakerSnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	snap := StageBreakerSnapshot{
+		Stage:         b.cfg.Stage,
+		State:         b.state.String(),
+		FailCount:     b.fails,
+		ProbeInFlight: b.probeInFlight,
+		Threshold:     b.cfg.Threshold,
+		OpenFor:       b.cfg.OpenFor.String(),
+	}
+	if !b.openAt.IsZero() {
+		snap.OpenedAt = b.openAt
+	}
+	return snap
+}
+
+// StageBreakerInspector is the narrow read seam an admin handler
+// uses to render every registered breaker. cmd/api / cmd/ingest
+// wire a *StageBreakerRegistry; tests pass an in-memory slice.
+type StageBreakerInspector interface {
+	Snapshot() []StageBreakerSnapshot
+}
+
+// StageBreakerRegistry holds a process-wide set of breakers keyed
+// by stage. It is the production implementation of
+// StageBreakerInspector. The registry is intentionally simple —
+// breakers can only be added (the pipeline never tears them down
+// at runtime) — so the read side does not need to guard against
+// removals racing with iteration.
+type StageBreakerRegistry struct {
+	mu       sync.RWMutex
+	breakers []*StageCircuitBreaker
+}
+
+// NewStageBreakerRegistry returns an empty registry.
+func NewStageBreakerRegistry() *StageBreakerRegistry {
+	return &StageBreakerRegistry{}
+}
+
+// Add registers a breaker with the registry. The breaker pointer
+// itself is held — the registry observes live state on every
+// Snapshot() call.
+func (r *StageBreakerRegistry) Add(b *StageCircuitBreaker) {
+	if r == nil || b == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.breakers = append(r.breakers, b)
+}
+
+// Snapshot returns one row per registered breaker in registration
+// order. The slice is freshly allocated so callers can sort or
+// mutate without affecting the registry.
+func (r *StageBreakerRegistry) Snapshot() []StageBreakerSnapshot {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]StageBreakerSnapshot, 0, len(r.breakers))
+	for _, b := range r.breakers {
+		out = append(out, b.Snapshot())
+	}
+	return out
+}
+
 // Allow gates a stage call. It returns ErrStageBreakerOpen when
 // the caller must short-circuit. The caller MUST report the
 // outcome via OnSuccess or OnFailure so the breaker can update

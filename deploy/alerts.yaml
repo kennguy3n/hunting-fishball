@@ -345,3 +345,102 @@ spec:
               Inspect Redis CPU + slow log; consider a connection
               pool bump or a cache-key TTL audit.
             runbook_url: "https://docs/RUNBOOKS.md#redis-pool-saturated"
+
+        - alert: AuditIntegrityViolation
+          # Round-14 Task 18 — fires the moment the integrity
+          # worker reports any hash-chain mismatch. The counter is
+          # monotonic so even a single increment is meaningful: the
+          # append-only audit log has been tampered with or has
+          # bit-rot, and an operator must inspect the affected
+          # tenant immediately.
+          expr: increase(context_engine_audit_integrity_violations_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: page
+            service: context-engine
+          annotations:
+            summary: "Audit log integrity violation detected"
+            description: |
+              The audit-integrity background worker detected a
+              hash-chain break or tampered row. Run
+              GET /v1/admin/audit/integrity per tenant to identify
+              the affected scope, snapshot the audit table for
+              forensics, and engage the security on-call.
+            runbook_url: "https://docs/RUNBOOKS.md#audit-integrity"
+
+        - alert: EmbeddingFallbackRateHigh
+          # Round-14 Task 18 — fires when the in-process fallback
+          # embedder serves > 10% of embed requests over 15m. A
+          # high fallback share means the gRPC sidecar is sick;
+          # documents land with `degraded_embedding: true` and
+          # retrieval quality suffers until the sidecar recovers
+          # or the operator triggers a reindex.
+          #
+          # Denominator clamp_min(...,1) keeps the ratio
+          # well-defined when embedding traffic is zero (during a
+          # cold start the sidecar can be the only thing alive).
+          expr: |
+            (
+              sum(rate(context_engine_embedding_fallback_total[15m]))
+              /
+              clamp_min(sum(rate(context_engine_embedding_requests_total[15m])), 1)
+            ) > 0.10
+          for: 5m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Embedding fallback share > 10% over 15m"
+            description: |
+              The pipeline is falling back to the in-process Go
+              embedder on more than 10% of embed calls. Documents
+              indexed during this window carry
+              `degraded_embedding: true`. Check the gRPC sidecar
+              health, the stage-3 breaker state at
+              GET /v1/admin/pipeline/breakers, and consider
+              triggering a reindex once the sidecar recovers.
+            runbook_url: "https://docs/RUNBOOKS.md#embedding-fallback"
+
+        - alert: APIKeyGraceExpiringSoon
+          # Round-14 Task 18 — fires when at least one API key is
+          # within an hour of its grace_until and still in the
+          # grace state. Lets the operator notify the tenant
+          # before the sweeper transitions the row to expired.
+          expr: context_engine_api_keys_grace_expiring_soon > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "API key grace window expiring within 1h"
+            description: |
+              One or more rotated API keys are within one hour of
+              the configured grace deadline. Either confirm the
+              tenant has migrated to the new key or extend the
+              grace window via the rotation endpoint. The sweeper
+              will transition the row to `expired` after the
+              deadline.
+
+        - alert: SlowQueryRateHigh
+          # Round-14 Task 18 — fires when the slow-query log
+          # records > 5% of recent queries crossing the latency
+          # threshold over 15m. A sustained slow-query share is
+          # a leading indicator of vector-store saturation or
+          # query-plan regression.
+          expr: |
+            (
+              sum(rate(context_engine_retrieval_slow_queries_total[15m]))
+              /
+              clamp_min(sum(rate(context_engine_retrieval_requests_total[15m])), 1)
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Slow-query share > 5% over 15m"
+            description: |
+              More than 5% of retrieval queries crossed the slow
+              threshold in the last 15 minutes. Inspect the slow
+              log at GET /v1/admin/retrieval/slow-queries to see
+              which queries / backends are the long pole.

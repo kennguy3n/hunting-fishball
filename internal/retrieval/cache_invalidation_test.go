@@ -197,6 +197,15 @@ func TestCacheInvalidation_PipelineWriteSitesAudit(t *testing.T) {
 	// configured via CONTEXT_ENGINE_CACHE_TTL. This manifest
 	// freezes the current surface so any future expansion of
 	// write paths is visible in the test.
+	//
+	// Round-14 Task 12 re-audited the pipeline through Round 13:
+	// Round 13 added stage circuit breakers, API-key rotation,
+	// degraded-mode embedding fallback, and audit-integrity
+	// verification — none of which add new entries to the
+	// retrieval/Qdrant/FalkorDB write surface. The baseline
+	// below therefore still freezes the same write sites; if a
+	// future round adds a new Stage-4 write call, this audit
+	// will fail until the manifest is consciously extended.
 	baseline := map[string]struct{}{
 		"coordinator.go:Run:c.cfg.GraphRAG.Delete":                 {},
 		"coordinator.go:Run:c.cfg.Store.Delete":                    {},

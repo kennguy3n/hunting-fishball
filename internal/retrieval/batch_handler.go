@@ -72,15 +72,19 @@ func (h *Handler) retrieveBatch(c *gin.Context) {
 	}
 	var req BatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(err))
 		return
 	}
-	if len(req.Requests) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "requests is required"})
-		return
-	}
+	// Round-14 Task 5: enforce per-request schema validation
+	// before fan-out. The 413 length check stays separate from
+	// schema validation so existing callers that special-case
+	// "batch too large" keep their semantics.
 	if len(req.Requests) > MaxBatchSize {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "batch too large", "max": MaxBatchSize})
+		return
+	}
+	if verr := ValidateBatchRequest(&req); verr != nil {
+		c.JSON(http.StatusBadRequest, BuildPayloadErrorBody(verr))
 		return
 	}
 	// Round-9 Task 7: explain mode flows through the batch fan-out

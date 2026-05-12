@@ -2338,3 +2338,90 @@ schema validation.
   prints a green / red checklist. The script exits non-zero on
   any required failure so CI can gate too. Reduces onboarding
   questions in chat.
+
+### Tech choices added in Round 14
+
+- **Per-stage circuit breaker dashboard endpoint.** The breakers
+  added in Round 13 lived in-process only — operators had no
+  way to see live state. `GET /v1/admin/pipeline/breakers`
+  now returns each breaker's state + counters in JSON. The
+  read path is decoupled from the producer side via a small
+  `StageBreakerRegistry` so the admin handler does not need to
+  import the pipeline package directly.
+
+- **In-process latency / throughput ring buffers.** Round-14
+  Tasks 2 and 4 expose P50/P75/P90/P95/P99 retrieval latency
+  per backend and per-stage pipeline throughput via two
+  in-process 60-bucket 1-minute ring buffers. The hot path
+  observes into the buffer directly (no Prometheus round-trip)
+  and the admin handler rolls the window up on demand. Bounded
+  memory, lock-free reads via `sync.RWMutex` snapshots.
+
+- **Persistent slow-query log.** `migrations/038_slow_queries.sql`
+  introduces a write-once `slow_queries` table indexed by
+  `(tenant_id, created_at DESC)`. `LogSlowQuery` writes the
+  row outside the retrieval critical path; the admin endpoint
+  `GET /v1/admin/retrieval/slow-queries` paginates it. Round-13
+  also kept the `slow` column on `query_analytics` for the
+  rollup view — the two surfaces coexist.
+
+- **Two-layer payload validation.** `internal/retrieval/
+  payload_validator.go` validates JSON shape and struct-field
+  invariants for the retrieve / batch / stream endpoints
+  before the handler proper. Rejection routes through the
+  canonical `internal/errors/catalog.go` entry
+  `ERR_INVALID_PAYLOAD`.
+
+- **Audit-integrity worker.** The Round-13 integrity endpoint
+  was lazy (operator-driven). Round 14 adds a periodic worker
+  that verifies the SHA-256 hash chain in the background.
+  Architecturally, the audit package emits the violation
+  metric via a `ObserveFn` callback rather than importing
+  `internal/observability` — same approach as the existing
+  audit-emitter callback. This keeps the audit subsystem
+  re-usable in isolation and avoids the import cycle that
+  surfaced during Round-13 review.
+
+- **API-key grace sweeper + per-tenant payload limits.**
+  Two small admin background workers cement Round-13 surface
+  area: the sweeper transitions `grace`-status rows to
+  `expired` once their `grace_until` passes, and the new
+  `tenant_payload_limits` table (`migrations/039`) lets the
+  payload limiter consult a per-tenant override via the
+  `PayloadLimiterConfig.TenantOverride` callback that already
+  existed.
+
+- **DLQ categorisation.** `migrations/040_dlq_category.sql`
+  adds a `category` column to `dlq_messages`. The consumer
+  derives the category at insert time from the error text
+  (substring rules — `parse`, `schema`, `decode`,
+  `poison` → permanent; `timeout`, `503`, `429`,
+  `connection refused`, `dns` → transient). The
+  auto-replayer skips permanents and the admin list endpoint
+  exposes a `?category=` filter. Legacy rows pre-dating the
+  migration are stamped `unknown` and remain replayable
+  (no flag day).
+
+- **CI parallel split.** The legacy `fast-go` job
+  (gofmt + vet + race + cover + build, all serial) is now
+  three parallel jobs: `fast-check`, `fast-test`,
+  `fast-build`. The new `fast-required` aggregator's
+  `needs:` list explicitly includes all three. Each job pins
+  `actions/cache` on `~/.cache/go-build`. `full-e2e` adds
+  Docker Buildx for image-layer reuse.
+
+- **Round-13 OpenAPI completeness + four new Prometheus
+  alerts.** Round-13 added five admin endpoints but never
+  pinned them in `docs/openapi_test.go`; Round 14 closes that
+  gap and also pins the four new Round-14 endpoints. The new
+  alerts are
+  `AuditIntegrityViolation` (page),
+  `EmbeddingFallbackRateHigh` (warning, > 10% over 15m),
+  `APIKeyGraceExpiringSoon` (warning), and
+  `SlowQueryRateHigh` (warning, > 5% over 15m), each backed
+  by a registered metric.
+
+- **Migration count.** As of Round 14 the highest migration on
+  disk is `migrations/040_dlq_category.sql`. The `migrations/
+  rollback/` directory mirrors every up-migration with a
+  matching `.down.sql`.
