@@ -384,48 +384,51 @@ func (s *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 // on the first call returns the current cursor without
 // backfilling — matching the DeltaSyncer contract for the
 // rest of the connectors.
+//
+// On bootstrap (cursor == "") we paginate through every page
+// of the bucket / prefix scope so newCursor is the *true* last
+// key, not just the 1000th key of the first page. Without that
+// loop, any scope holding more than `max-keys` objects would
+// hand back a stale cursor and the next DeltaSync call would
+// (incorrectly) re-ingest every key past position 1000 as a
+// "new change" — violating the DeltaSyncer contract. S3 has no
+// "last key" shortcut and no native modified-time filter on
+// list-objects-v2, so a forward pagination walk is the only
+// option. Cost is O(N / max-keys) list calls on the first sync,
+// then O(1) per steady-state call.
 func (s *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
 		return nil, "", errors.New("s3: bad connection type")
 	}
 
-	q := url.Values{}
-	q.Set("list-type", "2")
-	q.Set("max-keys", "1000")
-	if prefix := nsPrefix(ns, conn.creds.Bucket); prefix != "" {
-		q.Set("prefix", prefix)
-	}
-	if cursor != "" {
-		q.Set("start-after", cursor)
-	}
-
-	resp, err := s.do(ctx, conn, http.MethodGet, "/?"+q.Encode(), nil, nil)
+	body, err := s.listObjectsPage(ctx, conn, ns, cursor, "")
 	if err != nil {
 		return nil, "", err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-		return nil, "", fmt.Errorf("%w: s3: status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("s3: list-objects-v2 status=%d", resp.StatusCode)
-	}
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", fmt.Errorf("s3: read body: %w", err)
-	}
-	var body objectListResult
-	if err := xml.Unmarshal(raw, &body); err != nil {
-		return nil, "", fmt.Errorf("s3: decode body: %w", err)
-	}
+
 	changes := make([]connector.DocumentChange, 0, len(body.Contents))
 	newCursor := cursor
-	// Initial call (empty cursor): surface the current high-key
-	// only — callers ask for backfill via ListDocuments instead.
+	// Initial call (empty cursor): walk every page to find the
+	// true last key. Tracking only the last key per page keeps
+	// memory O(1) — we never accumulate Contents.
 	if cursor == "" {
 		if len(body.Contents) > 0 {
 			newCursor = body.Contents[len(body.Contents)-1].Key
+		}
+		token := body.NextContinuationToken
+		for body.IsTruncated && token != "" {
+			if err := ctx.Err(); err != nil {
+				return nil, "", err
+			}
+			body, err = s.listObjectsPage(ctx, conn, ns, cursor, token)
+			if err != nil {
+				return nil, "", err
+			}
+			if len(body.Contents) > 0 {
+				newCursor = body.Contents[len(body.Contents)-1].Key
+			}
+			token = body.NextContinuationToken
 		}
 
 		return changes, newCursor, nil
@@ -444,6 +447,49 @@ func (s *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	}
 
 	return changes, newCursor, nil
+}
+
+// listObjectsPage issues a single list-objects-v2 request and
+// decodes the XML response. `cursor` is used as `start-after`
+// (steady-state filter), `token` is used as
+// `continuation-token` (bootstrap pagination). Callers pass
+// at most one of the two — when both are set, list-objects-v2
+// resumes from the continuation token and silently ignores
+// start-after.
+func (s *Connector) listObjectsPage(ctx context.Context, conn *connection, ns connector.Namespace, cursor, token string) (objectListResult, error) {
+	q := url.Values{}
+	q.Set("list-type", "2")
+	q.Set("max-keys", "1000")
+	if prefix := nsPrefix(ns, conn.creds.Bucket); prefix != "" {
+		q.Set("prefix", prefix)
+	}
+	if token != "" {
+		q.Set("continuation-token", token)
+	} else if cursor != "" {
+		q.Set("start-after", cursor)
+	}
+
+	resp, err := s.do(ctx, conn, http.MethodGet, "/?"+q.Encode(), nil, nil)
+	if err != nil {
+		return objectListResult{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		return objectListResult{}, fmt.Errorf("%w: s3: status=%d", connector.ErrRateLimited, resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return objectListResult{}, fmt.Errorf("s3: list-objects-v2 status=%d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return objectListResult{}, fmt.Errorf("s3: read body: %w", err)
+	}
+	var body objectListResult
+	if err := xml.Unmarshal(raw, &body); err != nil {
+		return objectListResult{}, fmt.Errorf("s3: decode body: %w", err)
+	}
+
+	return body, nil
 }
 
 // do runs a SigV4-signed HTTP request against the bucket. path

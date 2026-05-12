@@ -343,6 +343,104 @@ func TestS3_DeltaSync(t *testing.T) {
 	}
 }
 
+// TestS3_DeltaSync_BootstrapPaginatesForTrueLastKey locks in
+// the fix for the stale-bootstrap bug: list-objects-v2 returns
+// at most max-keys (1000) per page, so a single call's last
+// key is only the 1000th key lexicographically. For any
+// bucket / prefix scope holding more than 1000 objects, using
+// that key as the bootstrap cursor would let the next
+// DeltaSync call's start-after filter treat every object past
+// position 1000 as a "new change" — violating the
+// DeltaSyncer contract that an empty cursor returns the
+// *current* cursor without backfilling. The mock serves three
+// paginated pages (1000 + 1000 + 500 keys) and asserts the
+// bootstrap cursor equals the *true* last key (`k/2500`), not
+// the first page's last key (`k/1000`).
+func TestS3_DeltaSync_BootstrapPaginatesForTrueLastKey(t *testing.T) {
+	t.Parallel()
+
+	pages := []struct {
+		truncated bool
+		next      string
+		firstNum  int
+		count     int
+	}{
+		{true, "TOK1", 1, 1000},
+		{true, "TOK2", 1001, 1000},
+		{false, "", 2001, 500},
+	}
+	var seenTokens []string
+	callIdx := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+
+			return
+		}
+		token := r.URL.Query().Get("continuation-token")
+		seenTokens = append(seenTokens, token)
+		// Start-after must NEVER be present on the bootstrap
+		// pagination walk — that's the steady-state filter
+		// and mixing it in would shadow the continuation
+		// token. Lock that contract here.
+		if r.URL.Query().Get("start-after") != "" {
+			t.Errorf("bootstrap pagination must not send start-after; got %q",
+				r.URL.Query().Get("start-after"))
+		}
+		if callIdx >= len(pages) {
+			t.Errorf("unexpected extra list-objects-v2 call (token=%q)", token)
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+
+			return
+		}
+		p := pages[callIdx]
+		callIdx++
+		var b strings.Builder
+		fmt.Fprintf(&b, `<ListBucketResult><IsTruncated>%v</IsTruncated>`, p.truncated)
+		if p.next != "" {
+			fmt.Fprintf(&b, `<NextContinuationToken>%s</NextContinuationToken>`, p.next)
+		}
+		for i := 0; i < p.count; i++ {
+			fmt.Fprintf(&b, `<Contents><Key>k/%04d</Key><ETag>"e"</ETag>`+
+				`<LastModified>2024-01-01T00:00:00Z</LastModified><Size>1</Size></Contents>`,
+				p.firstNum+i)
+		}
+		b.WriteString(`</ListBucketResult>`)
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer srv.Close()
+
+	c := s3.New(s3.WithHTTPClient(srv.Client()))
+	conn, err := c.Connect(context.Background(), connector.ConnectorConfig{
+		TenantID: "t", SourceID: "s", Credentials: validCreds(t, srv.URL),
+	})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "test-bucket"}, "")
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("bootstrap must return zero changes; got %d", len(changes))
+	}
+	if cur != "k/2500" {
+		t.Fatalf("bootstrap cursor must equal the true last key k/2500; got %q", cur)
+	}
+	if callIdx != 3 {
+		t.Fatalf("expected 3 paginated list-objects-v2 calls, got %d", callIdx)
+	}
+	wantTokens := []string{"", "TOK1", "TOK2"}
+	if len(seenTokens) != len(wantTokens) {
+		t.Fatalf("continuation-token sequence length: got %v, want %v", seenTokens, wantTokens)
+	}
+	for i, want := range wantTokens {
+		if seenTokens[i] != want {
+			t.Fatalf("continuation-token[%d]: got %q, want %q", i, seenTokens[i], want)
+		}
+	}
+}
+
 func TestS3_Subscribe_NotSupported(t *testing.T) {
 	t.Parallel()
 
