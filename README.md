@@ -1,13 +1,21 @@
 # hunting-fishball
 
-> **Status.** Phases 0, 1, 2, 3, 4, 5, 6 (server-side), 7, and 8
-> are in `main` (all 🟡 partial — see
-> [`docs/PROGRESS.md`](docs/PROGRESS.md) for the live checklist).
-> Round 6 (this PR) layers retrieval diversity (MMR), semantic
-> deduplication, per-source embedding model selection, query
-> expansion, chunk-level ACL, adaptive rate limiting, SSE
-> streaming retrieval, API versioning, pipeline retry analytics,
-> and 11 more admin surfaces on top of those phases.
+> **Status (2026-05-12, post-Round-14).** Phases 0-3 and 7-8 are
+> **functionally complete** in `main`; Phases 4-6 are
+> **server-side complete** with only client-side rendering left in
+> external repos. See [`docs/PROGRESS.md`](docs/PROGRESS.md) for
+> the live checklist and the Round-by-round changelog below.
+> Migration count is at **040**. Round 14 layers observability
+> dashboards (stage breakers, latency histogram, slow-query
+> persistence, pipeline throughput), payload-schema validation,
+> the audit-integrity background worker, the API-key grace
+> sweeper, per-tenant payload caps, embedding-fallback metrics,
+> DLQ categorisation, four new Prometheus alerts, a regression
+> manifest + e2e suite + four fuzz targets, OpenAPI completeness
+> through the Round-13/14 surface, and a CI fast-lane split into
+> `fast-check` / `fast-test` / `fast-build` (with per-job
+> `actions/cache` on `~/.cache/go-build`). See the Round-14
+> additions block below for the per-task breakdown.
 > Phase 1 brings the Google Drive + Slack connectors, the Go Kafka
 > consumer, the 4-stage pipeline (fetch / parse / embed / store), the
 > `POST /v1/retrieve` API, and a docker-compose CI smoke test.
@@ -949,8 +957,14 @@ hunting-fishball/
 │   │                          # NDCG) + GET /v1/admin/eval/run
 │   ├── errors/                # Round-4 Task 7: structured error
 │   │                          # catalog + Gin middleware
-│   └── migrate/               # Phase 8: SQL migration runner backed
-│                              # by schema_migrations (AUTO_MIGRATE)
+│   ├── migrate/               # Phase 8: SQL migration runner backed
+│   │                          # by schema_migrations (AUTO_MIGRATE)
+│   └── util/                  # Internal helper packages shared by
+│                              # admin + audit handlers (Round-12).
+│                              # util/strutil holds the cursor /
+│                              # pagination helpers that both
+│                              # /v1/admin/audit and the admin list
+│                              # endpoints reuse.
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
@@ -964,7 +978,8 @@ hunting-fishball/
 │   ├── graphrag/              # Round-4 Task 2: GraphRAG gRPC server
 │   ├── memory/                # Mem0 gRPC server + Dockerfile
 │   └── gen_protos.sh          # regenerates _proto/ from proto/
-├── migrations/                # SQL migrations (audit_logs, ...)
+├── migrations/                # SQL migrations 001..040 + per-migration
+│                              # *.down.sql rollbacks (Round-4 Task 20)
 │   └── rollback/              # Round-4 Task 20: per-migration
 │                              # *.down.sql, applied via
 │                              # `make migrate-rollback`
@@ -1048,19 +1063,37 @@ landed) is documented in
   Architectural changes land here *before* the code change in the relevant
   service repository (`ai-agent-platform`, `ai-agent-context-engine`,
   `ai-agent-desktop`, `knowledge`, etc.).
-- **CI lanes.** CI is split into a fast lane and a full lane (see
+- **CI lanes.** CI is split into a fast lane, a full lane, and a
+  nightly lane (see
   [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
-  - **Fast lane** (gofmt, vet, golangci-lint, race+cover unit tests, build,
-    Python services unit tests) runs on every PR push and is required for
-    merge. Branch protection should require the `Required CI (fast lane)`
-    aggregator check.
-  - **Full lane** (proto-gen check, e2e smoke against the docker-compose
-    stack, Go ↔ Python integration with the heavy ML images) runs on:
-    push to `main`, PRs labelled `full-ci` (or `run-integration` for the
-    integration job only), the nightly `27 6 * * *` cron, and manual
-    `workflow_dispatch`. Add the label when a PR touches the storage
-    plane, the gRPC contracts, or anything else that the fast lane can't
-    cover.
+  - **Fast lane** runs on every PR push and is required for merge.
+    Round 14 (Task 15) split the legacy `fast-go` job into three
+    parallel sub-jobs so the unit-test step no longer serialises
+    the build. The full fast-lane roster is:
+    `fast-check` (gofmt + vet),
+    `fast-test` (race + cover),
+    `fast-build` (cmd/ binaries),
+    `fast-lint` (golangci-lint v2.5.0),
+    `fast-eval` (golden corpus),
+    `fast-alerts` (Prometheus alert/recording-rule YAML),
+    `fast-rollback-parity` (migration ↔ rollback parity),
+    `fast-migrate-dry-run` (SQLite dry-run),
+    `fast-proto-check` (proto-gen drift), and
+    `fast-python` (Python services unit tests). Each Go fast-lane
+    job restores `~/.cache/go-build` via `actions/cache` (Round
+    14 Task 16). Branch protection should require the single
+    aggregator job — `Required CI (fast lane)` (`fast-required`)
+    — which is the only check `needs:` every fast-lane job.
+  - **Full lane** (`full-proto-gen`, `full-e2e`, `full-integration`,
+    `full-connector-smoke`, `full-bench-e2e`, `full-capacity-test`,
+    `full-migrate-dry-run-pg`) runs on push to `main`, PRs
+    labelled `full-ci` (or `run-integration` for the integration
+    job only), the nightly cron, and manual `workflow_dispatch`.
+    Add the label when a PR touches the storage plane, the gRPC
+    contracts, or anything else the fast lane can't cover.
+  - **Nightly lane** (`nightly-fuzz`) runs `make fuzz` on the
+    `27 6 * * *` cron so panics surface within 24 hours without
+    blocking PR turnaround.
 ---
 
 ## Related repositories

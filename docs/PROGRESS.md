@@ -16,7 +16,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 0 — Connector contract, registry, audit primitives
 
-**Status.** 🟡 partial | ~100%
+**Status.** 🟡 partial | ~100% (every exit criterion met; phase marker stays `partial` for cross-phase invariants until Phase 4/5/6 client work lands)
 
 - [x] `SourceConnector` interface defined in the platform backend
 - [x] Optional `DeltaSyncer` / `WebhookReceiver` / `Provisioner` interfaces
@@ -27,7 +27,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 1 — Single-source MVP end-to-end
 
-**Status.** 🟡 partial | ~100%
+**Status.** 🟡 partial | ~100% (every exit criterion met and exercised by the docker-compose e2e smoke + benchmark P95 budget)
 
 - [x] Google Drive connector implements `SourceConnector` with delta tokens
 - [x] Slack connector implements `SourceConnector` with the Events API
@@ -41,7 +41,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 2 — B2B Admin Source Management
 
-**Status.** 🟡 partial | ~100%
+**Status.** 🟡 partial | ~100% (every exit criterion met; forget worker and per-tenant routing covered by e2e + isolation smoke)
 
 - [x] Admin portal flows for connect / pause / re-scope / remove
       (`internal/admin/source_handler.go`)
@@ -63,7 +63,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 3 — Retrieval fan-out
 
-**Status.** 🟡 partial | ~100%
+**Status.** 🟡 partial | ~100% (every exit criterion met; P95 budget enforced by `tests/benchmark/p95_e2e_test.go`)
 
 - [x] Qdrant Go client integrated, per-tenant collections
 - [x] BM25 search integrated via `bleve` (pure-Go fallback for
@@ -94,7 +94,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 4 — Policy framework + simulator + privacy strip
 
-**Status.** 🟡 partial | ~98%
+**Status.** 🟡 partial | ~98% — the sole remaining checkbox is client-side rendering, tracked in external B2C / desktop repositories (`uneycom/b2c-kchat-portal`, `uneycom/skytrack-*`).
 
 - [x] Tenant- and channel-scoped privacy mode
       (`internal/policy/privacy_mode.go`,
@@ -148,7 +148,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 5 — On-device knowledge core integration
 
-**Status.** 🟡 partial | ~80% (server-side + contracts shipped; coverage repo authoritative; channel `deny_local_retrieval` wired end-to-end; tenant-deletion 5-step workflow implemented; on-device implementations still tracked in `kennguy3n/knowledge`)
+**Status.** 🟡 partial | ~85% — all server-side work complete through Round 14 (shard manifest API, generation worker, delta sync, coverage endpoint, forgetting orchestrator, model catalog, eviction policy). On-device implementations are tracked in `kennguy3n/knowledge`.
 
 - [x] UniFFI XCFramework for iOS — server-side contract
       (`docs/contracts/uniffi-ios.md`,
@@ -197,7 +197,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 6 — B2C client surfaces
 
-**Status.** 🟡 partial | ~75% (server contracts + endpoints shipped; e2e smoke covers shard/coverage/models/B2C/device-first/forget; structured JSON logging + W3C traceparent middleware shipped; readyz probes + DLQ observer wired; client UIs in B2C repos)
+**Status.** 🟡 partial | ~75% — server contracts and endpoints are complete (`internal/b2c/`, device-first hint, privacy-strip enrichment, `/v1/sync/schedule`). Client UI development is tracked in B2C repos (`uneycom/b2c-kchat-portal`, `uneycom/skytrack-*`).
 
 - [x] iOS / Android / desktop B2C apps consume the same retrieval API —
       server-side SDK contract (`docs/contracts/b2c-retrieval-sdk.md`)
@@ -226,7 +226,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 7 — Catalog expansion
 
-**Status.** 🟡 partial | ~100%
+**Status.** ✅ shipped | ~100% — all 12 production connectors live, per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
 
 - [x] ≥ 12 production connectors at GA — Phase 1 (Google Drive,
       Slack) + Phase 7 (SharePoint, OneDrive, Dropbox, Box, Notion,
@@ -244,7 +244,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 8 — Cross-platform optimization
 
-**Status.** 🟡 partial | ~100% (all 12 line items shipped)
+**Status.** ✅ shipped | ~100% — all 12 exit criteria items shipped (Go context-engine tuning, Python ML scaling, cross-platform on-device benchmarks + eviction contract). Round 14 hardens the production surface on top of this phase rather than reopening it.
 
 Go context engine tuning:
 

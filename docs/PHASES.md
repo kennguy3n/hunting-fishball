@@ -16,13 +16,22 @@ phase.
 | 🟡 partial | Some exit criteria met; gaps tracked in `PROGRESS.md` |
 | ⏳ planned | Not yet started |
 
-> Phases 0–4 are **🟡 partial** as of 2026-05-09 — the connector
-> contract, registry, credential encryption, audit log primitives,
-> Phase 1 single-source MVP, Phase 2 admin source-management, Phase 3
-> retrieval fan-out, and Phase 4 policy framework + simulator +
-> privacy-strip enrichment have all landed (Phase 4 client-side
-> privacy strip and Phase 3 production P95 measurement are tracked
-> against Phase 6 and Phase 8 respectively).
+> **Phase status snapshot (2026-05-12, post-Round-14).** Phases 0,
+> 1, 2, 3, 7, and 8 are **functionally complete** — every exit
+> criterion has shipped to `main` and the supporting tests /
+> runbooks / metrics are in place. Phases 4, 5, and 6 are
+> **server-side complete**; the only remaining checkboxes are
+> client-side rendering tasks that land in the external B2C and
+> desktop repositories (`uneycom/b2c-kchat-portal`,
+> `uneycom/skytrack-*`, `kennguy3n/knowledge`). The phase markers
+> below remain `🟡 partial` until those client repos catch up; see
+> [`PROGRESS.md`](PROGRESS.md) for the per-task status and
+> [`README.md`](../README.md) for the round-by-round changelog.
+> Round 14 hardens the production surface from Rounds 9-13 (admin
+> observability dashboards, payload validation, audit-integrity
+> worker, DLQ categorisation, four new Prometheus alerts, CI fast
+> lane split into `fast-check` / `fast-test` / `fast-build`).
+> Migration count is now 040.
 >
 > **Phase 5** is **🟡 partial** as of 2026-05-10 — server-side
 > shard manifest API, policy-aware shard generation worker, delta
