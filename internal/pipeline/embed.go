@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kennguy3n/hunting-fishball/internal/observability"
 	embeddingv1 "github.com/kennguy3n/hunting-fishball/proto/embedding/v1"
 )
 
@@ -144,6 +145,11 @@ func (e *Embedder) embedWithModel(ctx context.Context, tenantID string, chunks [
 	if len(chunks) == 0 {
 		return nil, "", nil
 	}
+	// Round-14 Task 18: count every embed call (regardless of
+	// fast / remote / fallback path) so the
+	// EmbeddingFallbackRateHigh alert's denominator reflects real
+	// traffic instead of the clamp_min(...,1) floor.
+	observability.EmbeddingRequestsTotal.Inc()
 
 	if e.cfg.Remote != nil && e.cfg.AllowRemote(tenantID) {
 		out, model, err := e.cfg.Remote.Embed(ctx, tenantID, chunks)

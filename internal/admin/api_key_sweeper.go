@@ -50,6 +50,36 @@ const APIKeyStatusExpired APIKeyStatus = "expired"
 // satisfy it.
 type APIKeyExpirer interface {
 	ExpireGrace(ctx context.Context, now time.Time) ([]*APIKeyRow, error)
+	// CountGraceExpiringSoon returns the number of rows in
+	// `grace` status whose grace_until lies within `within` of
+	// `now`. The sweeper publishes this count to the
+	// context_engine_api_keys_grace_expiring_soon gauge so the
+	// matching Round-14 Task 18 alert can fire before the row
+	// transitions to `expired`.
+	CountGraceExpiringSoon(ctx context.Context, now time.Time, within time.Duration) (int64, error)
+}
+
+// GraceExpiringSoonWindow is the lookahead the sweeper uses when
+// counting rows whose grace deadline is approaching. The alert
+// in deploy/alerts.yaml fires when the gauge is > 0 for 5m so
+// the operator has roughly one hour of warning.
+const GraceExpiringSoonWindow = time.Hour
+
+// CountGraceExpiringSoon counts rows in `grace` status whose
+// grace_until is within `within` of `now`.
+func (s *APIKeyStoreGORM) CountGraceExpiringSoon(ctx context.Context, now time.Time, within time.Duration) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("api_keys: nil store")
+	}
+	var n int64
+	err := s.db.WithContext(ctx).Model(&APIKeyRow{}).
+		Where("status = ? AND grace_until IS NOT NULL AND grace_until > ? AND grace_until <= ?",
+			string(APIKeyStatusGrace), now, now.Add(within)).
+		Count(&n).Error
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // ExpireGrace moves every grace row whose grace_until < now to
@@ -132,9 +162,12 @@ func NewAPIKeySweeper(cfg APIKeySweeperConfig) (*APIKeySweeper, error) {
 }
 
 // SweepOnce runs a single sweep pass and returns the number of
-// rows transitioned.
+// rows transitioned. Also refreshes the
+// context_engine_api_keys_grace_expiring_soon gauge so the
+// matching Round-14 Task 18 alert has a populated denominator.
 func (s *APIKeySweeper) SweepOnce(ctx context.Context) (int, error) {
-	rows, err := s.store.ExpireGrace(ctx, s.nowFn())
+	now := s.nowFn()
+	rows, err := s.store.ExpireGrace(ctx, now)
 	if err != nil {
 		return 0, err
 	}
@@ -154,6 +187,16 @@ func (s *APIKeySweeper) SweepOnce(ctx context.Context) (int, error) {
 				slog.Warn("api_key sweep audit emit failed", "error", aerr, "id", r.ID)
 			}
 		}
+	}
+	// Refresh the grace-expiring-soon gauge. ExpireGrace ran
+	// first so freshly-expired rows are no longer counted here,
+	// keeping the gauge a forward-looking signal. A query
+	// failure leaves the previous gauge value in place — better
+	// stale than zero, which would mask a real alert.
+	if n, cerr := s.store.CountGraceExpiringSoon(ctx, now, GraceExpiringSoonWindow); cerr != nil {
+		slog.Warn("api_key sweep grace-expiring-soon count failed", "error", cerr)
+	} else {
+		observability.APIKeysGraceExpiringSoon.Set(float64(n))
 	}
 	return len(rows), nil
 }

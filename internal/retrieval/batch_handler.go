@@ -152,6 +152,10 @@ func (h *Handler) runOne(ctx context.Context, tenantID string, index int, sub Re
 	if sub.Query == "" {
 		return BatchResultItem{Index: index, Error: "query is required"}
 	}
+	// Round-14 Task 18: count every sub-request that survived
+	// schema validation so the SlowQueryRateHigh alert's
+	// denominator includes batch traffic.
+	observability.RetrievalRequestsTotal.Inc()
 	// Round-11 Task 9: tag every batch sub-request so the query
 	// analytics recorder can distinguish batch sub-requests from
 	// organic /v1/retrieve traffic. The field is internal (json:"-")

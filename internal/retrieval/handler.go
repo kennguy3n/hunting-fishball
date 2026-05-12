@@ -439,6 +439,12 @@ func (h *Handler) retrieve(c *gin.Context) {
 
 		return
 	}
+	// Round-14 Task 18: count every accepted retrieve request so
+	// the SlowQueryRateHigh alert's denominator reflects real
+	// traffic instead of the clamp_min(...,1) floor. Counted
+	// after validation so malformed requests do not inflate the
+	// denominator.
+	observability.RetrievalRequestsTotal.Inc()
 	// Round-7 Task 4 / Round-8 Task 15: record per-retrieval
 	// analytics on every successful response. reqStart is captured
 	// before any work so the latency_ms column reflects total

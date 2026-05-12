@@ -148,9 +148,15 @@ func (w *IntegrityWorker) checkOne(ctx context.Context, tenantID string) (bool, 
 		return false, err
 	}
 	resp := ComputeIntegrity(tenantID, res.Items)
+	obs := integrityObservation{
+		HeadHash:   resp.HeadHash,
+		FirstEntry: resp.FirstEntry,
+		LastEntry:  resp.LastEntry,
+		EntryCount: resp.EntryCount,
+	}
 	w.mu.Lock()
 	prev, seen := w.observations[tenantID]
-	w.observations[tenantID] = integrityObservation{HeadHash: resp.HeadHash, LastEntry: resp.LastEntry}
+	w.observations[tenantID] = obs
 	w.mu.Unlock()
 	if !seen {
 		// First observation — pin the head so subsequent runs
@@ -160,19 +166,15 @@ func (w *IntegrityWorker) checkOne(ctx context.Context, tenantID string) (bool, 
 	if prev.HeadHash == resp.HeadHash {
 		return false, nil
 	}
-	// Detect "append-only" growth: the new chain extends a
-	// known prefix when the recorded entry_count grew and the
-	// previous head should match a prefix re-computation. To
-	// keep the worker simple we treat any HEAD divergence as a
-	// signal; production paginates over the same window so
-	// natural growth between runs does not falsely trip.
-	// However, when the LastEntry is a strict suffix of the
-	// previous run (entry_count strictly increased) AND
-	// ComputeIntegrity is stable across appends, we expect a
-	// new head. To avoid false positives in steady-state, we
-	// re-compute the chain through the previous lastEntry as
-	// a tail check.
-	tailMatch, tailErr := w.tailMatches(ctx, tenantID, prev.HeadHash, prev.LastEntry)
+	// Detect "append-only" growth: re-fetch exactly the
+	// (FirstEntry, LastEntry) range the previous sweep saw and
+	// recompute the head. Natural appends widen the chain so the
+	// outer HeadHash diverges, but the historical prefix must
+	// still hash to `prev.HeadHash`. Pagination handles tenants
+	// whose chain grew beyond maxPageSize between sweeps —
+	// without it, the most-recent-N window slides and older rows
+	// fall off, guaranteeing a spurious mismatch.
+	tailMatch, tailErr := w.tailMatches(ctx, tenantID, prev)
 	if tailErr == nil && tailMatch {
 		return false, nil
 	}
@@ -181,37 +183,65 @@ func (w *IntegrityWorker) checkOne(ctx context.Context, tenantID string) (bool, 
 }
 
 // tailMatches returns true when the chain restricted to entries
-// at-or-before the previously recorded `prevLastID` re-hashes to
-// `prevHead`. This collapses the common "rows appended since
-// last run" case to a no-op without flagging a violation. A
-// genuine tamper changes the hash of an existing entry, so the
-// re-computation over the same set of historical IDs diverges.
-func (w *IntegrityWorker) tailMatches(ctx context.Context, tenantID, prevHead, prevLastID string) (bool, error) {
-	if prevLastID == "" || prevHead == "" {
+// in the previously-observed [FirstEntry, LastEntry] range
+// re-hashes to `prev.HeadHash`. This collapses the common
+// "rows appended since last run" case to a no-op without
+// flagging a violation. A genuine tamper changes the hash of
+// an existing entry, so the re-computation over the same set of
+// historical IDs diverges.
+//
+// Pagination matters here: chains larger than maxPageSize can't
+// be re-fetched in a single List call. We paginate using the
+// existing PageToken cursor (id < token, ordered DESC) bounded
+// by IDMinInclusive=FirstEntry and IDMaxInclusive=LastEntry.
+func (w *IntegrityWorker) tailMatches(ctx context.Context, tenantID string, prev integrityObservation) (bool, error) {
+	if prev.LastEntry == "" || prev.HeadHash == "" || prev.FirstEntry == "" {
 		return false, nil
 	}
-	res, err := w.repo.List(ctx, ListFilter{TenantID: tenantID, PageSize: maxPageSize})
-	if err != nil {
-		return false, err
-	}
-	// Keep only entries at-or-before the previously recorded
-	// chain tip. ComputeIntegrity sorts internally, so the input
-	// order does not matter.
-	older := make([]AuditLog, 0, len(res.Items))
-	for _, l := range res.Items {
-		if l.ID <= prevLastID {
-			older = append(older, l)
+	collected := make([]AuditLog, 0, prev.EntryCount)
+	pageToken := ""
+	for {
+		res, err := w.repo.List(ctx, ListFilter{
+			TenantID:       tenantID,
+			PageSize:       maxPageSize,
+			PageToken:      pageToken,
+			IDMinInclusive: prev.FirstEntry,
+			IDMaxInclusive: prev.LastEntry,
+		})
+		if err != nil {
+			return false, err
+		}
+		collected = append(collected, res.Items...)
+		if res.NextPageToken == "" {
+			break
+		}
+		pageToken = res.NextPageToken
+		// Guard against unbounded pagination if the upstream
+		// store ever returns a stable cursor.
+		if len(collected) > prev.EntryCount*2+maxPageSize {
+			return false, nil
 		}
 	}
-	tail := ComputeIntegrity(tenantID, older)
-	return tail.HeadHash == prevHead, nil
+	// Row count must match the previous observation. A short
+	// page means rows were deleted in the historical window —
+	// that is itself a tamper signal, so do not accept the tail.
+	if prev.EntryCount > 0 && len(collected) != prev.EntryCount {
+		return false, nil
+	}
+	tail := ComputeIntegrity(tenantID, collected)
+	return tail.HeadHash == prev.HeadHash, nil
 }
 
 // integrityObservation is the per-tenant snapshot the worker
-// keeps between sweeps.
+// keeps between sweeps. FirstEntry + LastEntry bracket the
+// exact ID range the previous head was computed over; the
+// next sweep paginates over that same range to validate the
+// historical prefix even when the chain grew past maxPageSize.
 type integrityObservation struct {
-	HeadHash  string
-	LastEntry string
+	HeadHash   string
+	FirstEntry string
+	LastEntry  string
+	EntryCount int
 }
 
 func (w *IntegrityWorker) reportViolation(ctx context.Context, tenantID, prev, head string) {

@@ -104,6 +104,83 @@ func TestIntegrityWorker_AppendDoesNotFlag(t *testing.T) {
 	}
 }
 
+// TestIntegrityWorker_AppendBeyondPageSize_DoesNotFlag is the
+// Round-14 PR review regression. With the previous
+// implementation tailMatches() re-fetched only the newest
+// maxPageSize (=200) rows, so a chain that grew past 200 rows
+// between two sweeps would lose its oldest rows from the window
+// and the head hash could not be reproduced — guaranteeing a
+// spurious "integrity violation". The fix paginates over the
+// previously-observed (FirstEntry, LastEntry) range so the
+// historical prefix is recomputed verbatim.
+func TestIntegrityWorker_AppendBeyondPageSize_DoesNotFlag(t *testing.T) {
+	db := newAuditDB(t)
+	repo := audit.NewRepository(db)
+
+	// Seed 250 rows (above the maxPageSize=200 cap).
+	for i := 0; i < 250; i++ {
+		log := &audit.AuditLog{
+			ID:           ulid.Make().String(),
+			TenantID:     "tenant-1",
+			ActorID:      "user",
+			Action:       audit.ActionRetrievalQueried,
+			ResourceType: "retrieval",
+			ResourceID:   "r",
+			CreatedAt:    time.Now().UTC(),
+		}
+		if err := repo.Create(context.Background(), log); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	rec := &emitRecord{}
+	w, err := audit.NewIntegrityWorker(audit.IntegrityWorkerConfig{
+		Repo: repo,
+		Tenants: func(_ context.Context) ([]string, error) {
+			return []string{"tenant-1"}, nil
+		},
+		EmitFn: rec.emit,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if _, err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	// Append rows so the most-recent-200 window shifts older
+	// rows out of view. Append a meaningful chunk so the new
+	// head's window is fully disjoint from the previous head's
+	// observed FirstEntry.
+	for i := 0; i < 220; i++ {
+		log := &audit.AuditLog{
+			ID:           ulid.Make().String(),
+			TenantID:     "tenant-1",
+			ActorID:      "user",
+			Action:       audit.ActionRetrievalQueried,
+			ResourceType: "retrieval",
+			ResourceID:   "r",
+			CreatedAt:    time.Now().UTC(),
+		}
+		if err := repo.Create(context.Background(), log); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	mismatches, err := w.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if mismatches != 0 {
+		t.Fatalf("append-past-pagesize mismatches=%d want 0 (paginated tailMatches regression)", mismatches)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.logs) != 0 {
+		t.Fatalf("expected no integrity-violation emissions, got %d", len(rec.logs))
+	}
+}
+
 func TestIntegrityWorker_TamperFlagsViolation(t *testing.T) {
 
 	db := newAuditDB(t)

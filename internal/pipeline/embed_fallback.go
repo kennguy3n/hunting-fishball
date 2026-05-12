@@ -109,6 +109,13 @@ func (f *FallbackEmbedder) EmbedWithReason(_ context.Context, chunks []string, r
 	for i, text := range chunks {
 		out[i] = hashEmbed(text)
 	}
+	// Round-14 Task 18: count fallback calls toward the same
+	// embed-request denominator the gRPC path increments in
+	// embedWithModel. Without this, embeds served exclusively
+	// by the fallback path would never increment the
+	// denominator, leaving the EmbeddingFallbackRateHigh alert
+	// ratio undefined (numerator-only).
+	observability.EmbeddingRequestsTotal.Inc()
 	observability.EmbeddingFallbackByReason.WithLabelValues(string(reason)).Inc()
 	observability.EmbeddingFallbackLatency.Observe(time.Since(start).Seconds())
 	return out, FallbackModelID, nil
