@@ -32,18 +32,26 @@ import (
 var auditedConnectors = []string{
 	"asana",
 	"box",
+	"clickup",
 	"confluence",
+	"confluence_server",
 	"discord",
 	"dropbox",
 	"github",
 	"gitlab",
+	"gmail",
 	"googledrive",
 	"hubspot",
 	"jira",
 	"kchat",
 	"linear",
+	"mattermost",
+	"monday",
 	"notion",
+	"okta",
 	"onedrive",
+	"pipedrive",
+	"rss",
 	"s3",
 	"salesforce",
 	"sharepoint",
@@ -63,7 +71,10 @@ var requiredChecks = []auditCheck{
 	{"uses context-aware HTTP requests", "NewRequestWithContext"},
 }
 
-// TestConnectorAudit_Round15 enforces the Round-15 contract.
+// TestConnectorAudit_Round15 enforces the connector-completeness
+// contract first introduced in Round 15 and extended to all 27
+// audited connectors (excluding the google_shared_drives wrapper)
+// in Round 16.
 func TestConnectorAudit_Round15(t *testing.T) {
 	t.Parallel()
 	for _, name := range auditedConnectors {

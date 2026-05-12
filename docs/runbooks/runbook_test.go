@@ -23,18 +23,26 @@ import (
 	// populated before ListSourceConnectors runs.
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/asana"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence_server"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/kchat"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/linear"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/mattermost"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/monday"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/notion"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/okta"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
@@ -51,6 +59,11 @@ import (
 // owner's My Drive). Both registry names share the same runbook
 // surface — credential rotation, quotas, outage signals, and
 // error codes are identical.
+//
+// Round-16 Task 17: `confluence_server` is operationally distinct
+// from cloud Confluence (separate auth model, on-prem outage
+// patterns) and gets its own `confluenceserver.md` runbook via
+// the default underscore-stripping mapping.
 func runbookFilename(name string) string {
 	if name == "google_shared_drives" {
 		return "googledrive.md"
@@ -78,8 +91,8 @@ var requiredSections = []string{
 func TestConnectorRunbooks_ExistAndCoverRequiredSections(t *testing.T) {
 	t.Parallel()
 	names := connector.ListSourceConnectors()
-	if len(names) < 20 {
-		t.Fatalf("expected at least 20 connectors registered; got %d (%v)", len(names), names)
+	if len(names) < 28 {
+		t.Fatalf("expected at least 28 connectors registered; got %d (%v)", len(names), names)
 	}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {

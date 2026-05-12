@@ -1,22 +1,33 @@
 # hunting-fishball
 
-> **Status (2026-05-12, post-Round-15).** Phases 0-3 and 7-8 are
+> **Status (2026-05-12, post-Round-16).** Phases 0-3 and 7-8 are
 > **functionally complete** in `main`; Phases 4-6 are
 > **server-side complete** with only client-side rendering left in
 > external repos. See [`docs/PROGRESS.md`](docs/PROGRESS.md) for
 > the live checklist and the Round-by-round changelog below.
-> Migration count is at **040**. **Round 15 expands the connector
-> catalog from 12 → 20**: KChat (the missing Phase-1 chat
-> source), S3-compatible object storage with stdlib SigV4,
-> Linear (GraphQL), Asana, Discord, Salesforce (SOQL), HubSpot
-> (CRM v3), and `google_shared_drives` (a registry entry for
-> shared-drive-only ingestion). Round 15 also adds a connector
-> completeness audit (`internal/connector/audit_test.go`), a
+> Migration count is at **040**. **Round 16 expands the connector
+> catalog from 20 → 28**: Mattermost (Chat), ClickUp + Monday.com
+> (Issue/project — REST + GraphQL), Pipedrive (CRM), Okta
+> (Identity), Gmail (Email read-only via history.list), RSS/Atom
+> (Generic feed polling), and Confluence Server/Data Center
+> (Knowledge/wiki via CQL `lastModified`). Round 16 also adds
+> two new fast-lane CI gates (`fast-connector-integration`
+> running the integration build tag against the contract suite,
+> and `fast-regression` pinning the regression manifests), the
+> `Round1516Manifest` (Round-15/16 regression catalogue with
+> meta-tests), eight new per-connector runbooks, and full sweeps
+> of PROGRESS / PHASES / ARCHITECTURE.
+>
+> Round 15 (previous round) expanded the connector catalog from
+> 12 → 20: KChat (the missing Phase-1 chat source), S3-compatible
+> object storage with stdlib SigV4, Linear (GraphQL), Asana,
+> Discord, Salesforce (SOQL), HubSpot (CRM v3), and
+> `google_shared_drives`. Round 15 also added the
+> `internal/connector/audit_test.go` completeness audit, the
 > `connector.ErrRateLimited` sentinel propagated through every
 > iterator's 429 path, a `fast-connector-unit` CI lane, a CI
-> `concurrency` group that cancels stale runs, seven new
-> per-connector runbooks, and full sweeps of PROGRESS / PHASES
-> / ARCHITECTURE.
+> `concurrency` group that cancels stale runs, and seven
+> per-connector runbooks.
 >
 > Round 14 (previous round) layers observability dashboards
 > (stage breakers, latency histogram, slow-query persistence,
@@ -360,6 +371,70 @@ The full set of public + admin endpoints is documented in
   catches Postgres-specific syntax (JSONB / TIMESTAMPTZ /
   `ADD COLUMN IF NOT EXISTS`) that the SQLite dry-run misses
   (Task 20, `scripts/migrate-dry-run-pg.sh`).
+
+**Round 16 additions:**
+
+- Connector catalog expansion (20 → 28):
+  - `mattermost` — Mattermost REST API
+    (`internal/connector/mattermost/`). Chat channel messages
+    + posts; delta via `since=<ms-epoch>`.
+  - `clickup` — ClickUp v2 REST API
+    (`internal/connector/clickup/`). Tasks by list/folder;
+    delta via `date_updated_gt`.
+  - `monday` — Monday.com GraphQL API
+    (`internal/connector/monday/`). Items by board; delta via
+    `__last_updated__` column. Wraps the HTTP-200 GraphQL
+    `ComplexityException` envelope to
+    `connector.ErrRateLimited`.
+  - `pipedrive` — Pipedrive REST v1
+    (`internal/connector/pipedrive/`). Deals / persons /
+    activities; delta via `/recents?since_timestamp`.
+  - `okta` — Okta Management API
+    (`internal/connector/okta/`). Users + groups; delta via
+    `filter=lastUpdated gt`; deprovisioned users emit as
+    `ChangeDeleted`.
+  - `gmail` — Gmail REST API (`internal/connector/gmail/`).
+    Read-only ingestion; delta via `history.list`
+    historyId cursor.
+  - `rss` — Generic RSS / Atom feed polling
+    (`internal/connector/rss/`). Entries as documents; delta
+    via max `<pubDate>` / `<updated>` of the previous poll.
+  - `confluence_server` — Confluence Server / Data Center REST
+    API (`internal/connector/confluence_server/`). Pages; delta
+    via CQL `space="<key>" AND lastModified > "<RFC3339>"`.
+- Testing:
+  - `tests/e2e/round16_test.go` — registry count fixed at 28,
+    Gmail + Okta full lifecycle tests including DeltaSync
+    bootstrap, 429 propagation sweep for all 7 new HTTP-driven
+    connectors (build tag `e2e`).
+  - `tests/regression/round1516_manifest.go` + `_test.go` —
+    6-entry Round-15/16 regression catalogue with meta-test
+    that every TestRef resolves on disk.
+  - `tests/integration/connector_contract_test.go` extended
+    (build tag `integration`) — compile-time `SourceConnector`
+    + `DeltaSyncer` assertions per new connector struct, and
+    the new `TestConnectorContract_Round16_DeltaSyncerEmptyCursor`
+    table-driven test.
+- CI:
+  - `fast-connector-integration` lane runs the
+    `TestConnectorContract` family with the `integration`
+    build tag — without the docker-compose-backed services that
+    block the full lane.
+  - `fast-regression` lane runs `go test -race -count=1
+    ./tests/regression/...` so every regression manifest stays
+    green per-PR.
+  - `fast-required` aggregator now waits on both new lanes.
+- Documentation:
+  - 8 new per-connector runbooks under `docs/runbooks/`
+    (mattermost, clickup, monday, pipedrive, okta, gmail, rss,
+    confluenceserver) each with the 4 required sections.
+  - `docs/PROGRESS.md` capability matrix expanded with the 8
+    new entries; Phase-7 status updated to **28 connectors**.
+  - `docs/ARCHITECTURE.md` §9 directory tree lists all 28
+    connector directories; new "Tech choices added in Round 16"
+    section.
+  - `docs/PHASES.md` Phase 7 exit criteria updated to
+    **28 connectors**.
 
 **Round 15 additions:**
 
@@ -885,7 +960,7 @@ hunting-fishball/
 ├── internal/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces, process-global registry.
-│   │   │                      # 20 connectors after Round 15:
+│   │   │                      # 28 connectors after Round 16:
 │   │   ├── googledrive/       # Google Drive (Phase 1) +
 │   │   │                      # google_shared_drives registry entry
 │   │   │                      # (Round 15) for shared-drive-only sync
@@ -907,7 +982,15 @@ hunting-fishball/
 │   │   ├── asana/             # Asana tasks (Round 15)
 │   │   ├── discord/           # Discord channel messages (Round 15)
 │   │   ├── salesforce/        # Salesforce SOQL (Round 15)
-│   │   └── hubspot/           # HubSpot CRM v3 (Round 15)
+│   │   ├── hubspot/           # HubSpot CRM v3 (Round 15)
+│   │   ├── mattermost/        # Mattermost chat (Round 16)
+│   │   ├── clickup/           # ClickUp v2 REST (Round 16)
+│   │   ├── monday/            # Monday.com GraphQL (Round 16)
+│   │   ├── pipedrive/         # Pipedrive REST v1 (Round 16)
+│   │   ├── okta/              # Okta Management API (Round 16)
+│   │   ├── gmail/             # Gmail REST history.list (Round 16)
+│   │   ├── rss/               # Generic RSS / Atom (Round 16)
+│   │   └── confluence_server/ # Confluence Server / DC (Round 16)
 │   ├── credential/            # AES-256-GCM envelope encryption
 │   ├── audit/                 # audit_logs model + repository + Kafka
 │   │                          # outbox + Gin handler
