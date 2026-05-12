@@ -33,6 +33,12 @@ const (
 	Name = "entra_id"
 
 	defaultBaseURL = "https://graph.microsoft.com/v1.0"
+
+	// maxDeltaPages caps the number of @odata.nextLink hops
+	// DeltaSync walks per invocation before surfacing the
+	// truncation as an error. Mirrors the safety guard used by
+	// google_workspace, personio, and workday.
+	maxDeltaPages = 50
 )
 
 // Credentials is the JSON shape Validate / Connect expects.
@@ -333,71 +339,77 @@ func (g *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if !ok {
 		return nil, "", errors.New("entra_id: bad connection type")
 	}
-	var path string
-	if cursor == "" {
+	bootstrap := cursor == ""
+	path := cursor
+	if bootstrap {
 		path = "/" + ns.ID + "/delta?$deltatoken=latest"
-	} else {
-		path = cursor
 	}
-	resp, err := g.do(ctx, conn, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: entra_id: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("entra_id: delta status=%d", resp.StatusCode)
-	}
-	var body struct {
-		Value []struct {
-			ID                string    `json:"id"`
-			AccountEnabled    *bool     `json:"accountEnabled"`
-			Removed           *struct{} `json:"@removed"`
-			DisplayName       string    `json:"displayName"`
-			UserPrincipalName string    `json:"userPrincipalName"`
-		} `json:"value"`
-		NextLink  string `json:"@odata.nextLink"`
-		DeltaLink string `json:"@odata.deltaLink"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("entra_id: decode delta: %w", err)
-	}
-	if cursor == "" {
-		next := body.DeltaLink
-		if next == "" {
-			next = body.NextLink
+	var changes []connector.DocumentChange
+	for page := 0; page < maxDeltaPages; page++ {
+		resp, err := g.do(ctx, conn, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, "", err
 		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
 
-		return nil, next, nil
-	}
-	changes := make([]connector.DocumentChange, 0, len(body.Value))
-	for _, p := range body.Value {
-		kind := connector.ChangeUpserted
-		if p.Removed != nil {
-			kind = connector.ChangeDeleted
+			return nil, "", fmt.Errorf("%w: entra_id: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
 		}
-		if p.AccountEnabled != nil && !*p.AccountEnabled {
-			kind = connector.ChangeDeleted
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+
+			return nil, cursor, fmt.Errorf("entra_id: delta status=%d", resp.StatusCode)
 		}
-		changes = append(changes, connector.DocumentChange{
-			Kind: kind,
-			Ref: connector.DocumentRef{
-				NamespaceID: ns.ID,
-				ID:          p.ID,
-			},
-		})
-	}
-	next := body.DeltaLink
-	if next == "" {
-		next = body.NextLink
-	}
-	if next == "" {
-		next = cursor
+		var body struct {
+			Value []struct {
+				ID                string    `json:"id"`
+				AccountEnabled    *bool     `json:"accountEnabled"`
+				Removed           *struct{} `json:"@removed"`
+				DisplayName       string    `json:"displayName"`
+				UserPrincipalName string    `json:"userPrincipalName"`
+			} `json:"value"`
+			NextLink  string `json:"@odata.nextLink"`
+			DeltaLink string `json:"@odata.deltaLink"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			_ = resp.Body.Close()
+
+			return nil, "", fmt.Errorf("entra_id: decode delta: %w", err)
+		}
+		_ = resp.Body.Close()
+		if !bootstrap {
+			for _, p := range body.Value {
+				kind := connector.ChangeUpserted
+				if p.Removed != nil {
+					kind = connector.ChangeDeleted
+				}
+				if p.AccountEnabled != nil && !*p.AccountEnabled {
+					kind = connector.ChangeDeleted
+				}
+				changes = append(changes, connector.DocumentChange{
+					Kind: kind,
+					Ref: connector.DocumentRef{
+						NamespaceID: ns.ID,
+						ID:          p.ID,
+					},
+				})
+			}
+		}
+		if body.DeltaLink != "" {
+			return changes, body.DeltaLink, nil
+		}
+		if body.NextLink == "" {
+			next := cursor
+			if next == "" {
+				next = path
+			}
+
+			return changes, next, nil
+		}
+		path = body.NextLink
 	}
 
-	return changes, next, nil
+	return nil, "", fmt.Errorf("entra_id: delta exceeded %d pages without terminal deltaLink", maxDeltaPages)
 }
 
 // do is the shared HTTP helper. Absolute URLs are routed

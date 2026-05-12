@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -36,6 +37,12 @@ const (
 	Name = "outlook"
 
 	defaultBaseURL = "https://graph.microsoft.com/v1.0"
+
+	// maxDeltaPages caps the number of @odata.nextLink hops
+	// DeltaSync walks per invocation before surfacing the
+	// truncation as an error. Mirrors the safety guard used by
+	// google_workspace, personio, and workday.
+	maxDeltaPages = 50
 )
 
 // Credentials is the JSON shape Validate / Connect expects.
@@ -229,7 +236,7 @@ func (it *messageIterator) fetchPage(ctx context.Context) bool {
 	var path string
 	if !it.first {
 		it.first = true
-		path = it.conn.userPath() + "/mailFolders/" + it.ns.ID + "/messages?$top=50"
+		path = it.conn.userPath() + "/mailFolders/" + url.PathEscape(it.ns.ID) + "/messages?$top=50"
 	} else if it.nextURL != "" {
 		path = it.nextURL
 	} else {
@@ -304,7 +311,7 @@ func (g *Connector) FetchDocument(ctx context.Context, c connector.Connection, r
 	if !ok {
 		return nil, errors.New("outlook: bad connection type")
 	}
-	resp, err := g.do(ctx, conn, http.MethodGet, conn.userPath()+"/messages/"+ref.ID, nil)
+	resp, err := g.do(ctx, conn, http.MethodGet, conn.userPath()+"/messages/"+url.PathEscape(ref.ID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -378,64 +385,70 @@ func (g *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if !ok {
 		return nil, "", errors.New("outlook: bad connection type")
 	}
-	var path string
-	if cursor == "" {
-		path = conn.userPath() + "/mailFolders/" + ns.ID + "/messages/delta?$deltatoken=latest"
-	} else {
-		path = cursor
+	bootstrap := cursor == ""
+	path := cursor
+	if bootstrap {
+		path = conn.userPath() + "/mailFolders/" + url.PathEscape(ns.ID) + "/messages/delta?$deltatoken=latest"
 	}
-	resp, err := g.do(ctx, conn, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: outlook: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("outlook: delta status=%d", resp.StatusCode)
-	}
-	var body struct {
-		Value []struct {
-			ID                   string    `json:"id"`
-			Removed              *struct{} `json:"@removed"`
-			LastModifiedDateTime string    `json:"lastModifiedDateTime"`
-		} `json:"value"`
-		NextLink  string `json:"@odata.nextLink"`
-		DeltaLink string `json:"@odata.deltaLink"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("outlook: decode delta: %w", err)
-	}
-	if cursor == "" {
-		next := body.DeltaLink
-		if next == "" {
-			next = body.NextLink
+	var changes []connector.DocumentChange
+	for page := 0; page < maxDeltaPages; page++ {
+		resp, err := g.do(ctx, conn, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, "", err
 		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
 
-		return nil, next, nil
-	}
-	changes := make([]connector.DocumentChange, 0, len(body.Value))
-	for _, m := range body.Value {
-		kind := connector.ChangeUpserted
-		if m.Removed != nil {
-			kind = connector.ChangeDeleted
+			return nil, "", fmt.Errorf("%w: outlook: delta status=%d", connector.ErrRateLimited, resp.StatusCode)
 		}
-		updated, _ := time.Parse(time.RFC3339, m.LastModifiedDateTime)
-		changes = append(changes, connector.DocumentChange{
-			Kind: kind,
-			Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: m.ID, UpdatedAt: updated},
-		})
-	}
-	next := body.DeltaLink
-	if next == "" {
-		next = body.NextLink
-	}
-	if next == "" {
-		next = cursor
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+
+			return nil, cursor, fmt.Errorf("outlook: delta status=%d", resp.StatusCode)
+		}
+		var body struct {
+			Value []struct {
+				ID                   string    `json:"id"`
+				Removed              *struct{} `json:"@removed"`
+				LastModifiedDateTime string    `json:"lastModifiedDateTime"`
+			} `json:"value"`
+			NextLink  string `json:"@odata.nextLink"`
+			DeltaLink string `json:"@odata.deltaLink"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			_ = resp.Body.Close()
+
+			return nil, "", fmt.Errorf("outlook: decode delta: %w", err)
+		}
+		_ = resp.Body.Close()
+		if !bootstrap {
+			for _, m := range body.Value {
+				kind := connector.ChangeUpserted
+				if m.Removed != nil {
+					kind = connector.ChangeDeleted
+				}
+				updated, _ := time.Parse(time.RFC3339, m.LastModifiedDateTime)
+				changes = append(changes, connector.DocumentChange{
+					Kind: kind,
+					Ref:  connector.DocumentRef{NamespaceID: ns.ID, ID: m.ID, UpdatedAt: updated},
+				})
+			}
+		}
+		if body.DeltaLink != "" {
+			return changes, body.DeltaLink, nil
+		}
+		if body.NextLink == "" {
+			next := cursor
+			if next == "" {
+				next = path
+			}
+
+			return changes, next, nil
+		}
+		path = body.NextLink
 	}
 
-	return changes, next, nil
+	return nil, "", fmt.Errorf("outlook: delta exceeded %d pages without terminal deltaLink", maxDeltaPages)
 }
 
 // do is the shared HTTP helper. Absolute URLs are routed

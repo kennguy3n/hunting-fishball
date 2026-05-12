@@ -239,6 +239,95 @@ func TestOutlook_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+func TestOutlook_FetchDocument_EscapesMessageID(t *testing.T) {
+	t.Parallel()
+	const rawID = "AAMk+Adi/Bl=="
+	var seenPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/me/messages/", func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.EscapedPath()
+		_, _ = io.WriteString(w, `{"id":"x","subject":"hi"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := outlook.New(outlook.WithBaseURL(srv.URL), outlook.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	doc, err := c.FetchDocument(context.Background(), conn, connector.DocumentRef{NamespaceID: "INBOX", ID: rawID})
+	if err != nil {
+		t.Fatalf("FetchDocument: %v", err)
+	}
+	defer func() { _ = doc.Content.Close() }()
+	// Graph message IDs are base64 and routinely contain '/', which
+	// must be %2F-escaped to avoid path-segment confusion. '+' and '='
+	// are sub-delims and RFC-3986-safe in path segments, so PathEscape
+	// leaves them as-is — we only assert the dangerous '/' is escaped.
+	if strings.Contains(seenPath, "Adi/Bl") || !strings.Contains(seenPath, "%2F") {
+		t.Fatalf("server saw unescaped message ID; path=%q", seenPath)
+	}
+}
+
+func TestOutlook_DeltaSync_PaginationAggregates(t *testing.T) {
+	t.Parallel()
+	var (
+		nextLink  string
+		deltaLink string
+		hits      [2]int
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/me/mailFolders/INBOX/messages/delta", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("$skiptoken") == "P2" {
+			hits[1]++
+			_, _ = io.WriteString(w, `{"value":[
+				{"id":"M3","lastModifiedDateTime":"2024-01-03T00:00:00Z"},
+				{"id":"M4","@removed":{}}
+			],"@odata.deltaLink":"`+deltaLink+`"}`)
+
+			return
+		}
+		hits[0]++
+		_, _ = io.WriteString(w, `{"value":[
+			{"id":"M1","lastModifiedDateTime":"2024-01-01T00:00:00Z"},
+			{"id":"M2","lastModifiedDateTime":"2024-01-02T00:00:00Z"}
+		],"@odata.nextLink":"`+nextLink+`"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	nextLink = srv.URL + "/me/mailFolders/INBOX/messages/delta?$skiptoken=P2"
+	deltaLink = srv.URL + "/me/mailFolders/INBOX/messages/delta?$deltatoken=NEW"
+	c := outlook.New(outlook.WithBaseURL(srv.URL), outlook.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "INBOX"}, srv.URL+"/me/mailFolders/INBOX/messages/delta?$deltatoken=PREV")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if hits[0] != 1 || hits[1] != 1 {
+		t.Fatalf("page hits=%v want [1 1]", hits)
+	}
+	if len(changes) != 4 {
+		t.Fatalf("changes=%d want 4 (got %+v)", len(changes), changes)
+	}
+	want := []connector.ChangeKind{
+		connector.ChangeUpserted, // M1
+		connector.ChangeUpserted, // M2
+		connector.ChangeUpserted, // M3 page 2
+		connector.ChangeDeleted,  // M4 @removed page 2
+	}
+	for i, ch := range changes {
+		if ch.Kind != want[i] {
+			t.Fatalf("changes[%d]=%v want %v (id=%s)", i, ch.Kind, want[i], ch.Ref.ID)
+		}
+	}
+	if cur != deltaLink {
+		t.Fatalf("cursor=%q want %q", cur, deltaLink)
+	}
+}
+
 func TestOutlook_SubscribeNotSupported(t *testing.T) {
 	t.Parallel()
 	c := outlook.New()

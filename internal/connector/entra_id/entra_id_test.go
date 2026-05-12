@@ -242,6 +242,65 @@ func TestEntraID_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+func TestEntraID_DeltaSync_PaginationAggregates(t *testing.T) {
+	t.Parallel()
+	var (
+		nextLink  string
+		deltaLink string
+		hits      [2]int
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/organization", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/users/delta", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("$skiptoken") == "P2" {
+			hits[1]++
+			_, _ = io.WriteString(w, `{"value":[
+				{"id":"U3","accountEnabled":true},
+				{"id":"U4","@removed":{}}
+			],"@odata.deltaLink":"`+deltaLink+`"}`)
+
+			return
+		}
+		hits[0]++
+		_, _ = io.WriteString(w, `{"value":[
+			{"id":"U1","accountEnabled":true},
+			{"id":"U2","accountEnabled":false}
+		],"@odata.nextLink":"`+nextLink+`"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	nextLink = srv.URL + "/users/delta?$skiptoken=P2"
+	deltaLink = srv.URL + "/users/delta?$deltatoken=NEW"
+	c := entraid.New(entraid.WithBaseURL(srv.URL), entraid.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "users"}, srv.URL+"/users/delta?$deltatoken=PREV")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if hits[0] != 1 || hits[1] != 1 {
+		t.Fatalf("page hits=%v want [1 1]", hits)
+	}
+	if len(changes) != 4 {
+		t.Fatalf("changes=%d want 4 (got %+v)", len(changes), changes)
+	}
+	want := []connector.ChangeKind{
+		connector.ChangeUpserted, // U1
+		connector.ChangeDeleted,  // U2 disabled
+		connector.ChangeUpserted, // U3 page 2
+		connector.ChangeDeleted,  // U4 @removed
+	}
+	for i, ch := range changes {
+		if ch.Kind != want[i] {
+			t.Fatalf("changes[%d]=%v want %v (id=%s)", i, ch.Kind, want[i], ch.Ref.ID)
+		}
+	}
+	if cur != deltaLink {
+		t.Fatalf("cursor=%q want %q", cur, deltaLink)
+	}
+}
+
 func TestEntraID_SubscribeNotSupported(t *testing.T) {
 	t.Parallel()
 	c := entraid.New()
