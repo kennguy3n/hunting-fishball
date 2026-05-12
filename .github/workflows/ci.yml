@@ -193,6 +193,72 @@ jobs:
       - name: time go test connectors only
         run: time go test -race -count=1 ./internal/connector/...
 
+  # ----------------------------------------------------------------
+  # Round-16 Task 14: fast-connector-integration runs the
+  # `integration`-tagged connector contract tests in
+  # tests/integration/connector_contract_test.go. The job filters
+  # to `TestConnectorContract` so it does NOT block on
+  # docker-compose-backed integration tests (Qdrant / docling /
+  # embedding) — those still live in the full lane.
+  # ----------------------------------------------------------------
+  fast-connector-integration:
+    name: Fast Go test (connector contracts, integration tag)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Restore Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-conn-integ-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-conn-integ-
+
+      - name: go mod download
+        run: go mod download
+
+      - name: connector contract tests
+        run: go test -race -count=1 -tags=integration ./tests/integration/... -run TestConnectorContract
+
+  # ----------------------------------------------------------------
+  # Round-16 Task 14: fast-regression pins the regression manifests
+  # (rounds 4 → 16) as a fast-lane gate. Each manifest entry is
+  # cheap (no external services) but the meta-tests ensure every
+  # documented bug retains its corresponding regression test.
+  # ----------------------------------------------------------------
+  fast-regression:
+    name: Fast Go test (regression manifests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Restore Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-regression-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-regression-
+
+      - name: go mod download
+        run: go mod download
+
+      - name: regression manifests
+        run: go test -race -count=1 ./tests/regression/...
+
   fast-lint:
     # Round-13 Task 0: golangci-lint runs in parallel with the
     # race+cover suite. The action restores its own analysis
@@ -341,7 +407,7 @@ jobs:
   fast-required:
     name: Required CI (fast lane)
     runs-on: ubuntu-latest
-    needs: [fast-check, fast-test, fast-build, fast-connector-unit, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
+    needs: [fast-check, fast-test, fast-build, fast-connector-unit, fast-connector-integration, fast-regression, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-python]
     if: always()
     steps:
       - name: Verify fast-lane jobs passed
@@ -353,6 +419,8 @@ jobs:
             "${{ needs.fast-test.result }}" \
             "${{ needs.fast-build.result }}" \
             "${{ needs.fast-connector-unit.result }}" \
+            "${{ needs.fast-connector-integration.result }}" \
+            "${{ needs.fast-regression.result }}" \
             "${{ needs.fast-lint.result }}" \
             "${{ needs.fast-eval.result }}" \
             "${{ needs.fast-alerts.result }}" \
@@ -365,7 +433,7 @@ jobs:
             fi
           done
           if [ "$fail" = "1" ]; then
-            echo "::error::fast-check=${{ needs.fast-check.result }} fast-test=${{ needs.fast-test.result }} fast-build=${{ needs.fast-build.result }} fast-connector-unit=${{ needs.fast-connector-unit.result }} fast-lint=${{ needs.fast-lint.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
+            echo "::error::fast-check=${{ needs.fast-check.result }} fast-test=${{ needs.fast-test.result }} fast-build=${{ needs.fast-build.result }} fast-connector-unit=${{ needs.fast-connector-unit.result }} fast-connector-integration=${{ needs.fast-connector-integration.result }} fast-regression=${{ needs.fast-regression.result }} fast-lint=${{ needs.fast-lint.result }} fast-eval=${{ needs.fast-eval.result }} fast-alerts=${{ needs.fast-alerts.result }} fast-rollback-parity=${{ needs.fast-rollback-parity.result }} fast-migrate-dry-run=${{ needs.fast-migrate-dry-run.result }} fast-proto-check=${{ needs.fast-proto-check.result }} fast-python=${{ needs.fast-python.result }}"
             exit 1
           fi
           echo "fast lane green"

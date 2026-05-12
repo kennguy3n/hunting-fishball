@@ -35,12 +35,15 @@ import (
 
 // TestRound15_RegistryCount verifies the catalog expansion contract:
 // blank-imports from the e2e package populate exactly 20 connector
-// entries.
+// entries at the time Round 15 shipped. Round 16 extends the floor
+// to 28; the assertion below enforces "at least 20" so the Round-15
+// invariant is preserved without coupling to the Round-16 count
+// (see round16_test.go for that).
 func TestRound15_RegistryCount(t *testing.T) {
 	t.Parallel()
 	names := connector.ListSourceConnectors()
-	if len(names) != 20 {
-		t.Fatalf("registry: %d entries, want 20: %v", len(names), names)
+	if len(names) < 20 {
+		t.Fatalf("registry: %d entries, want >= 20: %v", len(names), names)
 	}
 }
 

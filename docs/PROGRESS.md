@@ -226,13 +226,15 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 7 — Catalog expansion
 
-**Status.** ✅ shipped | ~100% — Round 15 expands the catalog from 12 → **20** production connectors (KChat, S3, Linear, Asana, Discord, Salesforce, HubSpot, Google Shared Drives added on top of the Round 14 set). Per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
+**Status.** ✅ shipped | ~100% — Round 16 expands the catalog from 20 → **28** production connectors (Mattermost, ClickUp, Monday.com, Pipedrive, Okta, Gmail, RSS/Atom, Confluence Server/DC on top of the Round 15 set). Per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
 
 - [x] ≥ 12 production connectors at GA — Phase 1 (Google Drive,
       Slack, KChat) + Phase 7 (SharePoint, OneDrive, Dropbox,
       Box, Notion, Confluence, Jira, GitHub, GitLab, Microsoft
       Teams) + Round-15 Phase-2+ adds (S3, Linear, Asana, Discord,
-      Salesforce, HubSpot, Google Shared Drives) = **20**
+      Salesforce, HubSpot, Google Shared Drives) + Round-16
+      Phase-2+ adds (Mattermost, ClickUp, Monday.com, Pipedrive,
+      Okta, Gmail, RSS/Atom, Confluence Server/DC) = **28**
 - [x] Per-connector runbooks (`docs/runbooks/` —
       one Markdown file per connector covering credential rotation,
       quota / rate-limit incidents, outage detection / recovery, and
@@ -440,11 +442,101 @@ ships, the matrix is empty. Each row records:
 | Salesforce   | ❌ | ✅ (SObject records via SOQL) | ❌ (Platform Events planned) | ✅ (`SystemModstamp` filter) | ❌ | ✅ Round-15 (Phase 2+) |
 | HubSpot      | ❌ | ✅ (CRM objects: contacts, companies, deals, tickets) | ❌ (planned) | ✅ (`hs_lastmodifieddate` search) | ❌ | ✅ Round-15 (Phase 2+) |
 | Google Shared Drives | ❌ | ✅ (files in shared drives only) | ❌ | ✅ (`changes.list` cursor with `supportsAllDrives`) | ❌ | ✅ Round-15 (Phase 2+) |
+| Mattermost   | ✅ (`/api/v4/users/me`) | ✅ (channel posts) | ❌ (planned) | ✅ (`since=<ms-epoch>`) | ❌ | ✅ Round-16 (Phase 2+) |
+| ClickUp      | ✅ (`/api/v2/user`) | ✅ (tasks by list/folder) | ❌ (planned) | ✅ (`date_updated_gt`) | ❌ | ✅ Round-16 (Phase 2+) |
+| Monday.com   | ✅ (`me { id }`) | ✅ (items by board) | ❌ (planned) | ✅ (`__last_updated__` column) | ❌ | ✅ Round-16 (Phase 2+) |
+| Pipedrive    | ✅ (`/users/me`) | ✅ (deals / persons / activities) | ❌ (planned) | ✅ (`/recents?since_timestamp`) | ❌ | ✅ Round-16 (Phase 2+) |
+| Okta         | ✅ (`/api/v1/users/me`) | ✅ (users + groups) | ❌ (Event Hooks planned) | ✅ (`filter=lastUpdated gt`) | ❌ | ✅ Round-16 (Phase 2+, Identity) |
+| Gmail        | ❌ | ✅ (messages) | ❌ (Pub/Sub planned) | ✅ (`history.list` historyId) | ❌ | ✅ Round-16 (Phase 2+, Email) |
+| RSS / Atom   | ❌ | ✅ (entries) | ❌ (poll-only) | ✅ (max `<pubDate>` / `<updated>`) | ❌ | ✅ Round-16 (Phase 2+, Generic) |
+| Confluence Server / DC | ✅ (`/rest/api/user/current`) | ✅ (pages by space) | ❌ (planned) | ✅ (CQL `lastModified`) | ❌ | ✅ Round-16 (Phase 2+, Knowledge) |
 
 ---
 
 ## Changelog
 
+- 2026-05-12: **Round 16: Connector catalog expansion — 20 → 28
+  production connectors. Tasks 1-8 add Mattermost (Chat), ClickUp
+  + Monday.com (Issue/project — REST + GraphQL), Pipedrive (CRM),
+  Okta (Identity), Gmail (Email read-only via history.list),
+  RSS/Atom (Generic feed polling), and Confluence Server/Data
+  Center (Knowledge/wiki via CQL `lastModified`). Tasks 9-10
+  extend the connector-completeness audit + smoke-test pin to
+  28. Tasks 11-13 add `tests/e2e/round16_test.go`, the
+  Round-15/16 regression manifest, and Round-16 contract
+  assertions. Task 14 wires two new fast-lane CI gates
+  (`fast-connector-integration`, `fast-regression`). Tasks 15-17
+  pin the runbook gate to 28 entries + 8 new runbooks. Tasks
+  18-20 refresh PROGRESS / README / ARCHITECTURE / PHASES.**
+  - **Tasks 1-8**: Eight new connectors live under
+    `internal/connector/mattermost/`,
+    `internal/connector/clickup/`,
+    `internal/connector/monday/` (GraphQL; the HTTP-200
+    `ComplexityException` envelope wraps to
+    `connector.ErrRateLimited`),
+    `internal/connector/pipedrive/`,
+    `internal/connector/okta/` (RFC 5988 `Link` header
+    pagination; deprovisioned status maps to
+    `connector.ChangeDeleted`),
+    `internal/connector/gmail/` (history-cursor; bootstrap
+    fetches `profile.historyId`),
+    `internal/connector/rss/` (multi-format timestamp parser),
+    `internal/connector/confluence_server/` (PAT or basic auth;
+    CQL search). Each connector implements
+    `SourceConnector` + `DeltaSyncer`, uses stdlib `net/http`
+    only, ships with full httptest unit tests, and is
+    blank-imported in `cmd/api/main.go` + `cmd/ingest/main.go`.
+  - **Task 9**: `internal/connector/audit_test.go` widened to
+    27 audited connectors (excluding the
+    `google_shared_drives` registry wrapper).
+  - **Task 10**: `tests/e2e/connector_smoke_test.go` registry
+    floor moved to 28 and the new full-lifecycle smoke tests
+    (mattermost / clickup / monday / pipedrive / okta / gmail /
+    rss / confluence_server) wire each connector to a
+    httptest-backed mock and run Validate → Connect →
+    ListNamespaces → ListDocuments → FetchDocument plus
+    DeltaSync.
+  - **Task 11**: `tests/e2e/round16_test.go` adds the Round-16
+    registry count test, full lifecycle for Gmail + Okta
+    (including the DeltaSync bootstrap cursor — the historyId
+    monotonic int64 for Gmail, RFC3339 `lastUpdated` for Okta),
+    and a 7-source `TestRound16_NewConnectors_RateLimitedOnListDocuments`
+    table that asserts every new connector propagates
+    `ErrRateLimited` from `ListDocuments`.
+  - **Task 12**: `tests/regression/round1516_manifest.go` +
+    `_test.go` catalogue 6 Round-15/16 fixes (registry
+    expansion, DeltaSync bootstrap pattern,
+    `ComplexityException` envelope, Gmail history bootstrap,
+    Okta deprovisioned `ChangeDeleted`, audit-coverage widening)
+    and the meta-test asserts every TestRef resolves on disk.
+  - **Task 13**: `tests/integration/connector_contract_test.go`
+    grew compile-time `SourceConnector` + `DeltaSyncer`
+    assertions per new connector struct and a new table-driven
+    `TestConnectorContract_Round16_DeltaSyncerEmptyCursor`
+    against Gmail + Okta (heterogeneous bootstrap surfaces).
+  - **Task 14**: Two new fast-lane CI jobs in
+    `.github/workflows/ci.yml` —
+    `fast-connector-integration` (runs
+    `go test -tags=integration ./tests/integration/... -run
+    TestConnectorContract` so docker-compose-backed integration
+    tests do not gate PRs) and `fast-regression` (runs
+    `go test -count=1 ./tests/regression/...`). Both are wired
+    into the `fast-required` aggregator.
+  - **Task 15**: `docs/runbooks/runbook_test.go` registry floor
+    lifted from 20 → 28 and the blank-imports widened to all
+    new connector packages.
+  - **Tasks 16-17**: 8 new per-connector runbooks under
+    `docs/runbooks/` (mattermost.md, clickup.md, monday.md,
+    pipedrive.md, okta.md, gmail.md, rss.md,
+    confluenceserver.md) each carrying the 4 required sections
+    enforced by `runbook_test.go`. The default
+    `runbookFilename` mapping (`strings.ReplaceAll("_", "")`)
+    already covers `confluence_server` → `confluenceserver.md`.
+  - **Tasks 18-20**: PROGRESS.md (this entry + matrix
+    expansion), README.md status banner / Round-16 additions
+    block / project structure tree, ARCHITECTURE.md §9 + new
+    "Tech choices added in Round 16" section, PHASES.md Phase
+    7 exit criteria refreshed to 28 connectors.
 - 2026-05-12: **Round 15: Connector catalog expansion — 12 → 20
   production connectors. Tasks 1-8 add KChat (the missing
   Phase-1 chat connector), S3-compatible object storage, Linear,

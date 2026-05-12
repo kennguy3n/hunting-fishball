@@ -688,7 +688,7 @@ hunting-fishball/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces (DeltaSyncer / WebhookReceiver /
 │   │   │                      # Provisioner), process-global registry.
-│   │   │                      # 20 connectors after Round 15.
+│   │   │                      # 28 connectors after Round 16.
 │   │   ├── googledrive/       # Google Drive connector (Phase 1) +
 │   │   │                      # shared_drives.go (Round 15) which
 │   │   │                      # registers google_shared_drives as a
@@ -721,8 +721,31 @@ hunting-fishball/
 │   │   │                      # after=snowflake delta cursor.
 │   │   ├── salesforce/        # Salesforce SOQL (Round 15);
 │   │   │                      # SystemModstamp delta filter.
-│   │   └── hubspot/           # HubSpot CRM v3 (Round 15);
-│   │                          # hs_lastmodifieddate search delta.
+│   │   ├── hubspot/           # HubSpot CRM v3 (Round 15);
+│   │   │                      # hs_lastmodifieddate search delta.
+│   │   ├── mattermost/        # Mattermost chat (Round 16);
+│   │   │                      # since=<ms-epoch> delta on
+│   │   │                      # /channels/<id>/posts.
+│   │   ├── clickup/           # ClickUp v2 REST (Round 16);
+│   │   │                      # date_updated_gt delta on /list/<id>/task.
+│   │   ├── monday/            # Monday.com GraphQL (Round 16);
+│   │   │                      # __last_updated__ column delta;
+│   │   │                      # wraps the HTTP-200
+│   │   │                      # ComplexityException envelope to
+│   │   │                      # connector.ErrRateLimited.
+│   │   ├── pipedrive/         # Pipedrive REST v1 (Round 16);
+│   │   │                      # /recents?since_timestamp delta.
+│   │   ├── okta/              # Okta Management API (Round 16);
+│   │   │                      # filter=lastUpdated gt delta;
+│   │   │                      # DEPROVISIONED → ChangeDeleted.
+│   │   ├── gmail/             # Gmail REST (Round 16); read-only
+│   │   │                      # ingestion via history.list
+│   │   │                      # historyId cursor.
+│   │   ├── rss/               # Generic RSS / Atom (Round 16);
+│   │   │                      # max pubDate / updated cursor.
+│   │   └── confluence_server/ # Confluence Server / DC (Round 16);
+│   │                          # PAT or basic auth; CQL
+│   │                          # lastModified > "<RFC3339>" delta.
 │   ├── credential/            # AES-256-GCM envelope encryption for
 │   │                          # connector credentials
 │   ├── audit/                 # AuditLog model, repository (transactional
@@ -2580,5 +2603,108 @@ dependencies are introduced; every new connector uses stdlib
   `docs/runbooks/googledrive.md`.
 
 - **Migration count unchanged.** Round 15 introduces no new
+  schema migrations; the highest migration on disk remains
+  `migrations/040_dlq_category.sql`.
+
+### Tech choices added in Round 16
+
+Round 16 expands the connector catalog from 20 to 28 entries
+and wires two new fast-lane CI gates. No new third-party
+dependencies are introduced; every new connector uses stdlib
+`net/http` against `httptest.NewServer` fixtures in unit tests.
+
+- **Connector catalog expansion (20 → 28).** Round 16 adds
+  eight new entries to the process-global registry:
+  - `mattermost` — Mattermost REST API
+    (`internal/connector/mattermost/mattermost.go`). Channel
+    messages + posts; delta via `since=<ms-epoch>` against
+    `/channels/<id>/posts`.
+  - `clickup` — ClickUp v2 REST API
+    (`internal/connector/clickup/clickup.go`). Tasks by
+    list/folder; delta via `date_updated_gt`. Note ClickUp's
+    `Authorization` header carries the raw token (no `Bearer`
+    prefix).
+  - `monday` — Monday.com GraphQL
+    (`internal/connector/monday/monday.go`). Items by board;
+    delta via `__last_updated__` column. Monday signals
+    throttling via the GraphQL error envelope on HTTP 200
+    (`extensions.code=ComplexityException` or
+    `extensions.status_code=429`); the connector's `gql()`
+    helper wraps both to `connector.ErrRateLimited`.
+  - `pipedrive` — Pipedrive REST v1
+    (`internal/connector/pipedrive/pipedrive.go`). Deals /
+    persons / activities; per-token query-string auth
+    (`?api_token=...`); delta via
+    `/recents?since_timestamp=<unix>`.
+  - `okta` — Okta Management API
+    (`internal/connector/okta/okta.go`). Users + groups; delta
+    via `filter=lastUpdated gt "<RFC3339>"`. Pagination uses
+    the RFC 5988 `Link: <url>; rel="next"` header — the
+    `nextLink()` helper parses it. Deprovisioned users emit as
+    `connector.ChangeDeleted` so the downstream index converges
+    on the upstream lifecycle.
+  - `gmail` — Gmail REST API
+    (`internal/connector/gmail/gmail.go`). Read-only ingestion;
+    delta via the `history.list` `historyId` cursor (monotonic
+    int64). DeltaSync bootstrap fetches
+    `/users/me/profile.historyId` and returns it as the
+    bootstrap cursor — no backfill.
+  - `rss` — Generic RSS / Atom feed polling
+    (`internal/connector/rss/rss.go`). Entries as documents;
+    multi-format timestamp parser (RFC3339, RFC1123Z, RFC1123)
+    handles the various publisher conventions; delta via
+    max `<pubDate>` / `<updated>` of the previous poll.
+  - `confluence_server` — Confluence Server / Data Center REST
+    API
+    (`internal/connector/confluence_server/confluence_server.go`).
+    Dual auth: PAT (Bearer) or basic auth (username +
+    password). Delta via CQL
+    `space="<key>" AND lastModified > "<RFC3339>"` against
+    `/rest/api/content/search`. Bootstrap queries
+    `ORDER BY lastModified DESC` with `limit=1` and returns the
+    newest page's `version.when` as the RFC3339 cursor.
+
+- **DeltaSync bootstrap pattern, consistent across the new
+  set.** Every Round-16 connector returns a populated "now"
+  cursor on the first DeltaSync call without backfilling
+  history. The pattern matches the Round-15 HubSpot / Linear /
+  Salesforce / Asana fix: query DESC + limit=1 (or, for Gmail,
+  fetch `/users/me/profile.historyId`) and return the
+  high-water mark.
+
+- **Two new fast-lane CI gates.** `.github/workflows/ci.yml`
+  gains `fast-connector-integration` (runs the
+  `TestConnectorContract` family with the `integration` build
+  tag so the integration contract suite gates every PR without
+  the docker-compose-backed services that block the full lane)
+  and `fast-regression` (runs `go test -count=1
+  ./tests/regression/...` so every regression manifest stays
+  green per-PR). Both are wired into the `fast-required`
+  aggregator.
+
+- **Round-15/16 regression manifest.**
+  `tests/regression/round1516_manifest.go` + `_test.go`
+  catalogue 6 fixes (registry expansion, DeltaSync bootstrap
+  pattern, `ComplexityException` envelope, Gmail history
+  bootstrap, Okta deprovisioned `ChangeDeleted`, audit-coverage
+  widening). The meta-test asserts every TestRef resolves to a
+  real `func TestName(` on disk.
+
+- **Round-16 contract assertions.**
+  `tests/integration/connector_contract_test.go` (build tag
+  `integration`) grew compile-time `SourceConnector` +
+  `DeltaSyncer` assertions per new connector struct and a new
+  `TestConnectorContract_Round16_DeltaSyncerEmptyCursor`
+  table-driven test against Gmail + Okta (heterogeneous
+  bootstrap surfaces).
+
+- **Eight new per-connector runbooks.**
+  `docs/runbooks/{mattermost,clickup,monday,pipedrive,okta,gmail,rss,confluenceserver}.md`
+  each cover the four required sections (credential rotation,
+  quota / rate-limit, outage detection / recovery, error
+  codes) enforced by `docs/runbooks/runbook_test.go`. The
+  registry floor in `runbook_test.go` is now 28.
+
+- **Migration count unchanged.** Round 16 introduces no new
   schema migrations; the highest migration on disk remains
   `migrations/040_dlq_category.sql`.

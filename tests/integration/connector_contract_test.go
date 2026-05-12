@@ -30,11 +30,19 @@ import (
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/asana"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
+	confluenceserver "github.com/kennguy3n/hunting-fishball/internal/connector/confluence_server"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/discord"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/kchat"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/linear"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/mattermost"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/monday"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/okta"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/slack"
@@ -53,6 +61,24 @@ func TestConnectorContract_SourceConnectorAssertions(t *testing.T) {
 	var _ connector.SourceConnector = (*salesforce.Connector)(nil)
 	var _ connector.SourceConnector = (*hubspot.Connector)(nil)
 	var _ connector.SourceConnector = (*googledrive.SharedDrivesConnector)(nil)
+	// Round-16 additions:
+	var _ connector.SourceConnector = (*mattermost.Connector)(nil)
+	var _ connector.SourceConnector = (*clickup.Connector)(nil)
+	var _ connector.SourceConnector = (*monday.Connector)(nil)
+	var _ connector.SourceConnector = (*pipedrive.Connector)(nil)
+	var _ connector.SourceConnector = (*okta.Connector)(nil)
+	var _ connector.SourceConnector = (*gmail.Connector)(nil)
+	var _ connector.SourceConnector = (*rss.Connector)(nil)
+	var _ connector.SourceConnector = (*confluenceserver.Connector)(nil)
+	// Each must also implement DeltaSyncer.
+	var _ connector.DeltaSyncer = (*mattermost.Connector)(nil)
+	var _ connector.DeltaSyncer = (*clickup.Connector)(nil)
+	var _ connector.DeltaSyncer = (*monday.Connector)(nil)
+	var _ connector.DeltaSyncer = (*pipedrive.Connector)(nil)
+	var _ connector.DeltaSyncer = (*okta.Connector)(nil)
+	var _ connector.DeltaSyncer = (*gmail.Connector)(nil)
+	var _ connector.DeltaSyncer = (*rss.Connector)(nil)
+	var _ connector.DeltaSyncer = (*confluenceserver.Connector)(nil)
 }
 
 // TestConnectorContract_DeltaSyncerEmptyCursor exercises the
@@ -89,6 +115,69 @@ func TestConnectorContract_DeltaSyncerEmptyCursor(t *testing.T) {
 	}
 	if cursor == "" {
 		t.Fatalf("empty-cursor call should return a fresh cursor; got %q", cursor)
+	}
+}
+
+// TestConnectorContract_Round16_DeltaSyncerEmptyCursor exercises
+// the "empty cursor returns a fresh token and no historical changes"
+// contract against each Round-16 DeltaSyncer connector. Distinct
+// from the Round-15 case because these connectors use heterogenous
+// upstream surfaces (REST + GraphQL + RSS + Gmail history), so the
+// shared contract is best demonstrated through the table below.
+func TestConnectorContract_Round16_DeltaSyncerEmptyCursor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"gmail", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/users/me/profile", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"historyId":"500"}`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := gmail.New(gmail.WithBaseURL(srv.URL), gmail.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(gmail.Credentials{AccessToken: "tok"})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "INBOX"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+		{"okta", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v1/users/me", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{}`)
+			})
+			mux.HandleFunc("/api/v1/users", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `[{"id":"U1","status":"ACTIVE","lastUpdated":"2024-01-05T00:00:00Z"}]`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := okta.New(okta.WithBaseURL(srv.URL), okta.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(okta.Credentials{APIToken: "k", OrgURL: srv.URL})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "users"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.run(t)
+		})
 	}
 }
 
