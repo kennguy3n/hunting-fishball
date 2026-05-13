@@ -262,6 +262,53 @@ func TestIntercom_DeltaSync_ArticlesUsesListEndpoint(t *testing.T) {
 	}
 }
 
+// TestIntercom_DeltaSync_ArticlesEarlyTerminatesOnDescStalePage
+// asserts the Round-23 Devin Review fix: when Intercom honours the
+// `order=desc&sort=updated_at` hint we exit after the first
+// fully-stale page rather than walking the entire catalogue.
+func TestIntercom_DeltaSync_ArticlesEarlyTerminatesOnDescStalePage(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	calls := 0
+	mux.HandleFunc("/articles", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch r.URL.Query().Get("starting_after") {
+		case "":
+			// Page 1: records arrive in descending updated_at,
+			// last record still > since → continue.
+			_, _ = io.WriteString(w, `{"data":[{"id":"a2","updated_at":1717210000},{"id":"a1","updated_at":1717205000}],"pages":{"next":{"starting_after":"page2"}}}`)
+		case "page2":
+			// Page 2: every record is stale and the ordering
+			// stays monotonically descending → break early.
+			_, _ = io.WriteString(w, `{"data":[{"id":"oldA","updated_at":1717100000},{"id":"oldB","updated_at":1717050000}],"pages":{"next":{"starting_after":"page3"}}}`)
+		case "page3":
+			t.Fatalf("page3 should not be requested — early-termination failed")
+		default:
+			http.Error(w, "unexpected starting_after", http.StatusBadRequest)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := intercom.New(intercom.WithBaseURL(srv.URL), intercom.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "articles"}, "1717200000")
+	if err != nil {
+		t.Fatalf("DeltaSync articles: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected exactly 2 GET /articles calls (early-terminate after page 2), got %d", calls)
+	}
+	if len(changes) != 2 || changes[0].Ref.ID != "a2" || changes[1].Ref.ID != "a1" {
+		t.Fatalf("changes=%+v (expected fresh a2 + a1)", changes)
+	}
+	if cur != "1717210000" {
+		t.Fatalf("cur=%q want 1717210000 (newest updated_at)", cur)
+	}
+}
+
 func TestIntercom_Registers(t *testing.T) {
 	t.Parallel()
 	if _, err := connector.GetSourceConnector(intercom.Name); err != nil {

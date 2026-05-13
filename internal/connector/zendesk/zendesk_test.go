@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -221,6 +222,64 @@ func TestZendesk_ListDocuments_FollowsNextPage(t *testing.T) {
 	}
 	if len(ids) != 2 || ids[0] != "1" || ids[1] != "2" {
 		t.Fatalf("expected 2 IDs across 2 pages, got %v", ids)
+	}
+}
+
+// TestZendesk_DeltaSync_PaginatesAllPages exercises the Round-23
+// Devin Review fix: DeltaSync must follow Zendesk's incremental
+// `next_page` URL until either `end_of_stream`, `count < 1000`,
+// or the field is empty.
+func TestZendesk_DeltaSync_PaginatesAllPages(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/users/me.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	calls := 0
+	var srvURL string
+	mux.HandleFunc("/api/v2/incremental/tickets.json", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("start_time") == "" && r.URL.Query().Get("cursor") == "" {
+			http.Error(w, "missing start_time", http.StatusBadRequest)
+
+			return
+		}
+		calls++
+		if calls == 1 {
+			var b strings.Builder
+			b.WriteString(`{"tickets":[`)
+			for i := 0; i < 1000; i++ {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				b.WriteString(`{"id":`)
+				b.WriteString(strconv.Itoa(i))
+				b.WriteString(`,"updated_at":"2024-06-02T00:00:00Z"}`)
+			}
+			b.WriteString(`],"count":1000,"next_page":"` + srvURL + `/api/v2/incremental/tickets.json?cursor=abc","end_time":1717286400}`)
+			_, _ = io.WriteString(w, b.String())
+
+			return
+		}
+		// Second page: short page + end_of_stream=true ⇒ EOF.
+		_, _ = io.WriteString(w, `{"tickets":[{"id":1001,"updated_at":"2024-06-03T00:00:00Z"}],"count":1,"end_time":1717372800,"end_of_stream":true}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+	c := zendesk.New(zendesk.WithBaseURL(srv.URL), zendesk.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "tickets"}, "1717200000")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 page requests, got %d", calls)
+	}
+	if len(changes) != 1001 {
+		t.Fatalf("expected 1001 changes across 2 pages, got %d", len(changes))
+	}
+	if cur != "1717372800" {
+		t.Fatalf("cur=%q want 1717372800 (latest end_time across pages)", cur)
 	}
 }
 

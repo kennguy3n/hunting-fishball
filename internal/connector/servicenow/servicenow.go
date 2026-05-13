@@ -337,6 +337,10 @@ func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 
 // DeltaSync filters by sys_updated_on with offset pagination. Empty
 // cursor returns the current "now" timestamp without backfilling.
+// Round-23 Devin Review fix: walk every sysparm_offset page rather
+// than capping at the first 100 records. EOF is detected via the
+// short-page probe (len(result) < sysparm_limit) so we never fire
+// a wasted trailing empty request.
 func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
@@ -346,38 +350,48 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if cursor == "" {
 		return nil, now, nil
 	}
-	q := url.Values{}
-	q.Set("sysparm_query", "sys_updated_on>"+cursor+"^ORDERBYsys_updated_on")
-	q.Set("sysparm_limit", "100")
-	q.Set("sysparm_offset", "0")
-	resp, err := o.do(ctx, conn, http.MethodGet, "/api/now/table/"+url.PathEscape(conn.table)+"?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: servicenow: status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("servicenow: delta status=%d", resp.StatusCode)
-	}
-	var body struct {
-		Result []recordEntry `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("servicenow: decode delta: %w", err)
-	}
+	const limit = 100
 	var changes []connector.DocumentChange
 	newest := cursor
-	for _, r := range body.Result {
-		ref := connector.DocumentRef{NamespaceID: ns.ID, ID: r.SysID}
-		if r.SysUpdatedOn != "" {
-			ref.UpdatedAt = parseSNTime(r.SysUpdatedOn)
-			if r.SysUpdatedOn > newest {
-				newest = r.SysUpdatedOn
-			}
+	offset := 0
+	for {
+		q := url.Values{}
+		q.Set("sysparm_query", "sys_updated_on>"+cursor+"^ORDERBYsys_updated_on")
+		q.Set("sysparm_limit", strconv.Itoa(limit))
+		q.Set("sysparm_offset", strconv.Itoa(offset))
+		resp, err := o.do(ctx, conn, http.MethodGet, "/api/now/table/"+url.PathEscape(conn.table)+"?"+q.Encode(), nil)
+		if err != nil {
+			return nil, "", err
 		}
-		changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+		status := resp.StatusCode
+		var body struct {
+			Result []recordEntry `json:"result"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if status == http.StatusTooManyRequests {
+			return nil, "", fmt.Errorf("%w: servicenow: status=%d", connector.ErrRateLimited, status)
+		}
+		if status != http.StatusOK {
+			return nil, cursor, fmt.Errorf("servicenow: delta status=%d", status)
+		}
+		if decodeErr != nil {
+			return nil, "", fmt.Errorf("servicenow: decode delta: %w", decodeErr)
+		}
+		for _, r := range body.Result {
+			ref := connector.DocumentRef{NamespaceID: ns.ID, ID: r.SysID}
+			if r.SysUpdatedOn != "" {
+				ref.UpdatedAt = parseSNTime(r.SysUpdatedOn)
+				if r.SysUpdatedOn > newest {
+					newest = r.SysUpdatedOn
+				}
+			}
+			changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+		}
+		if len(body.Result) < limit {
+			break
+		}
+		offset += len(body.Result)
 	}
 
 	return changes, newest, nil

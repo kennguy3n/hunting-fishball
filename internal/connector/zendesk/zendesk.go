@@ -330,6 +330,11 @@ func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 // DeltaSync polls the incremental-tickets export endpoint. The
 // cursor is a unix `start_time`. Empty cursor returns "now" as the
 // new cursor (per the bootstrap contract) without backfilling.
+// Round-23 Devin Review fix: walk every page of the incremental
+// export by following the `next_page` URL until Zendesk signals
+// `count < 1000` (the documented end-of-stream sentinel). Without
+// this loop a tenant with > 1000 ticket updates between syncs
+// would silently lose the trailing records until the next cycle.
 func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
@@ -342,38 +347,56 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if err != nil {
 		return nil, "", fmt.Errorf("zendesk: bad cursor %q: %w", cursor, err)
 	}
-	q := url.Values{}
-	q.Set("start_time", strconv.FormatInt(start, 10))
-	resp, err := o.do(ctx, conn, http.MethodGet, "/api/v2/incremental/tickets.json?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		retry := parseRetryAfter(resp.Header.Get("Retry-After"))
-		return nil, "", fmt.Errorf("%w: zendesk: status=%d retry_after=%s", connector.ErrRateLimited, resp.StatusCode, retry)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("zendesk: delta status=%d", resp.StatusCode)
-	}
-	var body struct {
-		Tickets []ticketEntry `json:"tickets"`
-		EndTime int64         `json:"end_time"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("zendesk: decode delta: %w", err)
-	}
 	var changes []connector.DocumentChange
-	for _, t := range body.Tickets {
-		ref := connector.DocumentRef{NamespaceID: ns.ID, ID: strconv.FormatInt(t.ID, 10)}
-		if ts, perr := time.Parse(time.RFC3339, t.UpdatedAt); perr == nil {
-			ref.UpdatedAt = ts.UTC()
+	next := start
+	// Zendesk's incremental export returns up to 1000 records per
+	// page; `count < 1000` (or `end_of_stream == true`) marks EOF.
+	path := "/api/v2/incremental/tickets.json?start_time=" + strconv.FormatInt(start, 10)
+	for {
+		resp, err := o.do(ctx, conn, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, "", err
 		}
-		changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
-	}
-	next := body.EndTime
-	if next == 0 {
-		next = start
+		status := resp.StatusCode
+		retryAfter := resp.Header.Get("Retry-After")
+		var body struct {
+			Tickets     []ticketEntry `json:"tickets"`
+			EndTime     int64         `json:"end_time"`
+			Count       int           `json:"count"`
+			NextPage    string        `json:"next_page"`
+			EndOfStream bool          `json:"end_of_stream"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if status == http.StatusTooManyRequests {
+			retry := parseRetryAfter(retryAfter)
+			return nil, "", fmt.Errorf("%w: zendesk: status=%d retry_after=%s", connector.ErrRateLimited, status, retry)
+		}
+		if status != http.StatusOK {
+			return nil, cursor, fmt.Errorf("zendesk: delta status=%d", status)
+		}
+		if decodeErr != nil {
+			return nil, "", fmt.Errorf("zendesk: decode delta: %w", decodeErr)
+		}
+		for _, t := range body.Tickets {
+			ref := connector.DocumentRef{NamespaceID: ns.ID, ID: strconv.FormatInt(t.ID, 10)}
+			if ts, perr := time.Parse(time.RFC3339, t.UpdatedAt); perr == nil {
+				ref.UpdatedAt = ts.UTC()
+			}
+			changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+		}
+		if body.EndTime > 0 {
+			next = body.EndTime
+		}
+		// Three EOF signals; any one ends the walk.
+		if body.EndOfStream || body.Count < 1000 || body.NextPage == "" {
+			break
+		}
+		u, perr := url.Parse(body.NextPage)
+		if perr != nil || u.Path == "" {
+			break
+		}
+		path = u.RequestURI()
 	}
 
 	return changes, strconv.FormatInt(next, 10), nil

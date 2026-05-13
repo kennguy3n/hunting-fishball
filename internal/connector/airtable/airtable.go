@@ -306,21 +306,38 @@ func (o *Connector) Subscribe(_ context.Context, _ connector.Connection, _ conne
 // Disconnect is a no-op.
 func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error { return nil }
 
+// cursorOverlap subtracts a small lookback window from the wall
+// clock cursor returned by DeltaSync. This protects against two
+// race conditions when LAST_MODIFIED_TIME() is filter-only and not
+// echoed back in the record payload:
+//  1. records modified by another writer between the cursor capture
+//     and the time Airtable services the query — they may not be
+//     in the response yet but their LAST_MODIFIED_TIME could land
+//     after the cursor on a clock with sub-second skew;
+//  2. clock skew between our wall clock and Airtable's server.
+//
+// On the next sync the `IS_AFTER(LAST_MODIFIED_TIME, cursor)` filter
+// uses this slightly-old cursor, so any record modified during the
+// overlap window is re-fetched (idempotent upserts downstream).
+const cursorOverlap = 60 * time.Second
+
 // DeltaSync uses filterByFormula on LAST_MODIFIED_TIME() with an
 // RFC 3339 cursor. Empty cursor returns "now" without backfilling.
 // The Airtable record payload only echoes back `createdTime`; the
 // LAST_MODIFIED_TIME() in the formula is a derived field that is
-// not returned per-record. We therefore advance the cursor to the
-// wall-clock timestamp captured *before* the request fires so the
-// next sync picks up any modifications that happen during the call.
-// Iterating all pages via the `offset` continuation token before
-// committing the new cursor keeps the bootstrap contract intact.
+// not returned per-record. We therefore advance the cursor to a
+// wall-clock timestamp captured *before* the request fires and
+// rewound by `cursorOverlap` so the next sync re-fetches any
+// records that were modified during the request itself or by a
+// clock-skewed Airtable backend. Iterating all pages via the
+// `offset` continuation token before committing the new cursor
+// keeps the bootstrap contract intact.
 func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
 		return nil, "", errors.New("airtable: bad connection type")
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Add(-cursorOverlap).Format(time.RFC3339)
 	if cursor == "" {
 		return nil, now, nil
 	}

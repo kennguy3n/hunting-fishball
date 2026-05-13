@@ -461,6 +461,20 @@ func (c *Coordinator) Run(ctx context.Context) error {
 					if c.cfg.OnSuccess != nil {
 						c.cfg.OnSuccess(gctx, se.evt)
 					}
+					// Round-23 Devin Review fix: the recordSyncStart
+					// hoist above opens a `running` sync_history row
+					// for kickoff events even when the source is
+					// paused. Close that row immediately with 0/0
+					// counts so it doesn't sit in `running` forever
+					// — otherwise the admin endpoint surfaces a
+					// phantom in-flight run for a paused source
+					// that will never drain. Non-kickoff events
+					// don't open a row (recordSyncStart short
+					// circuits on IsKickoffEvent) so this is a
+					// kickoff-only close.
+					if IsKickoffEvent(se.evt) {
+						_ = c.FinishBackfillRun(gctx, se.evt.TenantID, se.evt.SourceID, SyncStatusSucceeded)
+					}
 
 					continue
 				}

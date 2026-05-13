@@ -327,6 +327,11 @@ func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 
 // DeltaSync polls pullrequests with q=updated_on>"<ISO8601>".
 // Empty cursor returns "now" (bootstrap contract).
+// Round-23 Devin Review fix: follow Bitbucket's `next` continuation
+// URL across pages so a tenant with > pagelen PR updates between
+// syncs doesn't silently lose the trailing records until the next
+// cycle. The presence of `next` is itself the EOF signal — no
+// trailing empty request needed.
 func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
@@ -339,36 +344,49 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if err != nil {
 		return nil, "", fmt.Errorf("bitbucket: bad cursor %q: %w", cursor, err)
 	}
+	newest := cursorTime
+	var changes []connector.DocumentChange
 	q := url.Values{}
 	q.Set("q", `updated_on>"`+cursor+`"`)
 	q.Set("sort", "updated_on")
 	q.Set("pagelen", "50")
 	q.Set("state", "OPEN")
-	resp, err := o.do(ctx, conn, http.MethodGet, "/2.0/repositories/"+url.PathEscape(conn.workspace)+"/"+url.PathEscape(conn.repo)+"/pullrequests?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: bitbucket: status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("bitbucket: delta status=%d", resp.StatusCode)
-	}
-	var body listResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("bitbucket: decode delta: %w", err)
-	}
-	newest := cursorTime
-	var changes []connector.DocumentChange
-	for _, pr := range body.Values {
-		ts, _ := time.Parse(time.RFC3339, pr.UpdatedOn)
-		ts = ts.UTC()
-		ref := connector.DocumentRef{NamespaceID: ns.ID, ID: strconv.FormatInt(pr.ID, 10), UpdatedAt: ts}
-		changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
-		if ts.After(newest) {
-			newest = ts
+	path := "/2.0/repositories/" + url.PathEscape(conn.workspace) + "/" + url.PathEscape(conn.repo) + "/pullrequests?" + q.Encode()
+	for {
+		resp, err := o.do(ctx, conn, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, "", err
 		}
+		status := resp.StatusCode
+		var body listResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if status == http.StatusTooManyRequests {
+			return nil, "", fmt.Errorf("%w: bitbucket: status=%d", connector.ErrRateLimited, status)
+		}
+		if status != http.StatusOK {
+			return nil, cursor, fmt.Errorf("bitbucket: delta status=%d", status)
+		}
+		if decodeErr != nil {
+			return nil, "", fmt.Errorf("bitbucket: decode delta: %w", decodeErr)
+		}
+		for _, pr := range body.Values {
+			ts, _ := time.Parse(time.RFC3339, pr.UpdatedOn)
+			ts = ts.UTC()
+			ref := connector.DocumentRef{NamespaceID: ns.ID, ID: strconv.FormatInt(pr.ID, 10), UpdatedAt: ts}
+			changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+			if ts.After(newest) {
+				newest = ts
+			}
+		}
+		if body.Next == "" {
+			break
+		}
+		u, perr := url.Parse(body.Next)
+		if perr != nil || u.Path == "" {
+			break
+		}
+		path = u.RequestURI()
 	}
 
 	return changes, newest.UTC().Format(time.RFC3339), nil

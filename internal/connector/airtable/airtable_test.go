@@ -157,12 +157,16 @@ func TestAirtable_DeltaSync_Incremental(t *testing.T) {
 	// Cursor must advance to a wall-clock timestamp captured at the
 	// start of the call (the record payload only echoes createdTime;
 	// LAST_MODIFIED_TIME() is filter-only, not returned per record).
+	// Round-23 fix rewinds the cursor by 60s as an overlap window
+	// to absorb clock skew + records modified during the request.
 	got, err := time.Parse(time.RFC3339, cur)
 	if err != nil {
 		t.Fatalf("cursor parse: %v (cur=%q)", err, cur)
 	}
-	if got.Before(before.Truncate(time.Second)) || got.After(time.Now().UTC().Add(time.Second)) {
-		t.Fatalf("cursor %q not within [%s, now]", cur, before.Format(time.RFC3339))
+	lowerBound := before.Add(-2 * time.Minute).Truncate(time.Second)
+	upperBound := time.Now().UTC().Add(time.Second)
+	if got.Before(lowerBound) || got.After(upperBound) {
+		t.Fatalf("cursor %q not within [%s, %s]", cur, lowerBound.Format(time.RFC3339), upperBound.Format(time.RFC3339))
 	}
 }
 

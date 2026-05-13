@@ -189,9 +189,10 @@ func TestCoordinator_PausedSourceFilter_RecordsSyncStart(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		rec.mu.Lock()
-		seen := len(rec.starts)
+		seenStart := len(rec.starts)
+		seenFinish := len(rec.finishes)
 		rec.mu.Unlock()
-		if seen >= 1 {
+		if seenStart >= 1 && seenFinish >= 1 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -206,6 +207,15 @@ func TestCoordinator_PausedSourceFilter_RecordsSyncStart(t *testing.T) {
 	}
 	if rec.starts[0].runID != "run-paused" || rec.starts[0].tenant != "t-1" || rec.starts[0].source != "s-1" {
 		t.Fatalf("start row: %+v", rec.starts[0])
+	}
+	// Round-23 Devin Review fix: the just-opened sync_history row
+	// must also be closed during the paused-source drain so the
+	// admin endpoint doesn't show a phantom "running" row forever.
+	if len(rec.finishes) != 1 {
+		t.Fatalf("finishes: %d, want 1 (paused kickoff must close the row it just opened)", len(rec.finishes))
+	}
+	if rec.finishes[0].tenant != "t-1" || rec.finishes[0].source != "s-1" || rec.finishes[0].status != SyncStatusSucceeded {
+		t.Fatalf("finish row: %+v", rec.finishes[0])
 	}
 	if bf.invoked.Load() != 0 {
 		t.Fatalf("Fetch invoked %d times for paused source", bf.invoked.Load())

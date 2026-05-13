@@ -390,13 +390,34 @@ func (o *Connector) deltaSyncSearch(ctx context.Context, conn *connection, ns co
 // deltaSyncArticles walks GET /articles paginated by
 // `pages.next.starting_after`, surfacing only records whose
 // `updated_at` exceeds the cursor.
+//
+// Round-23 Devin Review fix: the previous implementation walked the
+// full catalogue every cycle (Intercom's articles endpoint has no
+// server-side filter). We now request `order=desc&sort=updated_at`
+// as a best-effort hint and short-circuit the walk once we observe
+// a full page where every record is stale AND the records we've
+// seen so far have arrived in non-increasing `updated_at` order.
+// If Intercom ignores the order params or returns records out of
+// order, the verification check defaults to `false` and we fall
+// back to a full walk — correctness is preserved either way.
 func (o *Connector) deltaSyncArticles(ctx context.Context, conn *connection, ns connector.Namespace, since int64) ([]connector.DocumentChange, string, error) {
 	newest := since
 	var changes []connector.DocumentChange
 	startingAfter := ""
+	// sawMonotonicDesc tracks whether every record observed so far
+	// has had `updated_at` <= the previous record's. Reset to false
+	// the moment we observe an out-of-order record, which disables
+	// early termination for the rest of this delta call.
+	sawMonotonicDesc := true
+	var prevUpdatedAt int64 = 1<<63 - 1
 	for {
 		q := url.Values{}
-		q.Set("per_page", "50")
+		q.Set("per_page", "100")
+		// Best-effort sort hints; if Intercom ignores them the
+		// monotonic-decrease guard below stays false and we
+		// just walk the full catalogue (same as before).
+		q.Set("order", "desc")
+		q.Set("sort", "updated_at")
 		if startingAfter != "" {
 			q.Set("starting_after", startingAfter)
 		}
@@ -421,15 +442,30 @@ func (o *Connector) deltaSyncArticles(ctx context.Context, conn *connection, ns 
 		if len(rows) == 0 {
 			rows = body.Conversations
 		}
+		pageHasFresh := false
 		for _, r := range rows {
+			if r.UpdatedAt > prevUpdatedAt {
+				sawMonotonicDesc = false
+			}
+			prevUpdatedAt = r.UpdatedAt
 			if r.UpdatedAt <= since {
 				continue
 			}
+			pageHasFresh = true
 			ref := connector.DocumentRef{NamespaceID: ns.ID, ID: r.ID, UpdatedAt: time.Unix(r.UpdatedAt, 0).UTC()}
 			if r.UpdatedAt > newest {
 				newest = r.UpdatedAt
 			}
 			changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+		}
+		// Safe early-termination: only honour it when the page is
+		// non-empty AND every record we've seen across all pages
+		// in this call has been non-increasing by updated_at. If
+		// Intercom honours the order hint, we'll exit after the
+		// first fully-stale page; if it doesn't, this guard stays
+		// false and we walk every page (no regression vs. before).
+		if sawMonotonicDesc && len(rows) > 0 && !pageHasFresh {
+			break
 		}
 		if body.Pages.Next == nil || body.Pages.Next.StartingAfter == "" {
 			break
