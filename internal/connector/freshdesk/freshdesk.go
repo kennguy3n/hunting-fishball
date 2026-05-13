@@ -152,6 +152,9 @@ type docIterator struct {
 	idx  int
 	done bool
 	err  error
+	// nextPage is the 1-indexed page number sent to Freshdesk's
+	// `?page=N` parameter. Round-22 pagination fix.
+	nextPage int
 }
 
 func (it *docIterator) Next(ctx context.Context) bool {
@@ -191,26 +194,42 @@ func (it *docIterator) Err() error {
 func (it *docIterator) Close() error { return nil }
 
 func (it *docIterator) fetch(ctx context.Context) bool {
-	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/api/v2/tickets?per_page=100", nil)
+	// Round-22 pagination fix: walk Freshdesk's 1-indexed `page`
+	// parameter until we receive fewer than `per_page` records.
+	// Round-23 Devin Review fix: also short-circuit on the absence
+	// of a `Link: rel="next"` response header so the case where
+	// total count is exactly N×perPage doesn't fire a wasted
+	// trailing empty request.
+	const perPage = 100
+	if it.nextPage == 0 {
+		it.nextPage = 1
+	}
+	q := url.Values{}
+	q.Set("per_page", strconv.Itoa(perPage))
+	q.Set("page", strconv.Itoa(it.nextPage))
+	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/api/v2/tickets?"+q.Encode(), nil)
 	if err != nil {
 		it.err = err
 
 		return false
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		it.err = fmt.Errorf("%w: freshdesk: list status=%d", connector.ErrRateLimited, resp.StatusCode)
-
-		return false
-	}
-	if resp.StatusCode != http.StatusOK {
-		it.err = fmt.Errorf("freshdesk: list status=%d", resp.StatusCode)
-
-		return false
-	}
+	status := resp.StatusCode
+	linkHdr := resp.Header.Get("Link")
 	var tickets []ticketEntry
-	if err := json.NewDecoder(resp.Body).Decode(&tickets); err != nil {
-		it.err = fmt.Errorf("freshdesk: decode list: %w", err)
+	decodeErr := json.NewDecoder(resp.Body).Decode(&tickets)
+	_ = resp.Body.Close()
+	if status == http.StatusTooManyRequests {
+		it.err = fmt.Errorf("%w: freshdesk: list status=%d", connector.ErrRateLimited, status)
+
+		return false
+	}
+	if status != http.StatusOK {
+		it.err = fmt.Errorf("freshdesk: list status=%d", status)
+
+		return false
+	}
+	if decodeErr != nil {
+		it.err = fmt.Errorf("freshdesk: decode list: %w", decodeErr)
 
 		return false
 	}
@@ -223,7 +242,14 @@ func (it *docIterator) fetch(ctx context.Context) bool {
 		}
 		it.page = append(it.page, ref)
 	}
-	it.done = true
+	switch {
+	case !linkHasNext(linkHdr):
+		it.done = true
+	case len(tickets) < perPage:
+		it.done = true
+	default:
+		it.nextPage++
+	}
 
 	return true
 }
@@ -287,6 +313,14 @@ func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 
 // DeltaSync polls the tickets endpoint filtered by updated_since.
 // Empty cursor returns "now" as the new cursor (bootstrap contract).
+// Round-23 Devin Review fix: walk every `page=N` page rather than
+// stopping after the first 100 tickets — previously a tenant with
+// >100 updates between syncs would silently lose the trailing
+// records until the next cycle. We rely on `len(tickets) < perPage`
+// to detect the final page, and additionally honour Freshdesk's
+// `Link: <url>; rel="next"` response header so the case where the
+// total count is exactly N×perPage doesn't fire a final empty
+// request.
 func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
@@ -299,43 +333,73 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if err != nil {
 		return nil, "", fmt.Errorf("freshdesk: bad cursor %q: %w", cursor, err)
 	}
-	q := url.Values{}
-	q.Set("updated_since", cursor)
-	q.Set("order_by", "updated_at")
-	q.Set("order_type", "asc")
-	q.Set("per_page", "100")
-	q.Set("page", "1")
-	resp, err := o.do(ctx, conn, http.MethodGet, "/api/v2/tickets?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: freshdesk: status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("freshdesk: delta status=%d", resp.StatusCode)
-	}
-	var tickets []ticketEntry
-	if err := json.NewDecoder(resp.Body).Decode(&tickets); err != nil {
-		return nil, "", fmt.Errorf("freshdesk: decode delta: %w", err)
-	}
+	const perPage = 100
 	newest := cursorTime
 	var changes []connector.DocumentChange
-	for _, t := range tickets {
-		ts, perr := time.Parse(time.RFC3339, t.UpdatedAt)
-		if perr != nil {
-			continue
+	page := 1
+	for {
+		q := url.Values{}
+		q.Set("updated_since", cursor)
+		q.Set("order_by", "updated_at")
+		q.Set("order_type", "asc")
+		q.Set("per_page", strconv.Itoa(perPage))
+		q.Set("page", strconv.Itoa(page))
+		resp, err := o.do(ctx, conn, http.MethodGet, "/api/v2/tickets?"+q.Encode(), nil)
+		if err != nil {
+			return nil, "", err
 		}
-		ts = ts.UTC()
-		ref := connector.DocumentRef{NamespaceID: ns.ID, ID: strconv.FormatInt(t.ID, 10), UpdatedAt: ts}
-		changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
-		if ts.After(newest) {
-			newest = ts
+		status := resp.StatusCode
+		linkHdr := resp.Header.Get("Link")
+		var tickets []ticketEntry
+		decodeErr := json.NewDecoder(resp.Body).Decode(&tickets)
+		_ = resp.Body.Close()
+		if status == http.StatusTooManyRequests {
+			return nil, "", fmt.Errorf("%w: freshdesk: status=%d", connector.ErrRateLimited, status)
 		}
+		if status != http.StatusOK {
+			return nil, cursor, fmt.Errorf("freshdesk: delta status=%d", status)
+		}
+		if decodeErr != nil {
+			return nil, "", fmt.Errorf("freshdesk: decode delta: %w", decodeErr)
+		}
+		for _, t := range tickets {
+			ts, perr := time.Parse(time.RFC3339, t.UpdatedAt)
+			if perr != nil {
+				continue
+			}
+			ts = ts.UTC()
+			ref := connector.DocumentRef{NamespaceID: ns.ID, ID: strconv.FormatInt(t.ID, 10), UpdatedAt: ts}
+			changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+			if ts.After(newest) {
+				newest = ts
+			}
+		}
+		// Two EOF signals to avoid the wasted final empty page:
+		// (1) Freshdesk sets `Link: <url>; rel="next"` only when
+		// another page exists; (2) any short page is the last.
+		if !linkHasNext(linkHdr) {
+			break
+		}
+		if len(tickets) < perPage {
+			break
+		}
+		page++
 	}
 
 	return changes, newest.UTC().Format(time.RFC3339), nil
+}
+
+// linkHasNext returns true when the RFC 8288 Link header advertises
+// a `rel="next"` reference. Freshdesk uses this header to signal
+// "another page exists", letting us short-circuit before the
+// trailing empty request.
+func linkHasNext(h string) bool {
+	if h == "" {
+		// Header absent — fall back to len(rows)<perPage probe.
+		return true
+	}
+
+	return strings.Contains(h, `rel="next"`)
 }
 
 func (o *Connector) do(ctx context.Context, conn *connection, method, path string, body io.Reader) (*http.Response, error) {

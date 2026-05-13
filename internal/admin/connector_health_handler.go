@@ -28,22 +28,34 @@ import (
 // ConnectorTypeHealth is one row of the aggregated dashboard.
 type ConnectorTypeHealth struct {
 	ConnectorType string `json:"connector_type"`
-	Total         int    `json:"total"`
-	Healthy       int    `json:"healthy"`
-	Degraded      int    `json:"degraded"`
-	Failing       int    `json:"failing"`
-	Unknown       int    `json:"unknown"`
-	Paused        int    `json:"paused"`
-	Removing      int    `json:"removing"`
-	Removed       int    `json:"removed"`
+	// Total counts every source for this connector_type, including
+	// paused / removing / removed tombstones — preserved for
+	// backwards compatibility with the portal's existing UI.
+	Total int `json:"total"`
+	// Active counts only operationally-relevant sources (status
+	// active): healthy + degraded + failing + unknown. Paused,
+	// removing and removed sources are excluded so the headline
+	// fleet-health numbers are not diluted.
+	Active   int `json:"active"`
+	Healthy  int `json:"healthy"`
+	Degraded int `json:"degraded"`
+	Failing  int `json:"failing"`
+	Unknown  int `json:"unknown"`
+	Paused   int `json:"paused"`
+	Removing int `json:"removing"`
+	Removed  int `json:"removed"`
 	// AvgLag is the arithmetic mean of source_health.lag across
-	// the connector_type. Zero when no health rows exist.
+	// active sources of this connector_type. Zero when no active
+	// health rows exist. Paused / removing / removed sources are
+	// excluded so a long-paused source does not skew the mean.
 	AvgLag float64 `json:"avg_lag"`
 	// AvgErrorCount is the arithmetic mean of
-	// source_health.error_count across the connector_type.
+	// source_health.error_count across active sources.
 	AvgErrorCount float64 `json:"avg_error_count"`
-	// ErrorRate is the fraction of sources whose status is
-	// failing or degraded (0.0–1.0).
+	// ErrorRate is the fraction of *active* sources whose status
+	// is failing or degraded (0.0–1.0). Paused / removing /
+	// removed sources are deliberately excluded — they are not
+	// expected to be syncing, so counting them dilutes the rate.
 	ErrorRate float64 `json:"error_rate"`
 }
 
@@ -116,10 +128,14 @@ func (h *ConnectorHealthHandler) aggregate(ctx context.Context, tenantID string)
 		byID[r.SourceID] = r
 	}
 	type acc struct {
-		row          ConnectorTypeHealth
-		totalLag     int
-		totalErrCnt  int
-		healthRowCnt int
+		row ConnectorTypeHealth
+		// Aggregate lag / error_count only over *active* sources so
+		// long-paused tombstones don't skew the mean (Round-22 fix
+		// to Devin Review's "ConnectorHealthHandler includes
+		// paused/removed sources" flag).
+		activeLag      int
+		activeErrCnt   int
+		activeRowCount int
 	}
 	bucket := map[string]*acc{}
 	for _, s := range srcs {
@@ -132,27 +148,29 @@ func (h *ConnectorHealthHandler) aggregate(ctx context.Context, tenantID string)
 		switch s.Status {
 		case SourceStatusPaused:
 			a.row.Paused++
+
+			continue
 		case SourceStatusRemoving:
 			a.row.Removing++
+
+			continue
 		case SourceStatusRemoved:
 			a.row.Removed++
+
+			continue
 		default:
 			// active source — fall through to health bucket
 		}
+		a.row.Active++
 		hr, hasHealth := byID[s.ID]
 		if !hasHealth {
-			if s.Status == SourceStatusActive {
-				a.row.Unknown++
-			}
+			a.row.Unknown++
 
 			continue
 		}
-		a.totalLag += hr.Lag
-		a.totalErrCnt += hr.ErrorCount
-		a.healthRowCnt++
-		if s.Status != SourceStatusActive {
-			continue
-		}
+		a.activeLag += hr.Lag
+		a.activeErrCnt += hr.ErrorCount
+		a.activeRowCount++
 		switch hr.Status {
 		case HealthStatusHealthy:
 			a.row.Healthy++
@@ -166,12 +184,12 @@ func (h *ConnectorHealthHandler) aggregate(ctx context.Context, tenantID string)
 	}
 	out := ConnectorHealthSummary{TenantID: tenantID, Total: len(srcs)}
 	for _, a := range bucket {
-		if a.healthRowCnt > 0 {
-			a.row.AvgLag = float64(a.totalLag) / float64(a.healthRowCnt)
-			a.row.AvgErrorCount = float64(a.totalErrCnt) / float64(a.healthRowCnt)
+		if a.activeRowCount > 0 {
+			a.row.AvgLag = float64(a.activeLag) / float64(a.activeRowCount)
+			a.row.AvgErrorCount = float64(a.activeErrCnt) / float64(a.activeRowCount)
 		}
-		if a.row.Total > 0 {
-			a.row.ErrorRate = float64(a.row.Failing+a.row.Degraded) / float64(a.row.Total)
+		if a.row.Active > 0 {
+			a.row.ErrorRate = float64(a.row.Failing+a.row.Degraded) / float64(a.row.Active)
 		}
 		out.Connectors = append(out.Connectors, a.row)
 	}

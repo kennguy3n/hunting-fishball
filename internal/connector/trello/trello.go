@@ -203,6 +203,14 @@ func (it *docIterator) Err() error {
 func (it *docIterator) Close() error { return nil }
 
 func (it *docIterator) fetch(ctx context.Context) bool {
+	// Trello's GET /1/boards/{id}/cards is a *non-paginated*
+	// endpoint: it returns the complete card set in a single
+	// JSON array (subject to Trello's per-request size cap, not
+	// to client-side iteration). There is no `next`, `before`
+	// or `cursor` field on the response — pagination is only
+	// available on `/1/boards/{id}/actions` and the deprecated
+	// `/cards/{cardSource}` filter endpoint. Documenting here
+	// so future readers don't flag this as a single-page bug.
 	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/1/boards/"+url.PathEscape(it.conn.boardID)+"/cards", nil)
 	if err != nil {
 		it.err = err

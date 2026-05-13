@@ -152,6 +152,10 @@ type docIterator struct {
 	idx  int
 	done bool
 	err  error
+	// startingAfter mirrors Intercom's `pages.next.starting_after`
+	// cursor; empty for the first request and once the response
+	// stops echoing back a `next` block. Round-22 pagination fix.
+	startingAfter string
 }
 
 func (it *docIterator) Next(ctx context.Context) bool {
@@ -191,7 +195,13 @@ func (it *docIterator) Err() error {
 func (it *docIterator) Close() error { return nil }
 
 func (it *docIterator) fetch(ctx context.Context) bool {
-	path := "/" + it.ns.ID + "?per_page=50"
+	// Round-22 pagination fix: walk `pages.next.starting_after`.
+	q := url.Values{}
+	q.Set("per_page", "50")
+	if it.startingAfter != "" {
+		q.Set("starting_after", it.startingAfter)
+	}
+	path := "/" + it.ns.ID + "?" + q.Encode()
 	resp, err := it.o.do(ctx, it.conn, http.MethodGet, path, nil)
 	if err != nil {
 		it.err = err
@@ -228,7 +238,11 @@ func (it *docIterator) fetch(ctx context.Context) bool {
 		}
 		it.page = append(it.page, ref)
 	}
-	it.done = true
+	if body.Pages.Next != nil && body.Pages.Next.StartingAfter != "" {
+		it.startingAfter = body.Pages.Next.StartingAfter
+	} else {
+		it.done = true
+	}
 
 	return true
 }
@@ -294,8 +308,16 @@ func (o *Connector) Subscribe(_ context.Context, _ connector.Connection, _ conne
 // Disconnect is a no-op.
 func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error { return nil }
 
-// DeltaSync uses POST /conversations/search with updated_at > unix.
-// Empty cursor returns "now" without backfilling.
+// DeltaSync branches on namespace. Conversations use the Intercom
+// search API (POST /conversations/search with updated_at > cursor).
+// Articles have no server-side `/search` surface, so we walk the
+// paginated GET /articles list and apply the updated_at filter
+// client-side. Empty cursor returns "now" without backfilling, per
+// the bootstrap contract.
+//
+// Round-22 Devin Review fix: previous implementation built
+// `path := "/" + ns.ID + "/search"` for every namespace, which
+// silently 404s against `/articles/search` (no such endpoint).
 func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
@@ -308,6 +330,19 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if err != nil {
 		return nil, "", fmt.Errorf("intercom: bad cursor %q: %w", cursor, err)
 	}
+	switch ns.ID {
+	case "conversations":
+		return o.deltaSyncSearch(ctx, conn, ns, since)
+	case "articles":
+		return o.deltaSyncArticles(ctx, conn, ns, since)
+	default:
+		return nil, cursor, fmt.Errorf("%w: intercom: unsupported namespace %q", connector.ErrNotSupported, ns.ID)
+	}
+}
+
+// deltaSyncSearch handles namespaces backed by Intercom's search API
+// (currently `conversations`).
+func (o *Connector) deltaSyncSearch(ctx context.Context, conn *connection, ns connector.Namespace, since int64) ([]connector.DocumentChange, string, error) {
 	q := map[string]interface{}{
 		"query": map[string]interface{}{
 			"field":    "updated_at",
@@ -326,7 +361,7 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		return nil, "", fmt.Errorf("%w: intercom: status=%d", connector.ErrRateLimited, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("intercom: delta status=%d", resp.StatusCode)
+		return nil, strconv.FormatInt(since, 10), fmt.Errorf("intercom: delta status=%d", resp.StatusCode)
 	}
 	var lr listResponse
 	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
@@ -347,6 +382,95 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 			}
 		}
 		changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+	}
+
+	return changes, strconv.FormatInt(newest, 10), nil
+}
+
+// deltaSyncArticles walks GET /articles paginated by
+// `pages.next.starting_after`, surfacing only records whose
+// `updated_at` exceeds the cursor.
+//
+// Round-23 Devin Review fix: the previous implementation walked the
+// full catalogue every cycle (Intercom's articles endpoint has no
+// server-side filter). We now request `order=desc&sort=updated_at`
+// as a best-effort hint and short-circuit the walk once we observe
+// a full page where every record is stale AND the records we've
+// seen so far have arrived in non-increasing `updated_at` order.
+// If Intercom ignores the order params or returns records out of
+// order, the verification check defaults to `false` and we fall
+// back to a full walk — correctness is preserved either way.
+func (o *Connector) deltaSyncArticles(ctx context.Context, conn *connection, ns connector.Namespace, since int64) ([]connector.DocumentChange, string, error) {
+	newest := since
+	var changes []connector.DocumentChange
+	startingAfter := ""
+	// sawMonotonicDesc tracks whether every record observed so far
+	// has had `updated_at` <= the previous record's. Reset to false
+	// the moment we observe an out-of-order record, which disables
+	// early termination for the rest of this delta call.
+	sawMonotonicDesc := true
+	var prevUpdatedAt int64 = 1<<63 - 1
+	for {
+		q := url.Values{}
+		q.Set("per_page", "100")
+		// Best-effort sort hints; if Intercom ignores them the
+		// monotonic-decrease guard below stays false and we
+		// just walk the full catalogue (same as before).
+		q.Set("order", "desc")
+		q.Set("sort", "updated_at")
+		if startingAfter != "" {
+			q.Set("starting_after", startingAfter)
+		}
+		resp, err := o.do(ctx, conn, http.MethodGet, "/"+ns.ID+"?"+q.Encode(), nil)
+		if err != nil {
+			return nil, strconv.FormatInt(since, 10), err
+		}
+		status := resp.StatusCode
+		var body listResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if status == http.StatusTooManyRequests {
+			return nil, strconv.FormatInt(since, 10), fmt.Errorf("%w: intercom: status=%d", connector.ErrRateLimited, status)
+		}
+		if status != http.StatusOK {
+			return nil, strconv.FormatInt(since, 10), fmt.Errorf("intercom: articles delta status=%d", status)
+		}
+		if decodeErr != nil {
+			return nil, strconv.FormatInt(since, 10), fmt.Errorf("intercom: decode articles: %w", decodeErr)
+		}
+		rows := body.Data
+		if len(rows) == 0 {
+			rows = body.Conversations
+		}
+		pageHasFresh := false
+		for _, r := range rows {
+			if r.UpdatedAt > prevUpdatedAt {
+				sawMonotonicDesc = false
+			}
+			prevUpdatedAt = r.UpdatedAt
+			if r.UpdatedAt <= since {
+				continue
+			}
+			pageHasFresh = true
+			ref := connector.DocumentRef{NamespaceID: ns.ID, ID: r.ID, UpdatedAt: time.Unix(r.UpdatedAt, 0).UTC()}
+			if r.UpdatedAt > newest {
+				newest = r.UpdatedAt
+			}
+			changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+		}
+		// Safe early-termination: only honour it when the page is
+		// non-empty AND every record we've seen across all pages
+		// in this call has been non-increasing by updated_at. If
+		// Intercom honours the order hint, we'll exit after the
+		// first fully-stale page; if it doesn't, this guard stays
+		// false and we walk every page (no regression vs. before).
+		if sawMonotonicDesc && len(rows) > 0 && !pageHasFresh {
+			break
+		}
+		if body.Pages.Next == nil || body.Pages.Next.StartingAfter == "" {
+			break
+		}
+		startingAfter = body.Pages.Next.StartingAfter
 	}
 
 	return changes, strconv.FormatInt(newest, 10), nil

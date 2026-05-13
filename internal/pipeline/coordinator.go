@@ -438,6 +438,16 @@ func (c *Coordinator) Run(ctx context.Context) error {
 				if !ok {
 					return
 				}
+				// Round-10 Task 3: a backfill kickoff opens a
+				// sync_history row so the admin endpoint can
+				// observe the run in flight. Round-22 Devin Review
+				// fix: hoist this above the PausedSourceFilter
+				// drain so kickoff events for paused sources still
+				// register the sync_history row — otherwise the
+				// admin sees no trace that the kickoff was ever
+				// observed, and the bookkeeping for subsequent
+				// document events lacks a run state.
+				c.recordSyncStart(gctx, se.evt)
 				// Round-20 Task 17: pipeline graceful backpressure
 				// on auto-paused sources. When the source has been
 				// paused (auto or manual) we drain the event
@@ -451,13 +461,23 @@ func (c *Coordinator) Run(ctx context.Context) error {
 					if c.cfg.OnSuccess != nil {
 						c.cfg.OnSuccess(gctx, se.evt)
 					}
+					// Round-23 Devin Review fix: the recordSyncStart
+					// hoist above opens a `running` sync_history row
+					// for kickoff events even when the source is
+					// paused. Close that row immediately with 0/0
+					// counts so it doesn't sit in `running` forever
+					// — otherwise the admin endpoint surfaces a
+					// phantom in-flight run for a paused source
+					// that will never drain. Non-kickoff events
+					// don't open a row (recordSyncStart short
+					// circuits on IsKickoffEvent) so this is a
+					// kickoff-only close.
+					if IsKickoffEvent(se.evt) {
+						_ = c.FinishBackfillRun(gctx, se.evt.TenantID, se.evt.SourceID, SyncStatusSucceeded)
+					}
 
 					continue
 				}
-				// Round-10 Task 3: a backfill kickoff opens a
-				// sync_history row so the admin endpoint can
-				// observe the run in flight.
-				c.recordSyncStart(gctx, se.evt)
 				if se.evt.Kind == EventDocumentDeleted || se.evt.Kind == EventPurge {
 					doc := &Document{
 						TenantID:   se.evt.TenantID,

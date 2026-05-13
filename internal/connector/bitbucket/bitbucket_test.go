@@ -178,6 +178,95 @@ func TestBitbucket_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+// TestBitbucket_ListDocuments_FollowsNextURL verifies the Round-22
+// pagination fix: ListDocuments must follow Bitbucket's `next`
+// field across pages instead of stopping after the first response.
+func TestBitbucket_ListDocuments_FollowsNextURL(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	var srvURL string
+	mux.HandleFunc("/2.0/repositories/ws/r", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/2.0/repositories/ws/r/pullrequests", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "":
+			_, _ = io.WriteString(w, `{"values":[{"id":1,"title":"a","updated_on":"2024-06-01T00:00:00Z","summary":{"raw":"body1"}}],"next":"`+srvURL+`/2.0/repositories/ws/r/pullrequests?page=2"}`)
+		case "2":
+			_, _ = io.WriteString(w, `{"values":[{"id":2,"title":"b","updated_on":"2024-06-02T00:00:00Z","summary":{"raw":"body2"}}]}`)
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+	c := bitbucket.New(bitbucket.WithBaseURL(srv.URL), bitbucket.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "ws/r"}, connector.ListOpts{})
+	defer func() { _ = it.Close() }()
+	var ids []string
+	for it.Next(context.Background()) {
+		ids = append(ids, it.Doc().ID)
+	}
+	if !errors.Is(it.Err(), connector.ErrEndOfPage) {
+		t.Fatalf("iter err=%v", it.Err())
+	}
+	if len(ids) != 2 || ids[0] != "1" || ids[1] != "2" {
+		t.Fatalf("expected 2 IDs across 2 pages, got %v", ids)
+	}
+}
+
+// TestBitbucket_DeltaSync_FollowsNextURL exercises the Round-23
+// Devin Review fix: DeltaSync must follow Bitbucket's `next`
+// continuation URL until the field is empty (single EOF signal,
+// no trailing empty request).
+func TestBitbucket_DeltaSync_FollowsNextURL(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	var srvURL string
+	mux.HandleFunc("/2.0/repositories/ws/r", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	calls := 0
+	mux.HandleFunc("/2.0/repositories/ws/r/pullrequests", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.RawQuery, "q=") && r.URL.Query().Get("page") == "" {
+			_, _ = io.WriteString(w, `{"values":[]}`)
+
+			return
+		}
+		calls++
+		switch r.URL.Query().Get("page") {
+		case "":
+			_, _ = io.WriteString(w, `{"values":[{"id":1,"updated_on":"2024-06-02T00:00:00Z"}],"next":"`+srvURL+`/2.0/repositories/ws/r/pullrequests?page=2"}`)
+		case "2":
+			_, _ = io.WriteString(w, `{"values":[{"id":2,"updated_on":"2024-06-03T00:00:00Z"}]}`)
+		case "3":
+			t.Fatalf("page 3 should not be requested — empty next is EOF")
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+	c := bitbucket.New(bitbucket.WithBaseURL(srv.URL), bitbucket.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "ws/r"}, "2024-06-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 page requests, got %d", calls)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("expected 2 changes across 2 pages, got %d", len(changes))
+	}
+	if cur != "2024-06-03T00:00:00Z" {
+		t.Fatalf("cur=%q want 2024-06-03T00:00:00Z", cur)
+	}
+}
+
 func TestBitbucket_Registers(t *testing.T) {
 	t.Parallel()
 	if _, err := connector.GetSourceConnector(bitbucket.Name); err != nil {

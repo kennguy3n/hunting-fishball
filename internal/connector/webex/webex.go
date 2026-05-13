@@ -159,6 +159,11 @@ type docIterator struct {
 	idx  int
 	done bool
 	err  error
+	// nextPath holds the next page's path+query, parsed from the
+	// Webex `Link: <url>; rel="next"` response header. Empty
+	// before the first fetch and once the API stops emitting a
+	// next link. Round-22 pagination fix.
+	nextPath string
 }
 
 func (it *docIterator) Next(ctx context.Context) bool {
@@ -198,10 +203,16 @@ func (it *docIterator) Err() error {
 func (it *docIterator) Close() error { return nil }
 
 func (it *docIterator) fetch(ctx context.Context) bool {
-	q := url.Values{}
-	q.Set("roomId", it.conn.roomID)
-	q.Set("max", "100")
-	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/v1/messages?"+q.Encode(), nil)
+	// Round-22 pagination fix: follow the Link: <...>; rel="next"
+	// header that Webex emits on paginated message responses.
+	path := it.nextPath
+	if path == "" {
+		q := url.Values{}
+		q.Set("roomId", it.conn.roomID)
+		q.Set("max", "100")
+		path = "/v1/messages?" + q.Encode()
+	}
+	resp, err := it.o.do(ctx, it.conn, http.MethodGet, path, nil)
 	if err != nil {
 		it.err = err
 
@@ -233,9 +244,47 @@ func (it *docIterator) fetch(ctx context.Context) bool {
 		}
 		it.page = append(it.page, ref)
 	}
-	it.done = true
+	it.nextPath = parseWebexNextLink(resp.Header.Get("Link"))
+	it.done = it.nextPath == ""
 
 	return true
+}
+
+// parseWebexNextLink extracts the path+query from a Webex
+// `Link: <https://...>; rel="next"` header value. Webex returns
+// the full URL; we strip the scheme/host so the same `o.do`
+// helper can route it through the configured base URL. Round-22
+// pagination fix.
+func parseWebexNextLink(header string) string {
+	if header == "" {
+		return ""
+	}
+	for _, part := range strings.Split(header, ",") {
+		segs := strings.Split(strings.TrimSpace(part), ";")
+		if len(segs) < 2 {
+			continue
+		}
+		hasRelNext := false
+		for _, p := range segs[1:] {
+			p = strings.TrimSpace(p)
+			if p == `rel="next"` || p == "rel=next" {
+				hasRelNext = true
+
+				break
+			}
+		}
+		if !hasRelNext {
+			continue
+		}
+		raw := strings.TrimSpace(segs[0])
+		raw = strings.TrimPrefix(raw, "<")
+		raw = strings.TrimSuffix(raw, ">")
+		if u, err := url.Parse(raw); err == nil && u.Path != "" {
+			return u.RequestURI()
+		}
+	}
+
+	return ""
 }
 
 // ListDocuments enumerates Webex messages in the configured room.
@@ -293,6 +342,11 @@ func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 // DeltaSync polls /v1/messages?roomId={id} filtered by RFC 3339
 // `created` watermark. Empty cursor returns "now" without
 // backfilling.
+// Round-23 Devin Review fix: follow Webex's `Link: <url>; rel="next"`
+// pagination header across pages. Webex returns messages in
+// reverse-chronological order, so we can additionally stop the walk
+// once we see a full page where every message is older than the
+// cursor — no point fetching further into the past.
 func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
@@ -305,37 +359,56 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 	if err != nil {
 		return nil, "", fmt.Errorf("webex: bad cursor %q: %w", cursor, err)
 	}
+	newest := cursorTime
+	var changes []connector.DocumentChange
 	q := url.Values{}
 	q.Set("roomId", conn.roomID)
 	q.Set("max", "100")
-	resp, err := o.do(ctx, conn, http.MethodGet, "/v1/messages?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: webex: status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("webex: delta status=%d", resp.StatusCode)
-	}
-	var body listResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("webex: decode delta: %w", err)
-	}
-	newest := cursorTime
-	var changes []connector.DocumentChange
-	for _, m := range body.Items {
-		ts, _ := time.Parse(time.RFC3339, m.Created)
-		ts = ts.UTC()
-		if !ts.After(cursorTime) {
-			continue
+	path := "/v1/messages?" + q.Encode()
+	for {
+		resp, err := o.do(ctx, conn, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, "", err
 		}
-		ref := connector.DocumentRef{NamespaceID: ns.ID, ID: m.ID, UpdatedAt: ts}
-		changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
-		if ts.After(newest) {
-			newest = ts
+		status := resp.StatusCode
+		linkHdr := resp.Header.Get("Link")
+		var body listResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if status == http.StatusTooManyRequests {
+			return nil, "", fmt.Errorf("%w: webex: status=%d", connector.ErrRateLimited, status)
 		}
+		if status != http.StatusOK {
+			return nil, cursor, fmt.Errorf("webex: delta status=%d", status)
+		}
+		if decodeErr != nil {
+			return nil, "", fmt.Errorf("webex: decode delta: %w", decodeErr)
+		}
+		pageHasFresh := false
+		for _, m := range body.Items {
+			ts, _ := time.Parse(time.RFC3339, m.Created)
+			ts = ts.UTC()
+			if !ts.After(cursorTime) {
+				continue
+			}
+			pageHasFresh = true
+			ref := connector.DocumentRef{NamespaceID: ns.ID, ID: m.ID, UpdatedAt: ts}
+			changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+			if ts.After(newest) {
+				newest = ts
+			}
+		}
+		// Webex returns messages newest-first within a room. Once
+		// a full page yields zero fresh records, every subsequent
+		// page can only be older — break early.
+		if len(body.Items) > 0 && !pageHasFresh {
+			break
+		}
+		nextPath := parseWebexNextLink(linkHdr)
+		if nextPath == "" {
+			break
+		}
+		path = nextPath
 	}
 
 	return changes, newest.UTC().Format(time.RFC3339), nil

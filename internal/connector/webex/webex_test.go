@@ -175,6 +175,96 @@ func TestWebex_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+// TestWebex_ListDocuments_FollowsLinkHeader verifies the Round-22
+// pagination fix: ListDocuments must follow the
+// `Link: <next>; rel="next"` header that Webex emits on paginated
+// message responses instead of stopping after the first page.
+func TestWebex_ListDocuments_FollowsLinkHeader(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	var srvURL string
+	mux.HandleFunc("/v1/people/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("beforeMessage") {
+		case "":
+			w.Header().Set("Link", "<"+srvURL+`/v1/messages?roomId=R1&max=100&beforeMessage=m1>; rel="next"`)
+			_, _ = io.WriteString(w, `{"items":[{"id":"m1","created":"2024-06-01T00:00:00Z"}]}`)
+		case "m1":
+			_, _ = io.WriteString(w, `{"items":[{"id":"m2","created":"2024-06-02T00:00:00Z"}]}`)
+		default:
+			http.Error(w, "unexpected beforeMessage", http.StatusBadRequest)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+	c := webex.New(webex.WithBaseURL(srv.URL), webex.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "R1"}, connector.ListOpts{})
+	defer func() { _ = it.Close() }()
+	var ids []string
+	for it.Next(context.Background()) {
+		ids = append(ids, it.Doc().ID)
+	}
+	if !errors.Is(it.Err(), connector.ErrEndOfPage) {
+		t.Fatalf("iter err=%v", it.Err())
+	}
+	if len(ids) != 2 || ids[0] != "m1" || ids[1] != "m2" {
+		t.Fatalf("expected 2 IDs across 2 pages, got %v", ids)
+	}
+}
+
+// TestWebex_DeltaSync_FollowsLinkHeader exercises the Round-23
+// Devin Review fix: DeltaSync must follow the `Link: <url>; rel="next"`
+// header across pages, and short-circuit once a full page contains
+// only records older than the cursor (Webex returns messages in
+// reverse-chronological order, so a stale full page implies every
+// subsequent page is also stale).
+func TestWebex_DeltaSync_FollowsLinkHeader(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	var srvURL string
+	mux.HandleFunc("/v1/people/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	calls := 0
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch r.URL.Query().Get("beforeMessage") {
+		case "":
+			w.Header().Set("Link", "<"+srvURL+`/v1/messages?roomId=R1&max=100&beforeMessage=m5>; rel="next"`)
+			_, _ = io.WriteString(w, `{"items":[{"id":"m9","created":"2024-06-03T00:00:00Z"},{"id":"m5","created":"2024-06-02T12:00:00Z"}]}`)
+		case "m5":
+			// Page 2 — all messages are older than the cursor
+			// (2024-06-01T00:00:00Z). DeltaSync must break here
+			// without requesting a third page.
+			_, _ = io.WriteString(w, `{"items":[{"id":"m4","created":"2024-05-31T00:00:00Z"},{"id":"m3","created":"2024-05-30T00:00:00Z"}]}`)
+		default:
+			t.Fatalf("page beyond stale page should not be requested; got beforeMessage=%q", r.URL.Query().Get("beforeMessage"))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+	c := webex.New(webex.WithBaseURL(srv.URL), webex.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "R1"}, "2024-06-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 page requests (1 fresh, 1 stale = break), got %d", calls)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("expected 2 fresh changes from page 1, got %d", len(changes))
+	}
+	if cur != "2024-06-03T00:00:00Z" {
+		t.Fatalf("cur=%q want 2024-06-03T00:00:00Z (newest across walked pages)", cur)
+	}
+}
+
 func TestWebex_Registers(t *testing.T) {
 	t.Parallel()
 	if _, err := connector.GetSourceConnector(webex.Name); err != nil {
