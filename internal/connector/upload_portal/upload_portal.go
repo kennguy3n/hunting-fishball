@@ -14,8 +14,19 @@
 //	}
 //
 // The connector implements SourceConnector (the pull surface is a
-// no-op — every doc comes in via HandleWebhook) and the
-// WebhookReceiver + WebhookVerifier optional interfaces.
+// no-op — every doc comes in via HandleWebhook) plus the
+// connection-aware WebhookReceiverFor + WebhookVerifierFor
+// optional interfaces. The platform webhook router uses these to
+// materialise a per-source Connection (from the stored credential
+// blob) and dispatch verification + parsing against the right
+// tenant-scoped secret and MIME/size policy.
+//
+// The connector deliberately does NOT implement the registry-level
+// WebhookVerifier interface. Its signing secret is per-source, so
+// a registry-level verifier would always run with a nil key and
+// silently reject every legitimate upload. Implementing only the
+// connection-aware variants forces the router (and any custom
+// integrator) to take the per-source path.
 //
 // Audit contract: this connector has no outbound HTTP client of
 // its own — uploads arrive via the platform webhook router — so
@@ -55,8 +66,9 @@ type Credentials struct {
 	MaxSizeBytes  int64    `json:"max_size_bytes,omitempty"`
 }
 
-// Connector implements connector.SourceConnector, WebhookReceiver,
-// and WebhookVerifier.
+// Connector implements connector.SourceConnector,
+// connector.WebhookReceiver, connector.WebhookReceiverFor, and
+// connector.WebhookVerifierFor.
 type Connector struct {
 	now func() time.Time
 }
@@ -177,41 +189,51 @@ func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 // at — /v1/webhooks/upload_portal.
 func (o *Connector) WebhookPath() string { return "/upload_portal" }
 
-// VerifyWebhookRequest validates the `X-Upload-Signature-256`
-// header against the configured webhook secret.
-func (o *Connector) VerifyWebhookRequest(headers map[string][]string, payload []byte) error {
-	return o.verifyWith(headers, payload, nil)
-}
-
-// verifyWith is the internal hook that lets HandleWebhook reuse
-// the connection's secret instead of relying on a registry-level
-// secret.
-func (o *Connector) verifyWith(headers map[string][]string, payload []byte, conn *connection) error {
-	secret := []byte(nil)
-	if conn != nil {
-		secret = conn.webhookSecret
+// VerifyWebhookRequestFor validates the `X-Upload-Signature-256`
+// header against the per-source HMAC secret captured on conn.
+// This is the connection-aware verifier the platform webhook
+// router invokes when the connector is also a
+// connector.WebhookReceiverFor.
+func (o *Connector) VerifyWebhookRequestFor(conn connector.Connection, headers map[string][]string, payload []byte) error {
+	c, ok := conn.(*connection)
+	if !ok {
+		return errors.New("upload_portal: bad connection type")
 	}
-	return connector.VerifyHMACSHA256(secret, payload, connector.FirstHeader(headers, "X-Upload-Signature-256"))
+	return verifyHMAC(headers, payload, c)
 }
 
-// HandleWebhook decodes a multipart upload from payload (the
-// platform's webhook router parses the request envelope and
-// forwards us the bytes). The boundary is recovered from the
-// payload's first line so callers don't need to thread the
-// Content-Type header through.
+// verifyHMAC is the shared signature-check helper used by both
+// the connection-aware verifier and HandleWebhookFor's defence-
+// in-depth verification. Centralising it avoids drift between the
+// two entry points.
+func verifyHMAC(headers map[string][]string, payload []byte, conn *connection) error {
+	return connector.VerifyHMACSHA256(conn.webhookSecret, payload, connector.FirstHeader(headers, "X-Upload-Signature-256"))
+}
+
+// HandleWebhook is the stateless registry-level entry point. It
+// parses the multipart payload but CANNOT enforce signature
+// verification or per-source MIME/size policy — those live on
+// the per-source Connection. The platform webhook router detects
+// WebhookReceiverFor and dispatches via HandleWebhookFor instead;
+// HandleWebhook exists only so the connector still satisfies the
+// WebhookReceiver interface for registry lookups and audit
+// tooling. Production callers MUST use HandleWebhookFor.
 func (o *Connector) HandleWebhook(_ context.Context, payload []byte) ([]connector.DocumentChange, error) {
 	return o.handle(nil, payload)
 }
 
 // HandleWebhookFor is the connection-aware variant used by the
-// platform webhook router. It validates each upload against the
-// tenant + size + MIME policy captured in conn.
+// platform webhook router. It re-verifies the signature (so direct
+// callers that haven't already invoked VerifyWebhookRequestFor
+// remain safe — double-verification with the same secret is
+// harmless) and then enforces the tenant-scoped MIME + size policy
+// captured in conn.
 func (o *Connector) HandleWebhookFor(_ context.Context, conn connector.Connection, headers map[string][]string, payload []byte) ([]connector.DocumentChange, error) {
 	c, ok := conn.(*connection)
 	if !ok {
 		return nil, errors.New("upload_portal: bad connection type")
 	}
-	if err := o.verifyWith(headers, payload, c); err != nil {
+	if err := verifyHMAC(headers, payload, c); err != nil {
 		return nil, err
 	}
 

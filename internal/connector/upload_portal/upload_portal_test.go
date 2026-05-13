@@ -171,3 +171,67 @@ func TestUploadPortal_WebhookPath(t *testing.T) {
 		t.Fatalf("path=%q", c.WebhookPath())
 	}
 }
+
+// TestUploadPortal_NotARegistryLevelVerifier pins the deliberate
+// non-implementation of connector.WebhookVerifier. The connector's
+// HMAC secret is per-source, so satisfying the registry-level
+// interface would mean either silently rejecting every legitimate
+// upload (with a nil secret) or smuggling a default secret into
+// the package \u2014 both broken. Implementing only the connection-aware
+// variants forces the platform webhook router (and any custom
+// integrator) to take the per-source path.
+func TestUploadPortal_NotARegistryLevelVerifier(t *testing.T) {
+	t.Parallel()
+	var iface any = uploadportal.New()
+	if _, ok := iface.(connector.WebhookVerifier); ok {
+		t.Fatal("upload_portal must NOT implement connector.WebhookVerifier; the per-source HMAC secret cannot be honoured at the registry level")
+	}
+}
+
+// TestUploadPortal_ImplementsConnectionAwareInterfaces pins the
+// positive half of the contract \u2014 the per-source variants MUST be
+// satisfied so the platform webhook router takes the
+// connection-aware dispatch path.
+func TestUploadPortal_ImplementsConnectionAwareInterfaces(t *testing.T) {
+	t.Parallel()
+	var iface any = uploadportal.New()
+	if _, ok := iface.(connector.WebhookReceiverFor); !ok {
+		t.Fatal("upload_portal must implement connector.WebhookReceiverFor")
+	}
+	if _, ok := iface.(connector.WebhookVerifierFor); !ok {
+		t.Fatal("upload_portal must implement connector.WebhookVerifierFor")
+	}
+}
+
+// TestUploadPortal_VerifyWebhookRequestFor_HappyPath exercises the
+// new connection-aware verifier directly to confirm it honours the
+// per-source HMAC secret captured on the Connection.
+func TestUploadPortal_VerifyWebhookRequestFor_HappyPath(t *testing.T) {
+	t.Parallel()
+	c := uploadportal.New()
+	conn, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	body := []byte("payload")
+	sig := hmacHex([]byte("sec"), body)
+	headers := map[string][]string{"X-Upload-Signature-256": {sig}}
+	if err := c.VerifyWebhookRequestFor(conn, headers, body); err != nil {
+		t.Fatalf("VerifyWebhookRequestFor: %v", err)
+	}
+}
+
+// TestUploadPortal_VerifyWebhookRequestFor_RejectsBadSig pins that
+// the connection-aware verifier rejects forged signatures.
+func TestUploadPortal_VerifyWebhookRequestFor_RejectsBadSig(t *testing.T) {
+	t.Parallel()
+	c := uploadportal.New()
+	conn, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	headers := map[string][]string{"X-Upload-Signature-256": {"sha256=deadbeef"}}
+	if err := c.VerifyWebhookRequestFor(conn, headers, []byte("payload")); err == nil {
+		t.Fatal("VerifyWebhookRequestFor must reject a forged signature")
+	}
+}

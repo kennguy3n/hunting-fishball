@@ -46,8 +46,49 @@ type WebhookReceiver interface {
 // returning a non-nil error signals "reject the request with 401".
 // Connectors that don't implement WebhookVerifier are accepted
 // without signature checks (current behaviour).
+//
+// Connectors whose verification key is per-source (e.g. a
+// per-tenant HMAC secret stored alongside the credentials) must
+// implement WebhookVerifierFor instead — WebhookVerifier is a
+// registry-level interface and cannot honour per-source keys.
 type WebhookVerifier interface {
 	VerifyWebhookRequest(headers map[string][]string, payload []byte) error
+}
+
+// WebhookReceiverFor is implemented by connectors whose webhook
+// handling requires a per-source Connection — for example to
+// access tenant-scoped MIME/size policies or a per-source HMAC
+// secret stored in the credential blob. When the platform webhook
+// router detects this interface it materialises a Connection from
+// the stored Source credentials (via SourceConnector.Connect) and
+// dispatches through HandleWebhookFor instead of the stateless
+// HandleWebhook.
+//
+// Implementations MUST embed WebhookReceiver so a connector can
+// still be looked up through the registry-level path. The
+// stateless HandleWebhook is permitted to be a no-op (or to reject
+// every call) for connectors whose policy is genuinely
+// unenforceable without the Connection — the router never invokes
+// it once WebhookReceiverFor is detected.
+type WebhookReceiverFor interface {
+	WebhookReceiver
+	HandleWebhookFor(ctx context.Context, conn Connection, headers map[string][]string, payload []byte) ([]DocumentChange, error)
+}
+
+// WebhookVerifierFor is implemented by connectors whose signature
+// verification key is captured on a Connection rather than at the
+// registry level. The platform webhook router prefers this over
+// WebhookVerifier when the connector is also a WebhookReceiverFor
+// and a Connection has been materialised.
+//
+// Returning nil signals "verification passed (or disabled)";
+// returning a non-nil error signals "reject the request with 401".
+// A connector implementing this interface MUST NOT also implement
+// WebhookVerifier with a null/missing key — that produces a
+// silently-broken registry-level verifier that always rejects
+// legitimate traffic.
+type WebhookVerifierFor interface {
+	VerifyWebhookRequestFor(conn Connection, headers map[string][]string, payload []byte) error
 }
 
 // Grant represents a permission grant that a Provisioner pushes back to
