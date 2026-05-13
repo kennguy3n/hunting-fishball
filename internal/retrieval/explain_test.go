@@ -357,3 +357,57 @@ func TestExplain_BackendContributions_OmittedWhenNotExplain(t *testing.T) {
 		t.Fatalf("expected backend_contributions nil when explain=false; got %+v", got.BackendContributions)
 	}
 }
+
+// Round-18 Task 14 — per-chunk scoring breakdown.
+func TestBuildExplain_PopulatesRound18Round14Fields(t *testing.T) {
+	t.Parallel()
+	m := &retrieval.Match{
+		ID:      "doc:r18",
+		Source:  retrieval.SourceVector,
+		Sources: []string{retrieval.SourceVector, retrieval.SourceBM25},
+		Score:   0.91,
+		Rank:    1,
+		Metadata: map[string]any{
+			"freshness_boost":         float32(0.15),
+			"pin_boost":               float32(0.30),
+			"mmr_diversity_penalty":   float32(-0.05),
+			"cross_encoder_score":     float32(0.82),
+			"bm25_term_contributions": map[string]float32{"rotate": 4.2, "credentials": 3.1},
+		},
+	}
+	exp := retrieval.BuildExplain(m, 0.50)
+	if exp == nil {
+		t.Fatal("expected non-nil explain")
+	}
+	if exp.FreshnessBoost != 0.15 {
+		t.Fatalf("FreshnessBoost: got %v want 0.15", exp.FreshnessBoost)
+	}
+	if exp.PinBoost != 0.30 {
+		t.Fatalf("PinBoost: got %v want 0.30", exp.PinBoost)
+	}
+	if exp.MMRDiversityPenalty != -0.05 {
+		t.Fatalf("MMRDiversityPenalty: got %v want -0.05", exp.MMRDiversityPenalty)
+	}
+	if exp.CrossEncoderScore != 0.82 {
+		t.Fatalf("CrossEncoderScore: got %v want 0.82", exp.CrossEncoderScore)
+	}
+	if exp.BM25TermContributions["rotate"] != 4.2 {
+		t.Fatalf("BM25TermContributions: got %+v", exp.BM25TermContributions)
+	}
+}
+
+func TestBuildExplain_OmitsRound18Round14FieldsWhenMetadataMissing(t *testing.T) {
+	t.Parallel()
+	m := &retrieval.Match{
+		ID:      "doc:no-meta",
+		Source:  retrieval.SourceVector,
+		Sources: []string{retrieval.SourceVector},
+		Score:   0.5,
+		Rank:    1,
+	}
+	exp := retrieval.BuildExplain(m, 0.5)
+	if exp.FreshnessBoost != 0 || exp.PinBoost != 0 || exp.MMRDiversityPenalty != 0 ||
+		exp.CrossEncoderScore != 0 || exp.BM25TermContributions != nil {
+		t.Fatalf("unexpected breakdown when metadata absent: %+v", exp)
+	}
+}

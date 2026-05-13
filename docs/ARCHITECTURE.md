@@ -688,7 +688,7 @@ hunting-fishball/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces (DeltaSyncer / WebhookReceiver /
 │   │   │                      # Provisioner), process-global registry.
-│   │   │                      # 36 connectors after Round 17.
+│   │   │                      # 42 connectors after Round 18.
 │   │   ├── googledrive/       # Google Drive connector (Phase 1) +
 │   │   │                      # shared_drives.go (Round 15) which
 │   │   │                      # registers google_shared_drives as a
@@ -773,9 +773,29 @@ hunting-fishball/
 │   │   │                      # XML decoder follows <sitemapindex>
 │   │   │                      # shards bounded by maxDepth to avoid
 │   │   │                      # cycles; multi-format <lastmod> parser.
-│   │   └── coda/              # Coda (Round 17, Knowledge);
-│   │                          # sortBy=updatedAt&direction=DESC walk
-│   │                          # with pageToken pagination.
+│   │   ├── coda/              # Coda (Round 17, Knowledge);
+│   │   │                      # sortBy=updatedAt&direction=DESC walk
+│   │   │                      # with pageToken pagination.
+│   │   ├── sharepoint_onprem/ # SharePoint Server / on-prem (Round 18,
+│   │   │                      # ECM); NTLM / app-password REST against
+│   │   │                      # /_api/web/lists; Modified-cursor delta.
+│   │   ├── azure_blob/        # Azure Blob Storage (Round 18, Storage);
+│   │   │                      # SAS / shared-key signed REST,
+│   │   │                      # x-ms-blob-last-modified cursor.
+│   │   ├── gcs/               # Google Cloud Storage (Round 18,
+│   │   │                      # Storage); OAuth bearer + JSON API
+│   │   │                      # storage.googleapis.com/storage/v1/b/<bucket>/o
+│   │   │                      # walk with timeCreated/updated filter.
+│   │   ├── egnyte/            # Egnyte (Round 18, ECM); OAuth +
+│   │   │                      # /pubapi/v1/fs/<path> + events cursor
+│   │   │                      # delta at /pubapi/v2/events/cursor.
+│   │   ├── bookstack/         # BookStack wiki (Round 18, Knowledge);
+│   │   │                      # Token-ID + Token-Secret header on
+│   │   │                      # /api/pages with updated_at filter/sort.
+│   │   └── upload_portal/     # Signed-upload portal (Round 18, Receiver);
+│   │                          # HMAC-verified multipart receiver
+│   │                          # implementing WebhookReceiver, emitting
+│   │                          # SourceDocument events into Kafka.
 │   ├── credential/            # AES-256-GCM envelope encryption for
 │   │                          # connector credentials
 │   ├── audit/                 # AuditLog model, repository (transactional
@@ -2854,3 +2874,233 @@ without history backfill).
 - **Migration count unchanged.** Round 17 introduces no new
   schema migrations; the highest migration on disk remains
   `migrations/040_dlq_category.sql`.
+
+### Tech choices added in Round 18
+
+Round 18 expands the connector catalog from 36 to 42 entries
+and layers production-grade hardening on top. No new third-party
+runtime dependencies are introduced — every new connector uses
+stdlib `net/http` and `crypto/hmac`/`crypto/sha256` (Azure Blob
+shared-key signing, upload-portal HMAC) against
+`httptest.NewServer` fixtures in unit tests, and the new gRPC
+cross-encoder reranker pins the existing
+`google.golang.org/grpc` + `google.golang.org/protobuf`
+versions.
+
+- **Connector catalog expansion (36 → 42).** Six new entries
+  in the process-global registry, grouped by surface family:
+
+  ECM (REST + auth-token cursor):
+  - `sharepoint_onprem` — SharePoint Server / on-prem
+    (`internal/connector/sharepoint_onprem/sharepoint_onprem.go`).
+    NTLM or app-password against the on-prem REST surface
+    (`/_api/web/lists`); delta via
+    `Modified gt datetime'<ISO8601>'`. Implements
+    `SourceConnector` + `DeltaSyncer`.
+  - `egnyte` — Egnyte
+    (`internal/connector/egnyte/egnyte.go`). OAuth 2.0 Bearer;
+    file listing via `/pubapi/v1/fs/<path>`; delta via
+    `/pubapi/v2/events/cursor`. Implements `SourceConnector` +
+    `DeltaSyncer`.
+
+  Storage (object-store walk + lifecycle cursor):
+  - `azure_blob` — Azure Blob Storage
+    (`internal/connector/azure_blob/azure_blob.go`). SAS-token
+    or shared-key auth with stdlib HMAC-SHA256 signing; blob
+    listing via `?comp=list&restype=container`; delta via the
+    `x-ms-blob-last-modified` header. Implements
+    `SourceConnector` + `DeltaSyncer`. No vendor SDK.
+  - `gcs` — Google Cloud Storage
+    (`internal/connector/gcs/gcs.go`). OAuth 2.0 bearer; object
+    enumeration via the JSON API
+    (`storage.googleapis.com/storage/v1/b/<bucket>/o`); delta
+    via `timeCreated` / `updated` filter. Implements
+    `SourceConnector` + `DeltaSyncer`.
+
+  Knowledge / wiki (Token-ID + Token-Secret):
+  - `bookstack` — BookStack wiki
+    (`internal/connector/bookstack/bookstack.go`). Token-ID +
+    Token-Secret header; page listing via `/api/pages` with
+    `updated_at` filter + sort. Implements `SourceConnector` +
+    `DeltaSyncer`.
+
+  Receiver (signed-URL multipart upload):
+  - `upload_portal` — signed-upload portal
+    (`internal/connector/upload_portal/upload_portal.go`). HMAC-
+    verified multipart receiver implementing
+    `SourceConnector` + `WebhookReceiver`; validates the
+    signed-URL token, file type, size limit, and tenant scope
+    before emitting `SourceDocument` events into Kafka.
+
+  All six follow the established pattern: `init()` registration
+  via `connector.RegisterSourceConnector`, HTTP 429 wrapped as
+  `connector.ErrRateLimited`, `http.NewRequestWithContext`
+  everywhere, `httptest.NewServer`-backed unit tests, blank-
+  imports in `cmd/api/main.go` and `cmd/ingest/main.go`. The
+  `internal/connector/audit_test.go` floor is now 41 first-
+  class connectors (excluding `google_shared_drives` which
+  shares the Google Drive auth and runbook).
+
+- **Cross-encoder reranker (Task 9).** A new gRPC contract at
+  `proto/reranker/v1/reranker.proto` defines a single
+  `Rerank(RerankRequest) → RerankResponse` RPC. The Go-side
+  `CrossEncoderReranker` (`internal/retrieval/`) calls the
+  Python sidecar stub under `services/reranker/` and is gated
+  behind `CONTEXT_ENGINE_CROSS_ENCODER_ENABLED`. The light-
+  weight Go reranker remains the default.
+
+- **Retrieval query routing (Task 10).** The
+  `QueryClassifier` in `internal/retrieval/query_classifier.go`
+  classifies queries before fan-out: short exact-match
+  queries weight BM25 higher, semantic / conceptual queries
+  weight vector higher, entity queries weight graph higher.
+  Gated behind `CONTEXT_ENGINE_QUERY_ROUTING_ENABLED`.
+
+- **Embedding-model versioning (Task 11).** Migration
+  `041_chunk_embedding_version.sql` adds an embedding-model
+  version column to `chunks`. The new
+  `StaleEmbeddingDetector` marks chunks whose embedding model
+  diverges from the tenant's current model and a background
+  worker re-processes them through Stage 3.
+
+- **DLQ analytics dashboard (Task 12).** New endpoint
+  `GET /v1/admin/dlq/analytics` in
+  `internal/admin/dlq_analytics_handler.go` returns error-
+  category distribution (transient / permanent / unknown),
+  top error messages, failure rate over time, and per-
+  connector failure distribution.
+
+- **Tenant onboarding wizard (Task 13).** New endpoint
+  `POST /v1/admin/tenants/:tenant_id/onboarding` validates
+  prerequisites — at least one connected source, at least one
+  promoted policy draft, a healthy backend — and returns a
+  structured `ready / checks[]` envelope for the admin
+  portal's guided setup flow.
+
+- **Per-chunk explain breakdown (Task 14).** The
+  `explain: true` response now carries per-chunk scoring
+  breakdown: vector similarity, BM25 tf-idf, graph hop depth,
+  memory recency, RRF contribution, pin boost, and MMR
+  diversity penalty.
+
+- **Round-18 testing depth (Tasks 15-18).**
+  `tests/e2e/round18_test.go` (build tag `e2e`) covers the
+  42-entry registry pin, full lifecycle for two new connectors
+  (Azure Blob + BookStack), 429 propagation across the new
+  set, and the reranker / routing paths.
+  `tests/regression/round1718_manifest*.go` cattalogues the
+  Round-17/18 fixes with a meta-test asserting every
+  `TestRef` resolves on disk.
+  `tests/integration/connector_contract_test.go` adds compile-
+  time `SourceConnector` + `DeltaSyncer` assertions for every
+  new connector struct plus a
+  `TestConnectorContract_Round18_DeltaSyncerEmptyCursor`
+  table.
+  `tests/e2e/security_test.go` validates that credential
+  fields never log in plain text, cross-tenant isolation on
+  the new admin endpoints, RBAC coverage, and HMAC signature
+  verification on the upload portal.
+
+- **CI fast-lane improvements (Tasks 19-20).** Two new fast-
+  lane jobs gate every PR: `fast-govulncheck` runs
+  `govulncheck ./...` (also exposed as `make vulncheck`), and
+  `fast-openapi` runs `docs/openapi_test.go` in isolation so
+  the spec coverage is visible without re-running the
+  internal/test bucket. Both are wired into the
+  `fast-required` aggregator.
+
+### Tech choices added in Round 19
+
+Round 19 layers advanced retrieval and operations features on
+top of the Round-18 connector floor. One new migration
+(`042_document_content_type.sql`) and no new third-party
+runtime dependencies — every new feature uses stdlib `net/http`
+and the existing GORM + Gin + Redis stack.
+
+- **Per-source semantic-cache invalidation + cache-aside
+  refresh (Task 21).** `SemanticCache.InvalidateBySources`
+  drops only entries whose hits cite the named sources, via
+  per-source tag sets stored under
+  `cache-tag:source:<tenant>:<source>`.
+  `SemanticCache.GetOrRefresh` returns the cached value
+  immediately and kicks off a detached refresh goroutine when
+  the entry has aged past `staleAfter`, with a 30-second
+  refresh timeout so the goroutine doesn't outlive the
+  process.
+
+- **Multi-modal document prep (Task 22).** New
+  `DocumentContentType` enum (text / image / audio / video)
+  in `internal/pipeline/types.go` plus `ContentTypeFromMIME`.
+  `Document.ContentType` and `StageInput.ContentType`
+  propagate the value so Stage 2 (Parse) can route
+  image / audio / video content to the appropriate parsers.
+  Migration `042_document_content_type.sql` adds a non-null
+  `content_type` column with default `'text'` to both `chunks`
+  and `documents` plus a covering index.
+
+- **Chunk merger (Task 23).** New
+  `internal/retrieval/chunk_merger.go` implements a post-
+  rerank step that combines adjacent same-document short
+  chunks into larger context windows, preserving the reranker
+  order and the maximum score per group. Gated behind
+  `CONTEXT_ENGINE_CHUNK_MERGE_ENABLED` with configurable
+  `MinTextChars` (256), `MaxMergedTextChars` (4096),
+  `MaxGroupSize` (8), and a separator (`"\n\n"`).
+
+- **Per-connector health auto-pause (Task 24).** New
+  `internal/admin/source_auto_pause.go` tracks per-source
+  success / error counters in a sliding-window bucket ring;
+  when the error rate exceeds `ErrorRateThreshold` over
+  `WindowDuration` with at least `MinSampleSize` samples and
+  the source isn't in the `PauseCooldown` window, it calls
+  `PauseSource` on the underlying admin repo and emits an
+  `ActionSourceAutoPaused` (`source.auto_paused`) audit row.
+  The new Prometheus alert `SourceAutopaused` in
+  `deploy/alerts.yaml` pages on
+  `increase(context_engine_source_auto_paused_total[10m]) > 0`.
+
+- **Admin bulk-action expansion (Task 25).** The handler at
+  `POST /v1/admin/sources/bulk` now accepts `reindex` and
+  `rotate-credentials` in addition to pause / resume /
+  disconnect. Two new optional interfaces (`BulkSourceReindexer`,
+  `BulkSourceCredRotator`) wire into the handler via
+  `WithReindexer` / `WithCredRotator` builder methods, so a
+  deployment that doesn't wire them simply rejects the new
+  actions with HTTP 400. Each action emits its own audit
+  event (`ActionReindexRequested`,
+  `ActionSourceCredentialsRotated`) with per-source error
+  isolation.
+
+- **Tenant usage billing webhook (Task 26).** New
+  `internal/admin/billing_webhook.go` runs a daily worker that
+  aggregates per-tenant `tenant_usage` rows for the previous
+  UTC day and POSTs a single JSON envelope (`tenant_id`,
+  `day`, `usage{metric: count}`) per tenant to the configured
+  `CONTEXT_ENGINE_BILLING_WEBHOOK_URL` with a deterministic
+  `X-Idempotency-Key`. Per-tenant error isolation — a
+  failing webhook for one tenant doesn't block the rest of
+  the batch.
+
+- **Operational health-check expansion (Task 27).** A new
+  optional `MessageProbe` interface on
+  `internal/admin/health_summary_handler.go` lets probes
+  attach an operator-actionable message to a degraded /
+  unhealthy row. Four new probes ship in
+  `internal/admin/health_summary_round19_probes.go`:
+  `stale_connectors` (sources that haven't synced in >24h,
+  via `StaleConnectorReader`), `dlq_growth` (DLQ growth rate
+  over the last hour, via `DLQGrowthReader`),
+  `embedding_model` (Stage-3 sidecar reachability, via
+  `EmbeddingModelPinger`), and `tantivy_disk` (index
+  directory disk usage as a fraction of total volume, via
+  `TantivyDiskReader`).
+
+- **Documentation refresh (Tasks 28-30).**
+  `docs/openapi.yaml` gains the two new Round-18 endpoints
+  (`/v1/admin/dlq/analytics`,
+  `/v1/admin/tenants/{tenant_id}/onboarding`) with full
+  schemas, and `docs/openapi_test.go` adds them to the
+  `requiredPaths` list. README, PROGRESS, PHASES, and
+  ARCHITECTURE are all updated to reflect the 42-connector
+  floor and the Round-18/19 capability additions. Migration
+  count on disk is now `042`.

@@ -99,6 +99,10 @@ var requiredPaths = []string{
 	"/v1/admin/retrieval/latency-histogram",
 	"/v1/admin/retrieval/slow-queries",
 	"/v1/admin/pipeline/throughput",
+
+	// Round-18 Task 12 + 13 additions.
+	"/v1/admin/dlq/analytics",
+	"/v1/admin/tenants/{tenant_id}/onboarding",
 }
 
 // TestOpenAPI_RequiredPathsDocumented confirms every path on

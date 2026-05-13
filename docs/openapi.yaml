@@ -984,6 +984,78 @@ paths:
       responses:
         '202': { description: Accepted }
         '409': { description: Max retries exceeded }
+  /v1/admin/dlq/analytics:
+    get:
+      summary: Aggregated DLQ analytics (Round-18 Task 12).
+      description: |
+        Returns error-category distribution, top error messages,
+        failure rate over time, and per-connector failure
+        distribution for the requesting tenant.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  by_category:
+                    type: object
+                    additionalProperties: { type: integer }
+                  top_errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        message: { type: string }
+                        count: { type: integer }
+                  rate_over_time:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        bucket: { type: string, format: date-time }
+                        count: { type: integer }
+                  by_connector:
+                    type: object
+                    additionalProperties: { type: integer }
+  /v1/admin/tenants/{tenant_id}/onboarding:
+    post:
+      summary: Tenant onboarding wizard probe (Round-18 Task 13).
+      description: |
+        Validates onboarding prerequisites for the supplied
+        tenant — at least one connected source, at least one
+        promoted policy version, and a healthy backend — and
+        returns a structured status the admin portal renders as
+        a guided checklist.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - in: path
+          name: tenant_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: { type: string }
+                  ready: { type: boolean }
+                  checks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        ok: { type: boolean }
+                        message: { type: string }
+        '401': { description: Missing tenant context }
+        '403': { description: Cross-tenant probe rejected }
   /v1/admin/reindex:
     post:
       summary: Trigger a tenant-/source-/namespace-scoped reindex (Phase 8 / Task 7).

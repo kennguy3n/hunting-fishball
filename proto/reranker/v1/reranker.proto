@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package reranker.v1;
+
+option go_package = "github.com/kennguy3n/hunting-fishball/proto/reranker/v1;rerankerv1";
+
+// RerankerService wraps the Python cross-encoder reranker sidecar.
+// The Go retrieval handler calls Rerank after the merger fuses the
+// four streams via RRF, when CONTEXT_ENGINE_CROSS_ENCODER_ENABLED
+// is set. Gated callers fall back to the in-process LinearReranker.
+service RerankerService {
+  rpc Rerank(RerankRequest) returns (RerankResponse);
+}
+
+// Candidate is a single rerank-input document. The connector layer
+// surfaces chunk_id (stable per-tenant) and text (the chunk body).
+// score carries the upstream fusion score so the sidecar can
+// stabilize ties using the existing ranking when the cross-encoder
+// is uncertain.
+message Candidate {
+  string chunk_id = 1;
+  string text     = 2;
+  float  score    = 3;
+}
+
+message RerankRequest {
+  string             tenant_id  = 1;
+  string             query      = 2;
+  repeated Candidate candidates = 3;
+
+  // model_id selects a specific cross-encoder. Empty means "use
+  // the sidecar default", which the Python process resolves from
+  // its own config map.
+  string model_id = 4;
+
+  // top_k optionally truncates the response. Zero means "return
+  // every candidate".
+  int32 top_k = 5;
+}
+
+// ScoredCandidate carries the post-rerank cross-encoder score.
+// Callers replace the existing Match.Score field with this value.
+message ScoredCandidate {
+  string chunk_id = 1;
+  float  score    = 2;
+}
+
+message RerankResponse {
+  repeated ScoredCandidate scored   = 1;
+  string                   model_id = 2;
+}

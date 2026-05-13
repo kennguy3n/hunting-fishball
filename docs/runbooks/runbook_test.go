@@ -22,7 +22,9 @@ import (
 	// Blank-imports mirror cmd/api/main.go so the registry is
 	// populated before ListSourceConnectors runs.
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/asana"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/azure_blob"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bookstack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/coda"
@@ -30,7 +32,9 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence_server"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/egnyte"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gcs"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
@@ -52,9 +56,11 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint_onprem"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sitemap"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/upload_portal"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 )
 
@@ -99,8 +105,8 @@ var requiredSections = []string{
 func TestConnectorRunbooks_ExistAndCoverRequiredSections(t *testing.T) {
 	t.Parallel()
 	names := connector.ListSourceConnectors()
-	if len(names) < 36 {
-		t.Fatalf("expected at least 36 connectors registered; got %d (%v)", len(names), names)
+	if len(names) < 42 {
+		t.Fatalf("expected at least 42 connectors registered; got %d (%v)", len(names), names)
 	}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {

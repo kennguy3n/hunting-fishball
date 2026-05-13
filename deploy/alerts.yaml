@@ -196,6 +196,28 @@ spec:
               reason and rotate credentials if relevant.
             runbook_url: "https://docs/RUNBOOKS.md#source-unhealthy"
 
+        # Round-19 Task 24: the source auto-pauser fired. We page
+        # operators when *any* tenant + source pair has been
+        # auto-paused so they can verify the underlying connector
+        # health and re-enable when appropriate.
+        - alert: SourceAutopaused
+          expr: increase(context_engine_source_auto_paused_total[10m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+            service: context-engine
+          annotations:
+            summary: "Source {{ $labels.source_id }} auto-paused"
+            description: |
+              The per-connector health degradation detector
+              auto-paused tenant={{ $labels.tenant_id }}
+              source={{ $labels.source_id }} after the error rate
+              exceeded the configured threshold. Inspect the
+              source's Health page and the connector runbook to
+              triage; the source remains paused until an operator
+              re-enables it via POST /v1/admin/sources/:id/resume.
+            runbook_url: "https://docs/RUNBOOKS.md#source-autopaused"
+
     # -------------------------------------------------------------
     # Round-11 Task 11: chunk quality / cache / credentials / GORM
     # -------------------------------------------------------------

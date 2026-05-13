@@ -26,12 +26,15 @@ import (
 	"testing"
 )
 
-// auditedConnectors is the canonical Round-15 catalog. Updating
-// this list is intentional — every entry must satisfy the audit
-// checks below.
+// auditedConnectors is the canonical catalog. Updating this list
+// is intentional — every entry must satisfy the audit checks
+// below. Round 18 extended the floor from 35 → 41 first-class
+// connectors (excluding the google_shared_drives wrapper).
 var auditedConnectors = []string{
 	"asana",
+	"azure_blob",
 	"bamboohr",
+	"bookstack",
 	"box",
 	"clickup",
 	"coda",
@@ -39,7 +42,9 @@ var auditedConnectors = []string{
 	"confluence_server",
 	"discord",
 	"dropbox",
+	"egnyte",
 	"entra_id",
+	"gcs",
 	"github",
 	"gitlab",
 	"gmail",
@@ -61,9 +66,11 @@ var auditedConnectors = []string{
 	"s3",
 	"salesforce",
 	"sharepoint",
+	"sharepoint_onprem",
 	"sitemap",
 	"slack",
 	"teams",
+	"upload_portal",
 	"workday",
 }
 
@@ -80,9 +87,9 @@ var requiredChecks = []auditCheck{
 }
 
 // TestConnectorAudit_Round15 enforces the connector-completeness
-// contract first introduced in Round 15 and extended to all 27
-// audited connectors (excluding the google_shared_drives wrapper)
-// in Round 16.
+// contract first introduced in Round 15 and re-extended in
+// Round 18 to all 41 first-class connectors (excluding the
+// google_shared_drives wrapper).
 func TestConnectorAudit_Round15(t *testing.T) {
 	t.Parallel()
 	for _, name := range auditedConnectors {

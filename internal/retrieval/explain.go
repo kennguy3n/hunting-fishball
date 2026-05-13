@@ -72,6 +72,36 @@ type RetrievalExplain struct {
 	// which backends contributed to the hit without re-deriving
 	// it from the score fields above.
 	Sources []string `json:"sources,omitempty"`
+
+	// FreshnessBoost — Round-18 Task 14. Captures the linear
+	// reranker's freshness lift component so an operator can see
+	// why a fresh chunk topped an older but more relevant one.
+	// Zero when the reranker did not run or freshness weighting
+	// is disabled.
+	FreshnessBoost float32 `json:"freshness_boost,omitempty"`
+
+	// PinBoost — Round-18 Task 14. Non-zero when the chunk is
+	// pinned (see internal/admin/pinned_results.go). The boost is
+	// the amount the pin filter added to the reranker's score so
+	// operators can see the pin's effect at a glance.
+	PinBoost float32 `json:"pin_boost,omitempty"`
+
+	// MMRDiversityPenalty — Round-18 Task 14. Negative value
+	// applied by the MMR (maximum marginal relevance) post-rerank
+	// step when the chunk is too similar to a higher-ranked hit.
+	// Zero when MMR did not run or did not penalise the chunk.
+	MMRDiversityPenalty float32 `json:"mmr_diversity_penalty,omitempty"`
+
+	// CrossEncoderScore — Round-18 Task 14. The relevance score
+	// the cross-encoder reranker returned. Zero when the
+	// cross-encoder reranker did not run (LinearReranker path).
+	CrossEncoderScore float32 `json:"cross_encoder_score,omitempty"`
+
+	// BM25TermContributions — Round-18 Task 14. Optional
+	// breakdown of which query terms contributed how much to the
+	// BM25 score. Populated only when the BM25 adapter reports
+	// per-term tf-idf; otherwise omitted.
+	BM25TermContributions map[string]float32 `json:"bm25_term_contributions,omitempty"`
 }
 
 // IsExplainAuthorized returns true when the caller's RBAC role
@@ -147,7 +177,47 @@ func BuildExplain(m *Match, preRerankScore float32) *RetrievalExplain {
 			// the appropriate field here.
 		}
 	}
+	// Round-18 Task 14 — surface per-chunk reranker breakdown
+	// when adapters dropped it into Metadata. Adapters that
+	// don't populate the keys leave the JSON fields omitted.
+	if m.Metadata != nil {
+		if v, ok := metadataFloat32(m.Metadata, "freshness_boost"); ok {
+			exp.FreshnessBoost = v
+		}
+		if v, ok := metadataFloat32(m.Metadata, "pin_boost"); ok {
+			exp.PinBoost = v
+		}
+		if v, ok := metadataFloat32(m.Metadata, "mmr_diversity_penalty"); ok {
+			exp.MMRDiversityPenalty = v
+		}
+		if v, ok := metadataFloat32(m.Metadata, "cross_encoder_score"); ok {
+			exp.CrossEncoderScore = v
+		}
+		if terms, ok := m.Metadata["bm25_term_contributions"].(map[string]float32); ok && len(terms) > 0 {
+			exp.BM25TermContributions = terms
+		}
+	}
 	return exp
+}
+
+// metadataFloat32 reads a numeric metadata field as a float32,
+// tolerating the float32 / float64 / int duality JSON decoding
+// introduces.
+func metadataFloat32(meta map[string]any, key string) (float32, bool) {
+	v, ok := meta[key]
+	if !ok {
+		return 0, false
+	}
+	switch x := v.(type) {
+	case float32:
+		return x, true
+	case float64:
+		return float32(x), true
+	case int:
+		return float32(x), true
+	}
+
+	return 0, false
 }
 
 // computeBackendContributions — Round-13 Task 7.

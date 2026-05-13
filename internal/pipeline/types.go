@@ -47,6 +47,50 @@ const (
 	EventPurge EventKind = "source.purge"
 )
 
+// DocumentContentType is the coarse multi-modal class for a
+// Document. Stage 2 (Parse) routes image / audio / video content
+// to the appropriate parser. Round-19 Task 22 wires this end-to-
+// end; future rounds will plug in real image / audio parsers
+// (Docling multimodal, Whisper).
+type DocumentContentType string
+
+const (
+	// ContentTypeText is the default — a plain-text, HTML, Markdown,
+	// or office document destined for Docling text parsing.
+	ContentTypeText DocumentContentType = "text"
+
+	// ContentTypeImage routes to a (future) image parser that
+	// extracts captions / OCR / EXIF metadata.
+	ContentTypeImage DocumentContentType = "image"
+
+	// ContentTypeAudio routes to a (future) audio parser that
+	// emits a transcript via Whisper-style ASR.
+	ContentTypeAudio DocumentContentType = "audio"
+
+	// ContentTypeVideo routes to a (future) video parser that
+	// emits a transcript + per-frame captions.
+	ContentTypeVideo DocumentContentType = "video"
+)
+
+// ContentTypeFromMIME maps a MIME type into the corresponding
+// DocumentContentType. Unknown MIME types fall through to
+// ContentTypeText so Stage 2 retains the legacy behaviour.
+// Round-19 Task 22.
+func ContentTypeFromMIME(mime string) DocumentContentType {
+	switch {
+	case mime == "":
+		return ContentTypeText
+	case len(mime) >= 6 && mime[:6] == "image/":
+		return ContentTypeImage
+	case len(mime) >= 6 && mime[:6] == "audio/":
+		return ContentTypeAudio
+	case len(mime) >= 6 && mime[:6] == "video/":
+		return ContentTypeVideo
+	default:
+		return ContentTypeText
+	}
+}
+
 // Document is the unit of work flowing through the pipeline. It mirrors
 // the connector.Document shape but flattens the Reader into a byte
 // slice the parse stage can submit over gRPC.
@@ -73,6 +117,13 @@ type Document struct {
 
 	// MIMEType is the upstream content type.
 	MIMEType string
+
+	// ContentType is the coarse multi-modal class derived from
+	// MIMEType. Stage 2 routes image / audio / video content to
+	// the appropriate parser; the default is text. Round-19
+	// Task 22 wires it through the coordinator + persists it in
+	// chunks (migration 042).
+	ContentType DocumentContentType
 
 	// Content is the raw fetched bytes. Stage 1 populates this slice;
 	// downstream stages treat it as immutable.
@@ -143,6 +194,10 @@ type StageInput struct {
 	Embeddings    [][]float32
 	EmbeddingDims int
 	ModelID       string
+
+	// ContentType mirrors Doc.ContentType for fast access in
+	// Stage 2 / Stage 3 routing decisions. Round-19 Task 22.
+	ContentType DocumentContentType
 }
 
 // StageOutput is what each stage emits when called outside the

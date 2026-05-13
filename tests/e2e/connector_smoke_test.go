@@ -11,10 +11,10 @@
 //   - For DeltaSyncer connectors, DeltaSync returns a fresh cursor.
 //   - For WebhookReceiver connectors, HandleWebhook decodes a sample
 //     payload into at least one DocumentChange.
-//   - The process-global connector registry has exactly 36 entries
-//     after blank-imports complete (Round-17 catalog expansion adds
-//     entra_id, google_workspace, outlook, workday, bamboohr,
-//     personio, sitemap, and coda on top of the Round-16 catalog).
+//   - The process-global connector registry has exactly 42 entries
+//     after blank-imports complete (Round-18 catalog expansion adds
+//     sharepoint_onprem, azure_blob, gcs, egnyte, bookstack, and
+//     upload_portal on top of the Round-17 catalog).
 //
 // Run via `make test-connector-smoke` (or as part of `make test-e2e`).
 package e2e
@@ -34,7 +34,9 @@ import (
 
 	// Blank-import every connector so the registry self-populates.
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/asana"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/azure_blob"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bookstack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/coda"
@@ -42,7 +44,9 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/confluence_server"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/egnyte"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gcs"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
@@ -64,9 +68,11 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint_onprem"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sitemap"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/upload_portal"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 
 	// Direct imports so each smoke case can call the connector's
@@ -114,7 +120,9 @@ import (
 // silently disappears from a binary's blank-import list.
 var expectedConnectors = []string{
 	"asana",
+	"azure_blob",
 	"bamboohr",
+	"bookstack",
 	"box",
 	"clickup",
 	"coda",
@@ -122,7 +130,9 @@ var expectedConnectors = []string{
 	"confluence_server",
 	"discord",
 	"dropbox",
+	"egnyte",
 	"entra_id",
+	"gcs",
 	"github",
 	"gitlab",
 	"gmail",
@@ -145,9 +155,11 @@ var expectedConnectors = []string{
 	"s3",
 	"salesforce",
 	"sharepoint",
+	"sharepoint_onprem",
 	"sitemap",
 	"slack",
 	"teams",
+	"upload_portal",
 	"workday",
 }
 

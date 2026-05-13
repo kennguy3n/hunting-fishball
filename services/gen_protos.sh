@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Generate Python gRPC stubs for the three ML microservices into
+# Generate Python gRPC stubs for the ML microservices into
 # services/_proto. Idempotent — safe to re-run.
 #
 # The generated package names ("docling.v1", "embedding.v1",
-# "memory.v1") collide with the real Python ML libraries we wrap
-# (Docling, mem0ai, ...). Post-generation we rewrite the imports in
-# every generated file to use the `_proto.<service>.v1` namespace
-# instead, so a server module can import both:
+# "memory.v1", "graphrag.v1", "reranker.v1") collide with the real
+# Python ML libraries we wrap (Docling, mem0ai, sentence-transformers
+# CrossEncoder, …). Post-generation we rewrite the imports in every
+# generated file to use the `_proto.<service>.v1` namespace instead,
+# so a server module can import both:
 #
 #   from _proto.docling.v1 import docling_pb2_grpc  # generated stub
 #   import docling                                  # real library
@@ -41,7 +42,7 @@ path = sys.argv[1]
 with open(path) as fh:
     src = fh.read()
 src = re.sub(
-    r"^from (docling|embedding|memory|graphrag)\.v1 ",
+    r"^from (docling|embedding|memory|graphrag|reranker)\.v1 ",
     r"from _proto.\1.v1 ",
     src,
     flags=re.MULTILINE,

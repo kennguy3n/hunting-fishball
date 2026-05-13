@@ -24,8 +24,10 @@ package admin
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -44,13 +46,30 @@ type WebhookRouter struct {
 // WebhookRouterConfig wires the router's dependencies. Lookup is
 // the narrow read contract the router needs from
 // SourceRepository.
+//
+// Resolver returns the registry-level WebhookReceiver projection;
+// SourceResolver returns the underlying SourceConnector so the
+// router can call Connect(ctx, cfg) when the connector advertises
+// connector.WebhookReceiverFor. Credentials extracts the
+// decrypted credential bytes from a Source row. Both have
+// production defaults that read from the global registry and the
+// Source.Config["credentials"] JSONB key respectively.
 type WebhookRouterConfig struct {
 	Lookup ConnectorLookup
 	// Resolver maps a connector name + a SourceConnector instance
 	// produced by the factory. Tests inject a fake; production
 	// uses ResolveFromRegistry.
 	Resolver ConnectorResolver
-	Audit    AuditWriter
+	// SourceResolver is the connection-aware sibling of Resolver. It
+	// returns a fresh SourceConnector instance so the router can
+	// call Connect when the connector implements WebhookReceiverFor.
+	// Defaults to SourceResolveFromRegistry.
+	SourceResolver SourceConnectorResolver
+	// Credentials extracts the decrypted credential blob from a
+	// Source row, in the shape ConnectorConfig.Credentials expects.
+	// Defaults to DefaultCredentialExtractor.
+	Credentials CredentialExtractor
+	Audit       AuditWriter
 }
 
 // ConnectorLookup is the narrow read surface that resolves a
@@ -71,6 +90,20 @@ type ConnectorLookup interface {
 // registry.
 type ConnectorResolver func(connectorType string) (connector.WebhookReceiver, error)
 
+// SourceConnectorResolver returns the underlying SourceConnector
+// instance for a connector type — the connection-aware sibling of
+// ConnectorResolver. The router calls this when the connector
+// implements connector.WebhookReceiverFor and a Connection has to
+// be materialised before verification + handling can run.
+type SourceConnectorResolver func(connectorType string) (connector.SourceConnector, error)
+
+// CredentialExtractor pulls the decrypted credential bytes out of
+// a Source row in a form ConnectorConfig.Credentials accepts.
+// Production wiring decrypts the envelope-encrypted blob from
+// Source.Config["credentials"]; tests can install a deterministic
+// fake.
+type CredentialExtractor func(src *Source) ([]byte, error)
+
 // ResolveFromRegistry is the production-wired ConnectorResolver.
 // It calls connector.GetSourceConnector to materialise a fresh
 // instance and asserts it implements WebhookReceiver.
@@ -87,21 +120,71 @@ func ResolveFromRegistry(connectorType string) (connector.WebhookReceiver, error
 	return rcv, nil
 }
 
+// SourceResolveFromRegistry is the production-wired
+// SourceConnectorResolver. It returns the factory's SourceConnector
+// directly so the router can call Connect / Disconnect against it.
+func SourceResolveFromRegistry(connectorType string) (connector.SourceConnector, error) {
+	factory, err := connector.GetSourceConnector(connectorType)
+	if err != nil {
+		return nil, err
+	}
+	return factory(), nil
+}
+
+// DefaultCredentialExtractor reads the credentials out of
+// Source.Config["credentials"]. GORM persists []byte values into
+// JSONB columns as base64-encoded JSON strings, so the extractor
+// transparently base64-decodes string-typed values while still
+// accepting raw []byte (test fakes) and structured map/slice
+// payloads (legacy callers that stored an unwrapped JSON object).
+func DefaultCredentialExtractor(src *Source) ([]byte, error) {
+	if src == nil {
+		return nil, nil
+	}
+	v, ok := src.Config["credentials"]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	switch c := v.(type) {
+	case []byte:
+		return c, nil
+	case string:
+		if decoded, err := base64.StdEncoding.DecodeString(c); err == nil {
+			return decoded, nil
+		}
+		return []byte(c), nil
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("admin: marshal credentials: %w", err)
+		}
+		return b, nil
+	}
+}
+
 // ErrConnectorDoesNotReceiveWebhooks is returned by
 // ResolveFromRegistry when the requested connector type does not
 // implement the optional WebhookReceiver interface.
 var ErrConnectorDoesNotReceiveWebhooks = errors.New("admin: connector does not receive webhooks")
 
 // NewWebhookRouter validates the supplied config and returns a
-// router. Resolver defaults to ResolveFromRegistry; Audit
-// defaults to a no-op writer so production wiring is concise but
-// tests can opt-in to a recording fake.
+// router. Resolver defaults to ResolveFromRegistry,
+// SourceResolver to SourceResolveFromRegistry, Credentials to
+// DefaultCredentialExtractor, and Audit to a no-op writer so
+// production wiring is concise but tests can opt-in to a recording
+// fake.
 func NewWebhookRouter(cfg WebhookRouterConfig) (*WebhookRouter, error) {
 	if cfg.Lookup == nil {
 		return nil, errors.New("admin: WebhookRouterConfig.Lookup is required")
 	}
 	if cfg.Resolver == nil {
 		cfg.Resolver = ResolveFromRegistry
+	}
+	if cfg.SourceResolver == nil {
+		cfg.SourceResolver = SourceResolveFromRegistry
+	}
+	if cfg.Credentials == nil {
+		cfg.Credentials = DefaultCredentialExtractor
 	}
 	if cfg.Audit == nil {
 		cfg.Audit = noopAudit{}
@@ -166,6 +249,16 @@ func (r *WebhookRouter) handle(c *gin.Context) {
 		"bytes":     len(body),
 	})
 
+	// Connection-aware dispatch path: when the connector advertises
+	// WebhookReceiverFor, materialise a Connection from the stored
+	// credentials and run verification + handling against it. This
+	// is the only path that honours per-source secrets and policies
+	// (e.g. upload_portal's per-tenant HMAC key + MIME/size limits).
+	if rcvFor, ok := rcv.(connector.WebhookReceiverFor); ok {
+		r.handlePerConnection(c, src, connectorType, body, rcvFor)
+		return
+	}
+
 	if v, ok := rcv.(connector.WebhookVerifier); ok {
 		if vErr := v.VerifyWebhookRequest(c.Request.Header, body); vErr != nil {
 			r.audit(c, src.TenantID, audit.ActionWebhookFailed, src.ID, audit.JSONMap{
@@ -179,6 +272,85 @@ func (r *WebhookRouter) handle(c *gin.Context) {
 	}
 
 	changes, hwErr := rcv.HandleWebhook(c.Request.Context(), body)
+	if hwErr != nil {
+		r.audit(c, src.TenantID, audit.ActionWebhookFailed, src.ID, audit.JSONMap{
+			"connector": connectorType,
+			"reason":    "handler",
+			"error":     hwErr.Error(),
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": hwErr.Error()})
+		return
+	}
+	r.audit(c, src.TenantID, audit.ActionWebhookProcessed, src.ID, audit.JSONMap{
+		"connector": connectorType,
+		"changes":   len(changes),
+	})
+	resp, _ := json.Marshal(gin.H{"status": "ok", "changes": len(changes)})
+	c.Data(http.StatusAccepted, "application/json", resp)
+}
+
+// handlePerConnection drives the connection-aware dispatch path.
+// It materialises a connector.Connection from the stored Source
+// credentials, runs WebhookVerifierFor if implemented, and then
+// invokes HandleWebhookFor. Verification failures are audited
+// distinctly from handler failures so SREs can still slice the
+// timeline by reason. Connect / extract failures are audited as
+// "connection" so they're not mistaken for upstream-signature
+// problems.
+func (r *WebhookRouter) handlePerConnection(c *gin.Context, src *Source, connectorType string, body []byte, rcvFor connector.WebhookReceiverFor) {
+	factory, err := r.cfg.SourceResolver(connectorType)
+	if err != nil {
+		r.audit(c, src.TenantID, audit.ActionWebhookFailed, src.ID, audit.JSONMap{
+			"connector": connectorType,
+			"reason":    "connection",
+			"error":     err.Error(),
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "resolve source connector: " + err.Error()})
+		return
+	}
+	creds, err := r.cfg.Credentials(src)
+	if err != nil {
+		r.audit(c, src.TenantID, audit.ActionWebhookFailed, src.ID, audit.JSONMap{
+			"connector": connectorType,
+			"reason":    "connection",
+			"error":     err.Error(),
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "extract credentials: " + err.Error()})
+		return
+	}
+	settings, _ := src.Config["settings"].(map[string]any)
+	cfg := connector.ConnectorConfig{
+		Name:        connectorType,
+		TenantID:    src.TenantID,
+		SourceID:    src.ID,
+		Settings:    settings,
+		Credentials: creds,
+	}
+	conn, err := factory.Connect(c.Request.Context(), cfg)
+	if err != nil {
+		r.audit(c, src.TenantID, audit.ActionWebhookFailed, src.ID, audit.JSONMap{
+			"connector": connectorType,
+			"reason":    "connection",
+			"error":     err.Error(),
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "connect: " + err.Error()})
+		return
+	}
+	defer func() { _ = factory.Disconnect(c.Request.Context(), conn) }()
+
+	if vFor, ok := factory.(connector.WebhookVerifierFor); ok {
+		if vErr := vFor.VerifyWebhookRequestFor(conn, c.Request.Header, body); vErr != nil {
+			r.audit(c, src.TenantID, audit.ActionWebhookFailed, src.ID, audit.JSONMap{
+				"connector": connectorType,
+				"reason":    "signature",
+				"error":     vErr.Error(),
+			})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "signature verification failed"})
+			return
+		}
+	}
+
+	changes, hwErr := rcvFor.HandleWebhookFor(c.Request.Context(), conn, c.Request.Header, body)
 	if hwErr != nil {
 		r.audit(c, src.TenantID, audit.ActionWebhookFailed, src.ID, audit.JSONMap{
 			"connector": connectorType,

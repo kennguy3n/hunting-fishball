@@ -226,7 +226,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 7 — Catalog expansion
 
-**Status.** ✅ shipped | ~100% — Round 17 expands the catalog from 28 → **36** production connectors (Microsoft Entra ID, Google Workspace Directory, Microsoft 365 Outlook, Workday, BambooHR, Personio, sitemap.xml crawl, and Coda on top of the Round 15/16 set). Per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
+**Status.** ✅ shipped | ~100% — Round 18 expands the catalog from 36 → **42** production connectors (SharePoint on-prem, Azure Blob, Google Cloud Storage, Egnyte, BookStack, signed-upload portal on top of the Round 17 set). Per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
 
 - [x] ≥ 12 production connectors at GA — Phase 1 (Google Drive,
       Slack, KChat) + Phase 7 (SharePoint, OneDrive, Dropbox,
@@ -237,7 +237,9 @@ This document tracks the *actual* state of the platform. The shape mirrors
       Okta, Gmail, RSS/Atom, Confluence Server/DC) +
       Round-17 Phase-2+ adds (Microsoft Entra ID, Google
       Workspace Directory, Microsoft 365 Outlook, Workday,
-      BambooHR, Personio, Sitemap, Coda) = **36**
+      BambooHR, Personio, Sitemap, Coda) + Round-18 Phase-2+
+      adds (SharePoint on-prem, Azure Blob, Google Cloud Storage,
+      Egnyte, BookStack, signed-upload portal) = **42**
 - [x] Per-connector runbooks (`docs/runbooks/` —
       one Markdown file per connector covering credential rotation,
       quota / rate-limit incidents, outage detection / recovery, and
@@ -461,10 +463,63 @@ ships, the matrix is empty. Each row records:
 | Personio | ❌ | ✅ (employees) | ❌ | ✅ (`updated_from=<RFC3339>`) | ✅ (`status="inactive"` → ChangeDeleted) | ✅ Round-17 (Phase 2+, HR) |
 | Sitemap crawl | ❌ | ✅ (URLs in `<urlset>` / `<sitemapindex>`) | ❌ | ✅ (`<lastmod>` timestamp comparison) | ❌ | ✅ Round-17 (Phase 2+, Generic) |
 | Coda | ✅ (`/whoami`) | ✅ (docs + pages) | ❌ (planned) | ✅ (`sortBy=updatedAt&direction=DESC` walk) | ❌ | ✅ Round-17 (Phase 2+, Knowledge) |
+| SharePoint on-prem | ✅ (`/_api/web/lists`) | ✅ (lists + items) | ❌ (Modified-cursor only) | ✅ (`Modified gt datetime'<ISO8601>'`) | ❌ | ✅ Round-18 (Phase 2+, ECM) |
+| Azure Blob | ✅ (SAS) | ✅ (blobs in container) | ❌ (manifest pull) | ✅ (`x-ms-blob-last-modified` cursor) | ❌ | ✅ Round-18 (Phase 2+, Storage) |
+| Google Cloud Storage | ✅ (OAuth bearer) | ✅ (objects in bucket) | ❌ | ✅ (`timeCreated`/`updated` filter) | ❌ | ✅ Round-18 (Phase 2+, Storage) |
+| Egnyte | ✅ (OAuth) | ✅ (`/pubapi/v1/fs/<path>`) | ❌ | ✅ (events `/pubapi/v2/events/cursor`) | ❌ | ✅ Round-18 (Phase 2+, ECM) |
+| BookStack | ✅ (Token-ID + Token-Secret) | ✅ (`/api/pages`) | ❌ | ✅ (`updated_at` filter + sort) | ❌ | ✅ Round-18 (Phase 2+, Knowledge) |
+| Upload portal | ✅ (HMAC) | ➖ webhook receiver | ❌ | ➖ webhook-driven | ✅ (signed-URL upload + HMAC sig) | ✅ Round-18 (Phase 2+, Receiver) |
 
 ---
 
 ## Changelog
+
+- 2026-05-12: **Round 18/19: Connector catalog expansion — 36 →
+  42 production connectors + production hardening.** Tasks 1-8
+  add SharePoint Server / on-prem (NTLM / app-password against
+  `/_api/web/lists`, `Modified gt datetime'<ISO8601>'` cursor),
+  Azure Blob (SAS-token signed REST, blob lifecycle), Google
+  Cloud Storage (OAuth bearer, JSON API `o` walk +
+  `timeCreated`/`updated` filter), Egnyte (OAuth, `/pubapi/v1/fs`
+  + events cursor delta), BookStack (Token-ID + Token-Secret
+  header, `/api/pages` with `updated_at` sort), and the signed-
+  upload portal (HMAC-verified multipart receiver implementing
+  `WebhookReceiver`). Tasks 9-14 add the gRPC cross-encoder
+  reranker (`proto/reranker/v1/reranker.proto` + Python sidecar
+  stub in `services/reranker/`), the `QueryClassifier` for
+  retrieval query routing, embedding-model versioning with
+  migration `041_chunk_embedding_version.sql`, DLQ analytics
+  aggregation at `GET /v1/admin/dlq/analytics`, the tenant
+  onboarding wizard at `POST /v1/admin/tenants/:tenant_id/
+  onboarding`, and per-chunk scoring breakdown in
+  `internal/retrieval/explain.go`. Tasks 15-18 add
+  `tests/e2e/round18_test.go`, `tests/regression/
+  round1718_manifest*.go`, contract test expansion for the new
+  connectors, and a security test suite covering credential
+  redaction, cross-tenant isolation, RBAC coverage, and HMAC
+  signature verification. Tasks 19-20 ship the
+  `fast-govulncheck` + `fast-openapi` CI fast-lane jobs (with
+  `make vulncheck`). Round 19 layers Tasks 21-30 on top —
+  per-source semantic-cache invalidation
+  (`SemanticCache.InvalidateBySources`) and cache-aside
+  background refresh (`GetOrRefresh`), `DocumentContentType` +
+  migration `042_document_content_type.sql` (multi-modal prep),
+  `internal/retrieval/chunk_merger.go` (post-rerank adjacent-
+  short-chunk merging gated behind
+  `CONTEXT_ENGINE_CHUNK_MERGE_ENABLED`),
+  `internal/admin/source_auto_pause.go` (sliding-window error-
+  rate detector emitting `source.auto_paused` + Prometheus
+  `SourceAutopaused` alert), bulk `reindex` + `rotate-
+  credentials` actions on `POST /v1/admin/sources/bulk`,
+  `internal/admin/billing_webhook.go` (daily tenant-usage POST
+  to `CONTEXT_ENGINE_BILLING_WEBHOOK_URL`), and four new
+  `MessageProbe` implementations on `GET /v1/admin/health/
+  summary` (stale connectors, DLQ growth, embedding-model
+  availability, Tantivy disk usage). Docs: PROGRESS.md +
+  PHASES.md + README.md + ARCHITECTURE.md updated to reflect
+  the new 42-connector floor and the Round-18/19 capability
+  additions; OpenAPI spec at `docs/openapi.yaml` gains the
+  Round-18 endpoints.
 
 - 2026-05-12: **Round 17: Connector catalog expansion — 28 → 36
   production connectors. Tasks 1-8 add Microsoft Entra ID

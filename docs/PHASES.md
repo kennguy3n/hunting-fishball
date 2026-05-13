@@ -16,7 +16,7 @@ phase.
 | 🟡 partial | Some exit criteria met; gaps tracked in `PROGRESS.md` |
 | ⏳ planned | Not yet started |
 
-> **Phase status snapshot (2026-05-12, post-Round-17).** Phases 0,
+> **Phase status snapshot (2026-05-12, post-Round-18/19).** Phases 0,
 > 1, 2, 3, 7, and 8 are **functionally complete** — every exit
 > criterion has shipped to `main` and the supporting tests /
 > runbooks / metrics are in place. Phases 7 and 8 carry the
@@ -31,7 +31,47 @@ phase.
 > [`PROGRESS.md`](PROGRESS.md) for the per-task status and
 > [`README.md`](../README.md) for the round-by-round changelog.
 >
-> **Round 17** expands the connector catalog from 28 to **36**
+> **Round 18/19** expands the connector catalog from 36 to
+> **42** production connectors and layers production-grade
+> hardening on top. Six new Phase-2+ targets ship: SharePoint
+> Server / on-prem (NTLM / app-password REST,
+> `Modified gt datetime'<ISO8601>'` cursor), Azure Blob (SAS-
+> signed REST, blob `x-ms-blob-last-modified` cursor), Google
+> Cloud Storage (OAuth bearer, JSON API + `timeCreated` /
+> `updated` filter), Egnyte (OAuth, `/pubapi/v1/fs` + events
+> cursor), BookStack (Token-ID + Token-Secret, `/api/pages`
+> with `updated_at` sort), and the signed-upload portal (HMAC-
+> verified multipart receiver implementing
+> `WebhookReceiver`). Round 18 hardens production: gRPC cross-
+> encoder reranker (`proto/reranker/v1/reranker.proto` + Python
+> sidecar stub), query-routing `QueryClassifier`, per-chunk
+> embedding-model versioning (`041_chunk_embedding_version.sql`
+> + `StaleEmbeddingDetector`), DLQ analytics at
+> `GET /v1/admin/dlq/analytics`, tenant onboarding wizard at
+> `POST /v1/admin/tenants/:tenant_id/onboarding`, per-chunk
+> scoring breakdown in the `explain: true` response,
+> `tests/e2e/round18_test.go`, the Round-17/18 regression
+> manifest, integration-contract test expansion for the new
+> connectors, a security test suite covering credential
+> redaction + cross-tenant isolation + RBAC coverage + upload-
+> portal HMAC verification, and the `fast-govulncheck` +
+> `fast-openapi` CI fast-lane jobs. Round 19 (Tasks 21-30)
+> layers advanced retrieval and ops on top — per-source
+> semantic-cache invalidation + cache-aside refresh
+> (`SemanticCache.InvalidateBySources`,
+> `SemanticCache.GetOrRefresh`), multi-modal prep
+> (`DocumentContentType` + `042_document_content_type.sql`),
+> the `ChunkMerger` post-rerank step, per-connector health
+> auto-pause (`source.auto_paused` audit + Prometheus
+> `SourceAutopaused` alert), `POST /v1/admin/sources/bulk`
+> action expansion (`reindex`, `rotate-credentials`), a daily
+> tenant-usage billing webhook, and four new `MessageProbe`
+> health checks (`stale_connectors`, `dlq_growth`,
+> `embedding_model`, `tantivy_disk`). The Round-16 fast-lane
+> gates continue to cover the new surface — Round 18 adds
+> `fast-govulncheck` + `fast-openapi`.
+>
+> **Round 17** expanded the connector catalog from 28 to **36**
 > production connectors. Eight new Phase-2+ targets ship:
 > Microsoft Entra ID (Identity, Graph `$deltatoken`), Google
 > Workspace Directory (Identity, `updatedMin` filter), Microsoft
@@ -325,7 +365,7 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
 **Exit criteria.**
 
 - [x] At least 12 production connectors at GA (Phase-1 target met).
-      Round 17 expands the catalog to **36**: Phase 1 (Google
+      Round 18 expands the catalog to **42**: Phase 1 (Google
       Drive, Slack, KChat) + Phase 7 (SharePoint, OneDrive,
       Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab,
       Microsoft Teams) + Round-15 Phase-2+ adds (S3, Linear,
@@ -334,9 +374,12 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
       (Mattermost, ClickUp, Monday.com, Pipedrive, Okta, Gmail,
       RSS/Atom, Confluence Server/DC) + Round-17 Phase-2+ adds
       (Microsoft Entra ID, Google Workspace Directory, Microsoft
-      365 Outlook, Workday, BambooHR, Personio, Sitemap, Coda) =
-      **36**; each lives in `internal/connector/<name>/` with
-      `httptest`-backed unit tests.
+      365 Outlook, Workday, BambooHR, Personio, Sitemap, Coda) +
+      Round-18 Phase-2+ adds (SharePoint Server / on-prem, Azure
+      Blob, Google Cloud Storage, Egnyte, BookStack, signed-
+      upload portal) = **42**; each lives in
+      `internal/connector/<name>/` with `httptest`-backed unit
+      tests.
 - [x] Each connector has its own runbook for credential rotation,
       quota incidents, and outages — see `docs/runbooks/` (one
       Markdown file per connector keyed on the connector's auth
@@ -350,7 +393,7 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
       Phase 1 introduced — `tests/e2e/connector_smoke_test.go`
       (build tag `e2e`) drives Validate → Connect → ListNamespaces
       → ListDocuments → FetchDocument for every connector and
-      asserts the registry has exactly 36 entries.
+      asserts the registry has exactly 42 entries.
       `make test-connector-smoke`.
 - [x] Connector completeness audit (Round 15, Task 9 — extended
       in Round 16 and Round 17, Task 9):
