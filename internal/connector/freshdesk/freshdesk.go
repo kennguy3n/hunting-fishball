@@ -152,6 +152,9 @@ type docIterator struct {
 	idx  int
 	done bool
 	err  error
+	// nextPage is the 1-indexed page number sent to Freshdesk's
+	// `?page=N` parameter. Round-22 pagination fix.
+	nextPage int
 }
 
 func (it *docIterator) Next(ctx context.Context) bool {
@@ -191,7 +194,16 @@ func (it *docIterator) Err() error {
 func (it *docIterator) Close() error { return nil }
 
 func (it *docIterator) fetch(ctx context.Context) bool {
-	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/api/v2/tickets?per_page=100", nil)
+	// Round-22 pagination fix: walk Freshdesk's 1-indexed `page`
+	// parameter until we receive fewer than `per_page` records.
+	const perPage = 100
+	if it.nextPage == 0 {
+		it.nextPage = 1
+	}
+	q := url.Values{}
+	q.Set("per_page", strconv.Itoa(perPage))
+	q.Set("page", strconv.Itoa(it.nextPage))
+	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/api/v2/tickets?"+q.Encode(), nil)
 	if err != nil {
 		it.err = err
 
@@ -223,7 +235,11 @@ func (it *docIterator) fetch(ctx context.Context) bool {
 		}
 		it.page = append(it.page, ref)
 	}
-	it.done = true
+	if len(tickets) < perPage {
+		it.done = true
+	} else {
+		it.nextPage++
+	}
 
 	return true
 }

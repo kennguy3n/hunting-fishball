@@ -124,13 +124,15 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          # Round-20/21 Task 25: shared cache key prefix across
-          # all fast-lane Go jobs so any job can prime the build
-          # cache for the others.
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
+          # Round-22 fix: job-specific primary key so each job
+          # saves a *complete* cache containing the artifacts it
+          # built. The shared `go-build-` prefix is kept as a
+          # restore-key so any job can still prime a cold cache
+          # for the others on first run.
+          key: ${{ runner.os }}-go-build-check-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-check-
+            ${{ runner.os }}-go-build-
 
       - name: go mod download
         run: go mod download
@@ -163,11 +165,11 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          # Round-20/21 Task 25: shared cache key prefix.
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
+          # Round-22 fix: job-specific primary, shared restore-key.
+          key: ${{ runner.os }}-go-build-test-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-test-
+            ${{ runner.os }}-go-build-
 
       - name: go mod download
         run: go mod download
@@ -191,11 +193,11 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          # Round-20/21 Task 25: shared cache key prefix.
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
+          # Round-22 fix: job-specific primary, shared restore-key.
+          key: ${{ runner.os }}-go-build-build-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-build-
+            ${{ runner.os }}-go-build-
 
       - name: go mod download
         run: go mod download
@@ -236,14 +238,14 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          # Round-20/21 Task 25: unify cache key prefix across
-          # fast-lane jobs so any job can prime the build cache
-          # for the others. The job-specific suffix is preserved
-          # only as a restore-key fallback.
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
+          # Round-22 fix: job-specific primary so each lane
+          # saves a *complete* cache of its own artifacts; the
+          # shared `go-build-` prefix is the restore-key so any
+          # job can prime a cold cache for the others.
+          key: ${{ runner.os }}-go-build-connector-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-connector-
+            ${{ runner.os }}-go-build-
 
       - name: go mod download
         run: go mod download
@@ -281,11 +283,11 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          # Round-20/21 Task 25: shared cache key prefix.
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
+          # Round-22 fix: job-specific primary, shared restore-key.
+          key: ${{ runner.os }}-go-build-conn-integ-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-conn-integ-
+            ${{ runner.os }}-go-build-
 
       - name: go mod download
         run: go mod download
@@ -321,11 +323,11 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          # Round-20/21 Task 25: shared cache key prefix.
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
+          # Round-22 fix: job-specific primary, shared restore-key.
+          key: ${{ runner.os }}-go-build-regression-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-regression-
+            ${{ runner.os }}-go-build-
 
       - name: go mod download
         run: go mod download
@@ -528,7 +530,7 @@ jobs:
   fast-required:
     name: Required CI (fast lane)
     runs-on: ubuntu-latest
-    needs: [fast-check, fast-test, fast-build, fast-connector-unit, fast-connector-integration, fast-regression, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-openapi, fast-python]
+    needs: [detect-changes, fast-check, fast-test, fast-build, fast-connector-unit, fast-connector-integration, fast-regression, fast-lint, fast-eval, fast-alerts, fast-rollback-parity, fast-migrate-dry-run, fast-proto-check, fast-openapi, fast-python]
     if: always()
     steps:
       - name: Verify fast-lane jobs passed
@@ -541,6 +543,19 @@ jobs:
           # doesn't block PRs, and it is not listed in `needs:`
           # above so this required check doesn't wait on it. The
           # report is still surfaced in the Actions tab.
+          #
+          # Round-22 Devin Review fix: detect-changes is the
+          # upstream of every path-filtered job — if it fails or
+          # is cancelled, the downstream lanes resolve to
+          # `skipped` (because their `needs:` dependency failed),
+          # and the loop below would incorrectly let that pass.
+          # We therefore demand `detect-changes == success`
+          # explicitly before evaluating the path-filtered set.
+          dc="${{ needs.detect-changes.result }}"
+          if [ "$dc" != "success" ]; then
+            echo "::error::detect-changes job did not succeed (result=$dc); path-filtered jobs may have been masked as skipped"
+            exit 1
+          fi
           #
           # Round-20/21 Task 24: path-filtered jobs may evaluate
           # to `skipped` when a PR doesn't touch their surface.

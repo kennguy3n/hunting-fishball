@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -178,6 +179,55 @@ func TestServiceNow_DeltaSync_RateLimited(t *testing.T) {
 	_, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "incident"}, "2024-06-01 00:00:00")
 	if !errors.Is(err, connector.ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
+// TestServiceNow_ListDocuments_PaginatesAllPages verifies the
+// Round-22 pagination fix: ListDocuments must advance the
+// `sysparm_offset` cursor until the API returns fewer than
+// `sysparm_limit` records.
+func TestServiceNow_ListDocuments_PaginatesAllPages(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/now/table/incident", func(w http.ResponseWriter, r *http.Request) {
+		offset := r.URL.Query().Get("sysparm_offset")
+		switch offset {
+		case "", "0":
+			// First page: fabricate 100 result rows so the
+			// connector advances the offset to the next page.
+			var b strings.Builder
+			b.WriteString(`{"result":[`)
+			for i := 0; i < 100; i++ {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				b.WriteString(`{"sys_id":"p1-`)
+				b.WriteString(strconv.Itoa(i))
+				b.WriteString(`","sys_updated_on":"2024-06-01 00:00:00"}`)
+			}
+			b.WriteString(`]}`)
+			_, _ = io.WriteString(w, b.String())
+		case "100":
+			_, _ = io.WriteString(w, `{"result":[{"sys_id":"p2-0","sys_updated_on":"2024-06-02 00:00:00"}]}`)
+		default:
+			http.Error(w, "unexpected offset "+offset, http.StatusBadRequest)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := servicenow.New(servicenow.WithBaseURL(srv.URL), servicenow.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "incident"}, connector.ListOpts{})
+	defer func() { _ = it.Close() }()
+	n := 0
+	for it.Next(context.Background()) {
+		n++
+	}
+	if !errors.Is(it.Err(), connector.ErrEndOfPage) {
+		t.Fatalf("iter err=%v", it.Err())
+	}
+	if n != 101 {
+		t.Fatalf("expected 101 records across 2 pages, got %d", n)
 	}
 }
 

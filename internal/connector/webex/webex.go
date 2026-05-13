@@ -159,6 +159,11 @@ type docIterator struct {
 	idx  int
 	done bool
 	err  error
+	// nextPath holds the next page's path+query, parsed from the
+	// Webex `Link: <url>; rel="next"` response header. Empty
+	// before the first fetch and once the API stops emitting a
+	// next link. Round-22 pagination fix.
+	nextPath string
 }
 
 func (it *docIterator) Next(ctx context.Context) bool {
@@ -198,10 +203,16 @@ func (it *docIterator) Err() error {
 func (it *docIterator) Close() error { return nil }
 
 func (it *docIterator) fetch(ctx context.Context) bool {
-	q := url.Values{}
-	q.Set("roomId", it.conn.roomID)
-	q.Set("max", "100")
-	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/v1/messages?"+q.Encode(), nil)
+	// Round-22 pagination fix: follow the Link: <...>; rel="next"
+	// header that Webex emits on paginated message responses.
+	path := it.nextPath
+	if path == "" {
+		q := url.Values{}
+		q.Set("roomId", it.conn.roomID)
+		q.Set("max", "100")
+		path = "/v1/messages?" + q.Encode()
+	}
+	resp, err := it.o.do(ctx, it.conn, http.MethodGet, path, nil)
 	if err != nil {
 		it.err = err
 
@@ -233,9 +244,47 @@ func (it *docIterator) fetch(ctx context.Context) bool {
 		}
 		it.page = append(it.page, ref)
 	}
-	it.done = true
+	it.nextPath = parseWebexNextLink(resp.Header.Get("Link"))
+	it.done = it.nextPath == ""
 
 	return true
+}
+
+// parseWebexNextLink extracts the path+query from a Webex
+// `Link: <https://...>; rel="next"` header value. Webex returns
+// the full URL; we strip the scheme/host so the same `o.do`
+// helper can route it through the configured base URL. Round-22
+// pagination fix.
+func parseWebexNextLink(header string) string {
+	if header == "" {
+		return ""
+	}
+	for _, part := range strings.Split(header, ",") {
+		segs := strings.Split(strings.TrimSpace(part), ";")
+		if len(segs) < 2 {
+			continue
+		}
+		hasRelNext := false
+		for _, p := range segs[1:] {
+			p = strings.TrimSpace(p)
+			if p == `rel="next"` || p == "rel=next" {
+				hasRelNext = true
+
+				break
+			}
+		}
+		if !hasRelNext {
+			continue
+		}
+		raw := strings.TrimSpace(segs[0])
+		raw = strings.TrimPrefix(raw, "<")
+		raw = strings.TrimSuffix(raw, ">")
+		if u, err := url.Parse(raw); err == nil && u.Path != "" {
+			return u.RequestURI()
+		}
+	}
+
+	return ""
 }
 
 // ListDocuments enumerates Webex messages in the configured room.

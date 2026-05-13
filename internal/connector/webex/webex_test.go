@@ -175,6 +175,47 @@ func TestWebex_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+// TestWebex_ListDocuments_FollowsLinkHeader verifies the Round-22
+// pagination fix: ListDocuments must follow the
+// `Link: <next>; rel="next"` header that Webex emits on paginated
+// message responses instead of stopping after the first page.
+func TestWebex_ListDocuments_FollowsLinkHeader(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	var srvURL string
+	mux.HandleFunc("/v1/people/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("beforeMessage") {
+		case "":
+			w.Header().Set("Link", "<"+srvURL+`/v1/messages?roomId=R1&max=100&beforeMessage=m1>; rel="next"`)
+			_, _ = io.WriteString(w, `{"items":[{"id":"m1","created":"2024-06-01T00:00:00Z"}]}`)
+		case "m1":
+			_, _ = io.WriteString(w, `{"items":[{"id":"m2","created":"2024-06-02T00:00:00Z"}]}`)
+		default:
+			http.Error(w, "unexpected beforeMessage", http.StatusBadRequest)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+	c := webex.New(webex.WithBaseURL(srv.URL), webex.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "R1"}, connector.ListOpts{})
+	defer func() { _ = it.Close() }()
+	var ids []string
+	for it.Next(context.Background()) {
+		ids = append(ids, it.Doc().ID)
+	}
+	if !errors.Is(it.Err(), connector.ErrEndOfPage) {
+		t.Fatalf("iter err=%v", it.Err())
+	}
+	if len(ids) != 2 || ids[0] != "m1" || ids[1] != "m2" {
+		t.Fatalf("expected 2 IDs across 2 pages, got %v", ids)
+	}
+}
+
 func TestWebex_Registers(t *testing.T) {
 	t.Parallel()
 	if _, err := connector.GetSourceConnector(webex.Name); err != nil {

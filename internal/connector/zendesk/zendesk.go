@@ -165,6 +165,11 @@ type docIterator struct {
 	idx  int
 	done bool
 	err  error
+	// nextPath holds the next page's path+query, parsed from
+	// Zendesk's `next_page` response field (a full URL). Empty
+	// before the first fetch and again once the API signals the
+	// final page. Round-22 pagination fix.
+	nextPath string
 }
 
 func (it *docIterator) Next(ctx context.Context) bool {
@@ -204,7 +209,13 @@ func (it *docIterator) Err() error {
 func (it *docIterator) Close() error { return nil }
 
 func (it *docIterator) fetch(ctx context.Context) bool {
-	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/api/v2/tickets.json", nil)
+	// Round-22 pagination fix: follow Zendesk's `next_page` URL
+	// across pages instead of stopping after the first response.
+	path := "/api/v2/tickets.json"
+	if it.nextPath != "" {
+		path = it.nextPath
+	}
+	resp, err := it.o.do(ctx, it.conn, http.MethodGet, path, nil)
 	if err != nil {
 		it.err = err
 
@@ -222,7 +233,8 @@ func (it *docIterator) fetch(ctx context.Context) bool {
 		return false
 	}
 	var body struct {
-		Tickets []ticketEntry `json:"tickets"`
+		Tickets  []ticketEntry `json:"tickets"`
+		NextPage string        `json:"next_page"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		it.err = fmt.Errorf("zendesk: decode list: %w", err)
@@ -238,7 +250,13 @@ func (it *docIterator) fetch(ctx context.Context) bool {
 		}
 		it.page = append(it.page, ref)
 	}
-	it.done = true
+	it.nextPath = ""
+	if body.NextPage != "" {
+		if u, perr := url.Parse(body.NextPage); perr == nil && u.Path != "" {
+			it.nextPath = u.RequestURI()
+		}
+	}
+	it.done = it.nextPath == ""
 
 	return true
 }

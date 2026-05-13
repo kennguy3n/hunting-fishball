@@ -29,6 +29,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -177,6 +178,11 @@ type docIterator struct {
 	idx  int
 	done bool
 	err  error
+	// offset is the next ServiceNow `sysparm_offset` value to send.
+	// We advance by `sysparm_limit` after each successful page until
+	// the API returns fewer than that many records, at which point we
+	// mark the iterator done. Round-22 pagination fix.
+	offset int
 }
 
 func (it *docIterator) Next(ctx context.Context) bool {
@@ -216,7 +222,13 @@ func (it *docIterator) Err() error {
 func (it *docIterator) Close() error { return nil }
 
 func (it *docIterator) fetch(ctx context.Context) bool {
-	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/api/now/table/"+url.PathEscape(it.conn.table)+"?sysparm_limit=100", nil)
+	// Round-22 pagination fix: walk all pages via sysparm_offset.
+	const limit = 100
+	q := url.Values{}
+	q.Set("sysparm_limit", strconv.Itoa(limit))
+	q.Set("sysparm_offset", strconv.Itoa(it.offset))
+	path := "/api/now/table/" + url.PathEscape(it.conn.table) + "?" + q.Encode()
+	resp, err := it.o.do(ctx, it.conn, http.MethodGet, path, nil)
 	if err != nil {
 		it.err = err
 
@@ -250,7 +262,11 @@ func (it *docIterator) fetch(ctx context.Context) bool {
 		}
 		it.page = append(it.page, ref)
 	}
-	it.done = true
+	if len(body.Result) < limit {
+		it.done = true
+	} else {
+		it.offset += len(body.Result)
+	}
 
 	return true
 }

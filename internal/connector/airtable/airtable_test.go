@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/airtable"
@@ -144,12 +146,55 @@ func TestAirtable_DeltaSync_Incremental(t *testing.T) {
 	defer srv.Close()
 	c := airtable.New(airtable.WithBaseURL(srv.URL), airtable.WithHTTPClient(srv.Client()))
 	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	before := time.Now().UTC()
 	changes, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "appXYZ/Tasks"}, "2024-06-01T00:00:00Z")
 	if err != nil {
 		t.Fatalf("DeltaSync: %v", err)
 	}
-	if len(changes) != 1 || cur != "2024-06-02T00:00:00Z" {
-		t.Fatalf("changes=%v cur=%q", changes, cur)
+	if len(changes) != 1 {
+		t.Fatalf("changes=%v", changes)
+	}
+	// Cursor must advance to a wall-clock timestamp captured at the
+	// start of the call (the record payload only echoes createdTime;
+	// LAST_MODIFIED_TIME() is filter-only, not returned per record).
+	got, err := time.Parse(time.RFC3339, cur)
+	if err != nil {
+		t.Fatalf("cursor parse: %v (cur=%q)", err, cur)
+	}
+	if got.Before(before.Truncate(time.Second)) || got.After(time.Now().UTC().Add(time.Second)) {
+		t.Fatalf("cursor %q not within [%s, now]", cur, before.Format(time.RFC3339))
+	}
+}
+
+func TestAirtable_DeltaSync_PaginatesAllPages(t *testing.T) {
+	t.Parallel()
+	var calls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v0/appXYZ/Tasks", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		switch r.URL.Query().Get("offset") {
+		case "":
+			_, _ = io.WriteString(w, `{"records":[{"id":"rec1","createdTime":"2024-06-02T00:00:00Z"}],"offset":"off-2"}`)
+		case "off-2":
+			_, _ = io.WriteString(w, `{"records":[{"id":"rec2","createdTime":"2024-06-03T00:00:00Z"}]}`)
+		default:
+			http.Error(w, "unexpected offset", http.StatusBadRequest)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := airtable.New(airtable.WithBaseURL(srv.URL), airtable.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	atomic.StoreInt32(&calls, 0) // ignore the Connect() ping
+	changes, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "appXYZ/Tasks"}, "2024-06-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("expected 2 changes across 2 pages, got %d", len(changes))
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 HTTP calls (one per page), got %d", got)
 	}
 }
 

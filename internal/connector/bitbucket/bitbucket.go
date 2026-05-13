@@ -177,6 +177,11 @@ type docIterator struct {
 	idx  int
 	done bool
 	err  error
+	// nextPath holds the next page's path+query, parsed from
+	// Bitbucket's `next` response field (a full URL). Empty
+	// before the first fetch and once the API stops returning a
+	// next URL. Round-22 pagination fix.
+	nextPath string
 }
 
 func (it *docIterator) Next(ctx context.Context) bool {
@@ -216,9 +221,14 @@ func (it *docIterator) Err() error {
 func (it *docIterator) Close() error { return nil }
 
 func (it *docIterator) fetch(ctx context.Context) bool {
-	q := url.Values{}
-	q.Set("pagelen", "50")
-	resp, err := it.o.do(ctx, it.conn, http.MethodGet, "/2.0/repositories/"+url.PathEscape(it.conn.workspace)+"/"+url.PathEscape(it.conn.repo)+"/pullrequests?"+q.Encode(), nil)
+	// Round-22 pagination fix: follow Bitbucket's `next` URL.
+	path := it.nextPath
+	if path == "" {
+		q := url.Values{}
+		q.Set("pagelen", "50")
+		path = "/2.0/repositories/" + url.PathEscape(it.conn.workspace) + "/" + url.PathEscape(it.conn.repo) + "/pullrequests?" + q.Encode()
+	}
+	resp, err := it.o.do(ctx, it.conn, http.MethodGet, path, nil)
 	if err != nil {
 		it.err = err
 
@@ -250,7 +260,13 @@ func (it *docIterator) fetch(ctx context.Context) bool {
 		}
 		it.page = append(it.page, ref)
 	}
-	it.done = true
+	it.nextPath = ""
+	if body.Next != "" {
+		if u, perr := url.Parse(body.Next); perr == nil && u.Path != "" {
+			it.nextPath = u.RequestURI()
+		}
+	}
+	it.done = it.nextPath == ""
 
 	return true
 }

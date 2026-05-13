@@ -308,49 +308,66 @@ func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 
 // DeltaSync uses filterByFormula on LAST_MODIFIED_TIME() with an
 // RFC 3339 cursor. Empty cursor returns "now" without backfilling.
+// The Airtable record payload only echoes back `createdTime`; the
+// LAST_MODIFIED_TIME() in the formula is a derived field that is
+// not returned per-record. We therefore advance the cursor to the
+// wall-clock timestamp captured *before* the request fires so the
+// next sync picks up any modifications that happen during the call.
+// Iterating all pages via the `offset` continuation token before
+// committing the new cursor keeps the bootstrap contract intact.
 func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
 		return nil, "", errors.New("airtable: bad connection type")
 	}
+	now := time.Now().UTC().Format(time.RFC3339)
 	if cursor == "" {
-		return nil, time.Now().UTC().Format(time.RFC3339), nil
+		return nil, now, nil
 	}
-	cursorTime, err := time.Parse(time.RFC3339, cursor)
-	if err != nil {
+	if _, err := time.Parse(time.RFC3339, cursor); err != nil {
 		return nil, "", fmt.Errorf("airtable: bad cursor %q: %w", cursor, err)
 	}
-	q := url.Values{}
-	q.Set("filterByFormula", "IS_AFTER(LAST_MODIFIED_TIME(),'"+cursor+"')")
-	q.Set("pageSize", "100")
-	resp, err := o.do(ctx, conn, http.MethodGet, "/v0/"+url.PathEscape(conn.baseID)+"/"+url.PathEscape(conn.table)+"?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, "", fmt.Errorf("%w: airtable: status=%d", connector.ErrRateLimited, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, cursor, fmt.Errorf("airtable: delta status=%d", resp.StatusCode)
-	}
-	var body listResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, "", fmt.Errorf("airtable: decode delta: %w", err)
-	}
-	newest := cursorTime
-	var changes []connector.DocumentChange
-	for _, r := range body.Records {
-		ts, _ := time.Parse(time.RFC3339, r.CreatedTime)
-		ts = ts.UTC()
-		ref := connector.DocumentRef{NamespaceID: ns.ID, ID: r.ID, UpdatedAt: ts}
-		changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
-		if ts.After(newest) {
-			newest = ts
+	var (
+		changes []connector.DocumentChange
+		offset  string
+	)
+	for {
+		q := url.Values{}
+		q.Set("filterByFormula", "IS_AFTER(LAST_MODIFIED_TIME(),'"+cursor+"')")
+		q.Set("pageSize", "100")
+		if offset != "" {
+			q.Set("offset", offset)
 		}
+		resp, err := o.do(ctx, conn, http.MethodGet, "/v0/"+url.PathEscape(conn.baseID)+"/"+url.PathEscape(conn.table)+"?"+q.Encode(), nil)
+		if err != nil {
+			return nil, "", err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+			return nil, "", fmt.Errorf("%w: airtable: status=%d", connector.ErrRateLimited, resp.StatusCode)
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			return nil, cursor, fmt.Errorf("airtable: delta status=%d", resp.StatusCode)
+		}
+		var body listResponse
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			_ = resp.Body.Close()
+			return nil, "", fmt.Errorf("airtable: decode delta: %w", err)
+		}
+		_ = resp.Body.Close()
+		for _, r := range body.Records {
+			ts, _ := time.Parse(time.RFC3339, r.CreatedTime)
+			ref := connector.DocumentRef{NamespaceID: ns.ID, ID: r.ID, UpdatedAt: ts.UTC()}
+			changes = append(changes, connector.DocumentChange{Kind: connector.ChangeUpserted, Ref: ref})
+		}
+		if body.Offset == "" {
+			break
+		}
+		offset = body.Offset
 	}
 
-	return changes, newest.UTC().Format(time.RFC3339), nil
+	return changes, now, nil
 }
 
 func (o *Connector) do(ctx context.Context, conn *connection, method, path string, body io.Reader) (*http.Response, error) {

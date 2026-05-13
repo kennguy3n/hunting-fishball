@@ -88,13 +88,22 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
-    # Round-20 Task 22: probe Qdrant's /readyz once the HTTP
-    # listener is up. Qdrant ships /healthz (liveness, always
-    # 200) and /readyz (readiness, blocks until WAL replay
-    # finishes) — we want readiness so the api container's
-    # depends_on:condition: service_healthy actually waits.
+    # Round-22 fix: actually probe /readyz instead of just a TCP
+    # port bind. Qdrant ships /healthz (liveness, always 200) and
+    # /readyz (readiness, blocks until WAL replay completes); the
+    # previous `echo > /dev/tcp/...` check succeeded as soon as
+    # the listener bound, which let dependents (api container)
+    # query Qdrant before it was ready. The image has bash but no
+    # curl/wget/busybox, so we open a TCP socket via bash's
+    # /dev/tcp pseudo-device, send a literal HTTP/1.0 GET against
+    # /readyz, and grep the first response line for "200 OK".
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/6333'"]
+      test:
+        - "CMD-SHELL"
+        - |
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 \
+            && printf "GET /readyz HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3 \
+            && head -n1 <&3 | grep -q "200 OK"'
       interval: 5s
       timeout: 5s
       retries: 30

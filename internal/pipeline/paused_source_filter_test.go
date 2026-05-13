@@ -147,3 +147,67 @@ type FetchStageFunc func(ctx context.Context, evt IngestEvent) (*Document, error
 func (f FetchStageFunc) FetchEvent(ctx context.Context, evt IngestEvent) (*Document, error) {
 	return f(ctx, evt)
 }
+
+// TestCoordinator_PausedSourceFilter_RecordsSyncStart asserts that
+// the Stage-1 paused-source short-circuit still opens a
+// sync_history row when a backfill kickoff event arrives for a
+// paused source. This is the Round-22 Devin Review fix: previously
+// recordSyncStart was bypassed by the paused-skip continue, so the
+// admin endpoint had no visibility into the attempted run.
+func TestCoordinator_PausedSourceFilter_RecordsSyncStart(t *testing.T) {
+	t.Parallel()
+	rec := &fakeSyncHistory{}
+	bf := &blockingFetch{t: t}
+	c, err := NewCoordinator(CoordinatorConfig{
+		Fetch:              bf,
+		Parse:              stubParse{},
+		Embed:              stubEmbed{},
+		Store:              stubStore{},
+		QueueSize:          4,
+		PausedSourceFilter: pausedFilter{tenantID: "t-1", sourceID: "s-1"},
+		SyncHistory:        rec,
+		SyncRunIDGen:       func() string { return "run-paused" },
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+
+	kickoff := IngestEvent{
+		Kind:       EventReindex,
+		TenantID:   "t-1",
+		SourceID:   "s-1",
+		DocumentID: KickoffDocumentID("s-1"),
+		SyncMode:   SyncModeBackfill,
+	}
+	if err := c.Submit(ctx, kickoff); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec.mu.Lock()
+		seen := len(rec.starts)
+		rec.mu.Unlock()
+		if seen >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-errCh
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.starts) != 1 {
+		t.Fatalf("starts: %d, want 1 (paused-source kickoff must still open sync_history)", len(rec.starts))
+	}
+	if rec.starts[0].runID != "run-paused" || rec.starts[0].tenant != "t-1" || rec.starts[0].source != "s-1" {
+		t.Fatalf("start row: %+v", rec.starts[0])
+	}
+	if bf.invoked.Load() != 0 {
+		t.Fatalf("Fetch invoked %d times for paused source", bf.invoked.Load())
+	}
+}

@@ -186,6 +186,44 @@ func TestZendesk_DeltaSync_RateLimited(t *testing.T) {
 	}
 }
 
+// TestZendesk_ListDocuments_FollowsNextPage verifies the Round-22
+// pagination fix: ListDocuments must follow the `next_page` URL
+// returned by Zendesk until the API stops emitting one, instead
+// of stopping after the first page.
+func TestZendesk_ListDocuments_FollowsNextPage(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/users/me.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"user":{"id":1}}`)
+	})
+	var srvURL string
+	mux.HandleFunc("/api/v2/tickets.json", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = io.WriteString(w, `{"tickets":[{"id":2,"updated_at":"2024-06-02T00:00:00Z"}]}`)
+
+			return
+		}
+		_, _ = io.WriteString(w, `{"tickets":[{"id":1,"updated_at":"2024-06-01T00:00:00Z"}],"next_page":"`+srvURL+`/api/v2/tickets.json?page=2"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+	c := zendesk.New(zendesk.WithBaseURL(srv.URL), zendesk.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "tickets"}, connector.ListOpts{})
+	defer func() { _ = it.Close() }()
+	var ids []string
+	for it.Next(context.Background()) {
+		ids = append(ids, it.Doc().ID)
+	}
+	if !errors.Is(it.Err(), connector.ErrEndOfPage) {
+		t.Fatalf("iter err=%v", it.Err())
+	}
+	if len(ids) != 2 || ids[0] != "1" || ids[1] != "2" {
+		t.Fatalf("expected 2 IDs across 2 pages, got %v", ids)
+	}
+}
+
 func TestZendesk_Registers(t *testing.T) {
 	t.Parallel()
 	if _, err := connector.GetSourceConnector(zendesk.Name); err != nil {
