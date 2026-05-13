@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -175,6 +176,84 @@ func TestCrossEncoderReranker_TruncatesAtMaxCandidates(t *testing.T) {
 	}
 }
 
+func TestCrossEncoderReranker_TruncationDemotesTailBelowRerankedHead(t *testing.T) {
+	t.Parallel()
+	// The cross-encoder returns sigmoid-calibrated scores in [0,1]
+	// for the head. The merger feeds tail scores from a different
+	// distribution (here mid-range RRF-style values) that, prior
+	// to the fix, would leapfrog low-confidence head entries once
+	// the final sort runs.
+	scoreByID := map[string]float32{}
+	for i := 0; i < 50; i++ {
+		// Head scores deliberately spread over [0.00, 0.10] —
+		// well below any of the tail's merger scores.
+		scoreByID[headID(i)] = 0.001 + float32(i)*0.002
+	}
+	srv := &fakeRerankerServer{scoreByID: scoreByID}
+	client := newCrossEncoderClient(t, srv)
+	rer := retrieval.NewCrossEncoderReranker(retrieval.CrossEncoderConfig{
+		Client:        client,
+		MaxCandidates: 50,
+	})
+
+	matches := make([]*retrieval.Match, 0, 60)
+	for i := 0; i < 50; i++ {
+		matches = append(matches, &retrieval.Match{
+			ID:    headID(i),
+			Text:  "head",
+			Score: 0.5 + float32(i)*0.01, // pre-rerank merger scores
+		})
+	}
+	// 10 tail entries with merger scores in [1.45, 1.0] — all
+	// strictly above every reranked head score (0.001..0.099).
+	// Real callers feed matches sorted descending by merger score,
+	// so the tail's input order is its relative ranking.
+	for i := 0; i < 10; i++ {
+		matches = append(matches, &retrieval.Match{
+			ID:    tailID(i),
+			Text:  "tail",
+			Score: 1.45 - float32(i)*0.05,
+		})
+	}
+
+	out, err := rer.Rerank(context.Background(), "q", matches)
+	if err != nil {
+		t.Fatalf("Rerank: %v", err)
+	}
+	if len(out) != 60 {
+		t.Fatalf("expected 60 matches retained, got %d", len(out))
+	}
+
+	// First 50 results must be reranked head entries; last 10 must
+	// be tail entries in their pre-rerank merger order.
+	for i, m := range out {
+		switch {
+		case i < 50:
+			if got := m.ID; !isHeadID(got) {
+				t.Fatalf("position %d: expected head id, got %q (tail leapfrogged reranked head)", i, got)
+			}
+		default:
+			// Tail entries' merger order was fed descending by
+			// score (tail0 highest, tail9 lowest), so the demoted
+			// tail must preserve that order in the output.
+			wantIdx := i - 50
+			if got := m.ID; got != tailID(wantIdx) {
+				t.Fatalf("position %d: tail order broken: want %q got %q", i, tailID(wantIdx), got)
+			}
+		}
+	}
+
+	// Every reranked head must outrank every tail entry.
+	for i := 0; i < 50; i++ {
+		for j := 50; j < 60; j++ {
+			if out[i].Score <= out[j].Score {
+				t.Fatalf("head %q (Score=%v) does not outrank tail %q (Score=%v)",
+					out[i].ID, out[i].Score, out[j].ID, out[j].Score)
+			}
+		}
+	}
+}
+
 func TestCrossEncoderReranker_TopKBoundsOutput(t *testing.T) {
 	t.Parallel()
 	srv := &fakeRerankerServer{
@@ -218,6 +297,20 @@ func TestCrossEncoderEnabled_RespectsEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+// headID / tailID / isHeadID generate predictable ids for the
+// truncation regression test.
+func headID(i int) string {
+	return "h" + strconv.Itoa(i)
+}
+
+func tailID(i int) string {
+	return "t" + strconv.Itoa(i)
+}
+
+func isHeadID(id string) bool {
+	return len(id) > 0 && id[0] == 'h'
 }
 
 // recordingReranker is a tiny Reranker that bumps a counter on each

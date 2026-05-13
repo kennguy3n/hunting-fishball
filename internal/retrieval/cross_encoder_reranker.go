@@ -17,6 +17,7 @@ package retrieval
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"time"
@@ -156,10 +157,35 @@ func (c *CrossEncoderReranker) Rerank(ctx context.Context, query string, matches
 			m.Score = s
 		}
 	}
-	// The tail beyond MaxCandidates keeps its merger score so it
-	// still ranks, just behind the reranked head.
+	// Demote the tail beyond MaxCandidates below every reranked
+	// head entry. The head's Score has been overwritten with the
+	// cross-encoder score (typically a 0..1 sigmoid), while the
+	// tail still carries its merger / RRF score (different scale).
+	// Without normalisation the sort below would mix incompatible
+	// score ranges and let a tail entry leapfrog a reranked head
+	// entry, contradicting the reranker's judgement.
 	if truncated {
-		_ = matches[c.cfg.MaxCandidates:]
+		minHead := float32(math.MaxFloat32)
+		for _, m := range candidates {
+			if m == nil {
+				continue
+			}
+			if m.Score < minHead {
+				minHead = m.Score
+			}
+		}
+		tail := matches[c.cfg.MaxCandidates:]
+		const epsilon = float32(1e-6)
+		for i, m := range tail {
+			if m == nil {
+				continue
+			}
+			m.OriginalScore = m.Score
+			// Strictly below minHead and monotonically decreasing,
+			// preserving the merger-assigned relative order across
+			// the tail.
+			m.Score = minHead - epsilon*float32(i+1)
+		}
 	}
 
 	sort.SliceStable(matches, func(i, j int) bool {
