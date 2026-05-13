@@ -329,3 +329,46 @@ func TestSourceAutoPauser_ConsecutiveCounterResetsOnSuccess(t *testing.T) {
 		t.Fatalf("pauser must not fire when success resets the run, got %d", pauser.called)
 	}
 }
+
+// TestSourceAutoPauser_ConcurrentRecord_NoDataRace exercises the
+// pauser from many goroutines simultaneously. Under `go test -race`
+// this would surface any read of state.consecutiveFailures (or any
+// other state field) that happens outside the protecting mutex. It
+// guards the snapshot-under-lock fix for the consecutive_failures
+// audit metadata.
+func TestSourceAutoPauser_ConcurrentRecord_NoDataRace(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	pauser := &fakeAutoPausePauser{}
+	writer := &fakeAutoPauseAuditWriter{}
+	p, err := admin.NewSourceAutoPauser(admin.SourceAutoPauseConfig{
+		WindowDuration:              time.Minute,
+		WindowBuckets:               4,
+		ErrorRateThreshold:          0.5,
+		MinSampleSize:               4,
+		ConsecutiveFailureThreshold: 3,
+		Now:                         func() time.Time { return now },
+	}, pauser, writer)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	const workers = 8
+	const perWorker = 50
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perWorker; j++ {
+				ok := (i+j)%3 == 0 // mix of successes + failures
+				if err := p.Record(context.Background(), "t", "s", ok); err != nil {
+					t.Errorf("Record: %v", err)
+
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}

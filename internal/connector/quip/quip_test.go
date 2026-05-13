@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/quip"
@@ -158,6 +159,39 @@ func TestQuip_DeltaSync_Incremental(t *testing.T) {
 	}
 	if cur == "" {
 		t.Fatalf("cur empty")
+	}
+}
+
+// TestQuip_DeltaSync_CursorPreservesMicroseconds guards against
+// regressing the cursor format back to RFC3339 (second precision),
+// which would re-emit threads updated within the same wall-clock
+// second on every subsequent delta cycle.
+func TestQuip_DeltaSync_CursorPreservesMicroseconds(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/1/users/current", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	// Thread updated at usec=1717200000123456 — i.e. 123456
+	// microseconds past the second mark.
+	mux.HandleFunc("/1/threads/recent", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"a":{"thread":{"id":"new","updated_usec":1717200000123456}}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := quip.New(quip.WithBaseURL(srv.URL), quip.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	_, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "threads"}, "2024-05-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("DeltaSync: %v", err)
+	}
+	// Parse the returned cursor and verify it has microsecond precision.
+	parsed, err := time.Parse(time.RFC3339Nano, cur)
+	if err != nil {
+		t.Fatalf("returned cursor %q is not RFC3339Nano: %v", cur, err)
+	}
+	if got, want := parsed.UnixMicro(), int64(1717200000123456); got != want {
+		t.Fatalf("cursor lost precision: got UnixMicro=%d, want %d (cursor=%q)", got, want, cur)
 	}
 }
 

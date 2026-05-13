@@ -192,6 +192,10 @@ func (p *SourceAutoPauser) Record(ctx context.Context, tenantID, sourceID string
 	total, errs := p.windowTotalsLocked(state)
 	rateBreach := total >= int64(p.cfg.MinSampleSize) && float64(errs)/float64(total) >= p.cfg.ErrorRateThreshold
 	consecBreach := p.cfg.ConsecutiveFailureThreshold > 0 && state.consecutiveFailures >= p.cfg.ConsecutiveFailureThreshold
+	// Snapshot consecutiveFailures inside the lock so the audit
+	// metadata below cannot race with concurrent Record callers
+	// that may mutate the field after we release p.mu.
+	consecutiveFailures := state.consecutiveFailures
 	breach := rateBreach || consecBreach
 	cooled := state.lastPaused.IsZero() || now.Sub(state.lastPaused) >= p.cfg.PauseCooldown
 	// pendingPause dedups concurrent Record callers so we never
@@ -224,7 +228,7 @@ func (p *SourceAutoPauser) Record(ctx context.Context, tenantID, sourceID string
 		"observed_total":                total,
 		"observed_errors":               errs,
 		"consecutive_failure_threshold": p.cfg.ConsecutiveFailureThreshold,
-		"consecutive_failures":          state.consecutiveFailures,
+		"consecutive_failures":          consecutiveFailures,
 		"trigger":                       trigger,
 	}
 	log := audit.NewAuditLog(tenantID, "system", audit.ActionSourceAutoPaused, "source", sourceID, meta, "")

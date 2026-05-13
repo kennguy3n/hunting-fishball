@@ -321,18 +321,20 @@ func (o *Connector) Disconnect(_ context.Context, _ connector.Connection) error 
 
 // DeltaSync polls /1/threads/recent and surfaces threads with
 // `updated_usec` strictly greater than the parsed cursor. The cursor
-// is stored as an RFC3339 timestamp for cross-connector consistency.
-// Empty cursor returns "now" without backfilling (bootstrap
-// contract).
+// is stored as an RFC3339Nano timestamp so that microsecond precision
+// (matching Quip's `updated_usec` field) survives a round trip and
+// threads updated within the same wall-clock second are not re-emitted
+// on subsequent delta cycles. Empty cursor returns "now" without
+// backfilling (bootstrap contract).
 func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns connector.Namespace, cursor string) ([]connector.DocumentChange, string, error) {
 	conn, ok := c.(*connection)
 	if !ok {
 		return nil, "", errors.New("quip: bad connection type")
 	}
 	if cursor == "" {
-		return nil, time.Now().UTC().Format(time.RFC3339), nil
+		return nil, time.Now().UTC().Format(time.RFC3339Nano), nil
 	}
-	cursorTime, err := time.Parse(time.RFC3339, cursor)
+	cursorTime, err := time.Parse(time.RFC3339Nano, cursor)
 	if err != nil {
 		return nil, "", fmt.Errorf("quip: bad cursor %q: %w", cursor, err)
 	}
@@ -394,7 +396,7 @@ func (o *Connector) DeltaSync(ctx context.Context, c connector.Connection, ns co
 		maxUpdated = oldestUsec - 1
 	}
 
-	return changes, newest.UTC().Format(time.RFC3339), nil
+	return changes, newest.UTC().Format(time.RFC3339Nano), nil
 }
 
 func usecToTime(usec int64) time.Time {
