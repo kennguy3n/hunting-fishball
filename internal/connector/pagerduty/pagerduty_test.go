@@ -79,6 +79,28 @@ func TestPagerDuty_Connect_ServiceTokenFallback(t *testing.T) {
 	}
 }
 
+// TestPagerDuty_Connect_ServiceTokenFallback401 covers the General
+// Access REST API key path: PagerDuty returns 401 from /users/me when
+// the token is not bound to a user. The connector must fall back to
+// /abilities — the runbook (docs/runbooks/pagerduty.md) is the source
+// of truth on the upstream behavior and explicitly documents 401.
+func TestPagerDuty_Connect_ServiceTokenFallback401(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/abilities", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"abilities":[]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := pagerduty.New(pagerduty.WithBaseURL(srv.URL), pagerduty.WithHTTPClient(srv.Client()))
+	if _, err := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+}
+
 func TestPagerDuty_Lifecycle(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

@@ -120,10 +120,13 @@ func (o *Connector) Connect(ctx context.Context, cfg connector.ConnectorConfig) 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return nil, fmt.Errorf("%w: pagerduty: status=%d", connector.ErrRateLimited, resp.StatusCode)
 	}
-	// PagerDuty's users/me requires an API token tied to a user — service
-	// tokens hit /abilities instead. We accept either as a successful
-	// auth check.
-	if resp.StatusCode == http.StatusNotFound {
+	// PagerDuty's users/me requires an API token tied to a user.
+	// General Access REST API keys (account-scoped, service-account
+	// style) are not bound to a user and return 401 — older surfaces
+	// observed 404. We fall back to /abilities (granted to both token
+	// shapes) on either status so service-account auth keeps working.
+	// See docs/runbooks/pagerduty.md for the documented behavior.
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusUnauthorized {
 		resp2, err := o.do(ctx, conn, http.MethodGet, "/abilities", nil)
 		if err != nil {
 			return nil, err
