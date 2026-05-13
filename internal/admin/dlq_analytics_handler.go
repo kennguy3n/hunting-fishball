@@ -82,15 +82,20 @@ func (h *DLQAnalyticsHandler) Register(rg *gin.RouterGroup) {
 
 // DLQAnalyticsResponse is the JSON shape returned to callers.
 type DLQAnalyticsResponse struct {
-	TenantID     string                  `json:"tenant_id"`
-	WindowFrom   time.Time               `json:"window_from"`
-	WindowTo     time.Time               `json:"window_to"`
-	Total        int                     `json:"total"`
-	ByCategory   map[string]int          `json:"by_category"`
-	ByConnector  map[string]int          `json:"by_connector"`
-	TopErrors    []DLQAnalyticsTopError  `json:"top_errors"`
-	ByHour       []DLQAnalyticsHourPoint `json:"by_hour"`
-	ScanExceeded bool                    `json:"scan_exceeded"`
+	TenantID    string         `json:"tenant_id"`
+	WindowFrom  time.Time      `json:"window_from"`
+	WindowTo    time.Time      `json:"window_to"`
+	Total       int            `json:"total"`
+	ByCategory  map[string]int `json:"by_category"`
+	ByConnector map[string]int `json:"by_connector"`
+	// ByConnectorCategory is the Round-24 Task 11 addition: a
+	// nested connector to category to count map so on-call can
+	// answer "which connector is producing the bulk of the
+	// auto-replayable failures right now?" without a second query.
+	ByConnectorCategory map[string]map[string]int `json:"by_connector_category"`
+	TopErrors           []DLQAnalyticsTopError    `json:"top_errors"`
+	ByHour              []DLQAnalyticsHourPoint   `json:"by_hour"`
+	ScanExceeded        bool                      `json:"scan_exceeded"`
 }
 
 // DLQAnalyticsTopError is one row of the deduped error histogram.
@@ -139,11 +144,12 @@ func (h *DLQAnalyticsHandler) get(c *gin.Context) {
 	}
 
 	resp := DLQAnalyticsResponse{
-		TenantID:    tenantID,
-		WindowFrom:  from,
-		WindowTo:    now,
-		ByCategory:  map[string]int{},
-		ByConnector: map[string]int{},
+		TenantID:            tenantID,
+		WindowFrom:          from,
+		WindowTo:            now,
+		ByCategory:          map[string]int{},
+		ByConnector:         map[string]int{},
+		ByConnectorCategory: map[string]map[string]int{},
 	}
 	errCounts := map[string]int{}
 	hourBuckets := map[time.Time]int{}
@@ -160,6 +166,10 @@ func (h *DLQAnalyticsHandler) get(c *gin.Context) {
 		conn := connectorFromDLQ(r)
 		if conn != "" {
 			resp.ByConnector[conn]++
+			if resp.ByConnectorCategory[conn] == nil {
+				resp.ByConnectorCategory[conn] = map[string]int{}
+			}
+			resp.ByConnectorCategory[conn][cat]++
 		}
 		errText := truncate(r.ErrorText, 200)
 		errCounts[errText]++

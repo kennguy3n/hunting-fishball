@@ -71,6 +71,17 @@ type SourceAutoPauseConfig struct {
 	// window duration when zero.
 	PauseCooldown time.Duration
 
+	// ConsecutiveFailureThreshold is the Round-24 Task 12
+	// addition: when set to a positive value, the detector
+	// pauses a source after this many consecutive failures
+	// regardless of the sliding-window error-rate. Operators
+	// who want a fast-stop on a hard-down upstream set
+	// CONTEXT_ENGINE_SOURCE_AUTO_PAUSE_THRESHOLD to a small
+	// positive integer; the existing rate-based trigger keeps
+	// catching slow-burn degradations. Zero disables the
+	// consecutive-failure trigger entirely.
+	ConsecutiveFailureThreshold int
+
 	// Now is the wall-clock provider, swappable for tests.
 	// Defaults to time.Now when nil.
 	Now func() time.Time
@@ -97,6 +108,9 @@ type autoPauseState struct {
 	cursor     int
 	cursorTime time.Time
 	lastPaused time.Time
+	// consecutiveFailures counts the run-length of contiguous
+	// ok=false observations. Resets on the first ok=true.
+	consecutiveFailures int
 	// pendingPause guards against concurrent Record callers fanning
 	// out parallel PauseSource attempts while a pause is in flight.
 	// It is set under p.mu before the pause is attempted outside
@@ -171,9 +185,14 @@ func (p *SourceAutoPauser) Record(ctx context.Context, tenantID, sourceID string
 	b.total++
 	if !ok {
 		b.errors++
+		state.consecutiveFailures++
+	} else {
+		state.consecutiveFailures = 0
 	}
 	total, errs := p.windowTotalsLocked(state)
-	breach := total >= int64(p.cfg.MinSampleSize) && float64(errs)/float64(total) >= p.cfg.ErrorRateThreshold
+	rateBreach := total >= int64(p.cfg.MinSampleSize) && float64(errs)/float64(total) >= p.cfg.ErrorRateThreshold
+	consecBreach := p.cfg.ConsecutiveFailureThreshold > 0 && state.consecutiveFailures >= p.cfg.ConsecutiveFailureThreshold
+	breach := rateBreach || consecBreach
 	cooled := state.lastPaused.IsZero() || now.Sub(state.lastPaused) >= p.cfg.PauseCooldown
 	// pendingPause dedups concurrent Record callers so we never
 	// fan out parallel PauseSource attempts. lastPaused stays
@@ -194,12 +213,19 @@ func (p *SourceAutoPauser) Record(ctx context.Context, tenantID, sourceID string
 
 		return err
 	}
+	trigger := "error_rate"
+	if !rateBreach && consecBreach {
+		trigger = "consecutive_failures"
+	}
 	meta := audit.JSONMap{
-		"window_duration_seconds": int64(p.cfg.WindowDuration / time.Second),
-		"window_buckets":          p.cfg.WindowBuckets,
-		"error_rate_threshold":    p.cfg.ErrorRateThreshold,
-		"observed_total":          total,
-		"observed_errors":         errs,
+		"window_duration_seconds":       int64(p.cfg.WindowDuration / time.Second),
+		"window_buckets":                p.cfg.WindowBuckets,
+		"error_rate_threshold":          p.cfg.ErrorRateThreshold,
+		"observed_total":                total,
+		"observed_errors":               errs,
+		"consecutive_failure_threshold": p.cfg.ConsecutiveFailureThreshold,
+		"consecutive_failures":          state.consecutiveFailures,
+		"trigger":                       trigger,
 	}
 	log := audit.NewAuditLog(tenantID, "system", audit.ActionSourceAutoPaused, "source", sourceID, meta, "")
 	if err := p.writer.Create(ctx, log); err != nil {

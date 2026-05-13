@@ -42,6 +42,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/egnyte"
 	entraid "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/freshdesk"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/freshservice"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gcs"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
 	googleworkspace "github.com/kennguy3n/hunting-fishball/internal/connector/google_workspace"
@@ -54,8 +55,10 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/monday"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/okta"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/outlook"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/pagerduty"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/personio"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/quip"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
@@ -68,6 +71,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/webex"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/zendesk"
+	zohodesk "github.com/kennguy3n/hunting-fishball/internal/connector/zoho_desk"
 )
 
 // TestConnectorContract_SourceConnectorAssertions is a
@@ -152,6 +156,17 @@ func TestConnectorContract_SourceConnectorAssertions(t *testing.T) {
 	var _ connector.DeltaSyncer = (*intercom.Connector)(nil)
 	var _ connector.DeltaSyncer = (*webex.Connector)(nil)
 	var _ connector.DeltaSyncer = (*bitbucket.Connector)(nil)
+
+	// Round-24 Task 9 — compile-time assertions for the 4 new
+	// connectors (quip, freshservice, pagerduty, zoho_desk).
+	var _ connector.SourceConnector = (*quip.Connector)(nil)
+	var _ connector.SourceConnector = (*freshservice.Connector)(nil)
+	var _ connector.SourceConnector = (*pagerduty.Connector)(nil)
+	var _ connector.SourceConnector = (*zohodesk.Connector)(nil)
+	var _ connector.DeltaSyncer = (*quip.Connector)(nil)
+	var _ connector.DeltaSyncer = (*freshservice.Connector)(nil)
+	var _ connector.DeltaSyncer = (*pagerduty.Connector)(nil)
+	var _ connector.DeltaSyncer = (*zohodesk.Connector)(nil)
 }
 
 // TestConnectorContract_Round17_DeltaSyncerEmptyCursor exercises

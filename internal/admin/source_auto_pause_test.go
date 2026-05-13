@@ -260,3 +260,72 @@ func TestSourceAutoPauser_RejectsMissingArgs(t *testing.T) {
 		t.Fatal("expected error on empty source")
 	}
 }
+
+// TestSourceAutoPauser_PausesOnConsecutiveFailures — Round-24 Task 12.
+//
+// Asserts the consecutive-failure trigger fires before the
+// sliding-window rate ever has a chance: 3 contiguous errors with
+// threshold=3 trips the pause even though MinSampleSize=20 is far
+// above the observed total.
+func TestSourceAutoPauser_PausesOnConsecutiveFailures(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	pauser := &fakeAutoPausePauser{}
+	writer := &fakeAutoPauseAuditWriter{}
+	p, err := admin.NewSourceAutoPauser(admin.SourceAutoPauseConfig{
+		WindowDuration:              time.Minute,
+		WindowBuckets:               4,
+		ErrorRateThreshold:          0.99,
+		MinSampleSize:               20,
+		ConsecutiveFailureThreshold: 3,
+		Now:                         func() time.Time { return now },
+	}, pauser, writer)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Record(context.Background(), "t", "s", false); err != nil {
+			t.Fatalf("Record err: %v", err)
+		}
+	}
+	if pauser.called != 1 {
+		t.Fatalf("pauser must be called once on 3rd consecutive failure, got %d", pauser.called)
+	}
+	if writer.called != 1 {
+		t.Fatalf("writer must be called once, got %d", writer.called)
+	}
+	meta := writer.last.Metadata
+	if got, _ := meta["trigger"].(string); got != "consecutive_failures" {
+		t.Fatalf("audit trigger=%q, want consecutive_failures (%+v)", got, meta)
+	}
+}
+
+// TestSourceAutoPauser_ConsecutiveCounterResetsOnSuccess — a
+// success between failures must restart the run-length, so two
+// errors followed by a success followed by two more errors does
+// NOT trip the threshold=3 consecutive trigger.
+func TestSourceAutoPauser_ConsecutiveCounterResetsOnSuccess(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	pauser := &fakeAutoPausePauser{}
+	writer := &fakeAutoPauseAuditWriter{}
+	p, err := admin.NewSourceAutoPauser(admin.SourceAutoPauseConfig{
+		WindowDuration:              time.Minute,
+		WindowBuckets:               4,
+		ErrorRateThreshold:          0.99,
+		MinSampleSize:               20,
+		ConsecutiveFailureThreshold: 3,
+		Now:                         func() time.Time { return now },
+	}, pauser, writer)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	for _, ok := range []bool{false, false, true, false, false} {
+		if err := p.Record(context.Background(), "t", "s", ok); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	if pauser.called != 0 {
+		t.Fatalf("pauser must not fire when success resets the run, got %d", pauser.called)
+	}
+}

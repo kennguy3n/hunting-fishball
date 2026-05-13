@@ -231,6 +231,15 @@ type IngestEvent struct {
 	Title    string `json:"title,omitempty"`
 	MIMEType string `json:"mime_type,omitempty"`
 
+	// ContentType is the Round-24 Task 15 multimodal routing
+	// hint. Connectors that produce non-text artifacts (image
+	// attachments, audio transcripts, video thumbnails) set
+	// this so a future router can dispatch to specialised parse
+	// stages without re-sniffing the MIME. The pipeline today
+	// only reads it from logs; future image/audio parse
+	// stages will branch on it. Empty implies "text".
+	ContentType string `json:"content_type,omitempty"`
+
 	// PrivacyLabel is the channel/source privacy label the retrieval
 	// API surfaces back to clients.
 	PrivacyLabel string `json:"privacy_label,omitempty"`

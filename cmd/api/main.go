@@ -83,6 +83,7 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/egnyte"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/freshdesk"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/freshservice"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gcs"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
@@ -100,8 +101,10 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/okta"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/outlook"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/pagerduty"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/personio"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/quip"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
@@ -116,6 +119,7 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/webex"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/zendesk"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/zoho_desk"
 )
 
 func main() {

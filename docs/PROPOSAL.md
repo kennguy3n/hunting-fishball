@@ -247,14 +247,24 @@ Phase-2+ targets (additive, plug-in only):
 | Group | Connectors |
 |---|---|
 | File storage | SharePoint on-prem, Google Shared Drives, S3 / Azure Blob / GCS, Egnyte |
-| Knowledge / wiki | Confluence Server / Data Center, Coda, Bookstack |
-| Issue / project | Linear, Asana, ClickUp, Monday |
-| Chat | Microsoft Teams, Discord, Mattermost |
+| Knowledge / wiki | Confluence Server / Data Center, Coda, Bookstack, Quip |
+| Issue / project | Linear, Asana, ClickUp, Monday, Trello |
+| Chat | Microsoft Teams, Discord, Mattermost, Webex |
 | CRM | Salesforce, HubSpot, Pipedrive |
+| Support / ITSM | Zendesk, ServiceNow, Freshdesk, Freshservice, Intercom, Zoho Desk |
+| Incident | PagerDuty |
 | HR | Workday, BambooHR, Personio |
 | Identity | Okta, Entra ID, Google Workspace |
 | Email | Microsoft 365 mailboxes, Gmail (read-only knowledge ingestion) |
+| DB / lo-code | Airtable |
+| VCS | Bitbucket Cloud |
 | Generic | RSS, sitemap crawl, S3-compatible buckets, signed-upload portal |
+
+> The catalog has grown beyond the originally-proposed Phase-2+
+> table through Rounds 15-24. The live, per-connector capability
+> matrix (auth model, delta cursor, status) is maintained in
+> [`PROGRESS.md`](PROGRESS.md#connector-capability-matrix); the
+> table above reflects the post-Round-24 state.
 
 Every connector is the same shape:
 

@@ -1430,13 +1430,110 @@ paths:
         '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/WarmCacheResponse' } } } }
   /v1/admin/sources/bulk:
     post:
-      summary: Bulk source operations (pause / resume / disconnect).
+      summary: Bulk source operations (pause / resume / disconnect / reindex / rotate-credentials).
       parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/BulkSourceRequest' } } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BulkSourceResponse' } } } }
+  /v1/admin/sources/bulk-reindex:
+    post:
+      summary: Bulk re-index alias for /v1/admin/sources/bulk with action=reindex.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ source_ids ]
+              properties:
+                source_ids: { type: array, items: { type: string } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BulkSourceResponse' } } } }
+  /v1/admin/sources/bulk-rotate:
+    post:
+      summary: Bulk credential-rotate alias for /v1/admin/sources/bulk with action=rotate-credentials.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ source_ids ]
+              properties:
+                source_ids: { type: array, items: { type: string } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BulkSourceResponse' } } } }
+  /v1/admin/analytics/connector-health:
+    get:
+      summary: Per-connector-type fleet-health snapshot with a requested time-window field.
+      parameters:
+        - { $ref: '#/components/parameters/TenantHeader' }
+        - name: window
+          in: query
+          schema: { type: string, enum: [ 1h, 24h, 7d, 30d ], default: 24h }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: { type: string }
+                  window: { type: string }
+                  as_of: { type: string }
+                  summary: { type: object }
+  /v1/admin/webhooks/billing:
+    get:
+      summary: Get the current billing-usage webhook subscription for the tenant.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: { type: string }
+                  url: { type: string }
+                  created_at: { type: string }
+                  updated_at: { type: string }
+        '404': { description: No subscription registered }
+    post:
+      summary: Register or rotate the billing-usage webhook for the tenant.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ url, shared_secret ]
+              properties:
+                url: { type: string, format: uri }
+                shared_secret: { type: string, minLength: 32 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: { type: string }
+                  url: { type: string }
+                  created_at: { type: string }
+                  updated_at: { type: string }
+    delete:
+      summary: Unregister the billing-usage webhook for the tenant.
+      parameters: [ { $ref: '#/components/parameters/TenantHeader' } ]
+      responses:
+        '200': { description: OK }
   /v1/admin/latency-budget:
     get:
       summary: Get the per-tenant retrieval latency budget.

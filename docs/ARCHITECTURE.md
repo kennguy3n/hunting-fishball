@@ -688,7 +688,7 @@ hunting-fishball/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces (DeltaSyncer / WebhookReceiver /
 │   │   │                      # Provisioner), process-global registry.
-│   │   │                      # 50 connectors after Round 20/21.
+│   │   │                      # 54 connectors after Round 24.
 │   │   ├── googledrive/       # Google Drive connector (Phase 1) +
 │   │   │                      # shared_drives.go (Round 15) which
 │   │   │                      # registers google_shared_drives as a
@@ -836,13 +836,31 @@ hunting-fishball/
 │   │   │                      # messages by room via /v1/messages?
 │   │   │                      # roomId=<id> with before/max cursor
 │   │   │                      # pagination + created timestamp filter.
-│   │   └── bitbucket/         # Bitbucket Cloud (Round 20, VCS); App
-│   │                          # password basic-auth or OAuth consumer;
-│   │                          # pullrequests + issues via
-│   │                          # /2.0/repositories/<workspace>/<repo>/
-│   │                          # pullrequests; delta via
-│   │                          # q=updated_on>"<ISO8601>" + pagelen +
-│   │                          # next link pagination.
+│   │   ├── bitbucket/         # Bitbucket Cloud (Round 20, VCS); App
+│   │   │                      # password basic-auth or OAuth consumer;
+│   │   │                      # pullrequests + issues via
+│   │   │                      # /2.0/repositories/<workspace>/<repo>/
+│   │   │                      # pullrequests; delta via
+│   │   │                      # q=updated_on>"<ISO8601>" + pagelen +
+│   │   │                      # next link pagination.
+│   │   ├── quip/              # Quip (Round 24, Docs); Bearer + threads
+│   │   │                      # via /1/threads/recent; updated_usec
+│   │   │                      # microsecond cursor.
+│   │   ├── freshservice/      # Freshservice (Round 24, ITSM); API key
+│   │   │                      # basic-auth user with password "X";
+│   │   │                      # /api/v2/tickets + updated_since +
+│   │   │                      # page-based pagination matching the
+│   │   │                      # Round-22 Freshdesk Link: rel="next"
+│   │   │                      # fix.
+│   │   ├── pagerduty/         # PagerDuty (Round 24, Incident);
+│   │   │                      # Authorization: Token token=... scheme;
+│   │   │                      # /incidents + since=<ISO8601> + more /
+│   │   │                      # offset pagination.
+│   │   └── zoho_desk/         # Zoho Desk (Round 24, Support);
+│   │                          # Authorization: Zoho-oauthtoken + orgId
+│   │                          # header; /api/v1/tickets +
+│   │                          # modifiedTimeRange=<since,until> with
+│   │                          # 100/page ceiling.
 │   ├── credential/            # AES-256-GCM envelope encryption for
 │   │                          # connector credentials
 │   ├── audit/                 # AuditLog model, repository (transactional
@@ -3361,3 +3379,79 @@ runtime code or migrations; all changes are wholly within
   43 migrations on disk, the new endpoints and lane
   optimisation called out. Audit floor 41 → 49; smoke
   registry pin 42 → 50; runbook gate 42 → 50.
+
+### Tech choices added in Round 24
+
+- **Connector catalog 50 → 54 (Tasks 1-4).** Quip (Salesforce docs,
+  Bearer + `updated_usec` microsecond cursor), Freshservice
+  (Freshworks ITSM, API key basic-auth user with password `X`,
+  `updated_since=<ISO8601>` + page-based pagination matching
+  Round-22's Freshdesk `Link: rel="next"` fix), PagerDuty
+  (incident knowledge, `Authorization: Token token=...` scheme,
+  `since=<ISO8601>` + `more`/`offset` pagination), and Zoho Desk
+  (`Authorization: Zoho-oauthtoken` + `orgId` header,
+  `modifiedTimeRange=<since,until>` with 100/page ceiling). Each
+  ships full `Validate` / `Connect` / `ListNamespaces` /
+  `ListDocuments` / `FetchDocument` / `DeltaSync` httptest
+  coverage with the empty-cursor bootstrap contract, ErrRateLimited
+  429 wrap, and blank-imports in both binaries.
+
+- **DLQ analytics nested rollup (Task 11).** `GET /v1/admin/dlq/analytics`
+  gains a `by_connector_category` nested map (connector → category
+  → count) so on-call can pin both the noisy connector and its
+  dominant failure class without a second query.
+
+- **Auto-pauser consecutive-failure trigger (Task 12).**
+  `SourceAutoPauseConfig.ConsecutiveFailureThreshold` (env
+  `CONTEXT_ENGINE_SOURCE_AUTO_PAUSE_THRESHOLD`) pauses a source
+  after N consecutive failures regardless of the sliding-window
+  error-rate. The existing rate-based trigger keeps catching slow-
+  burn degradations; the new trigger is a fast-stop for hard-down
+  upstreams. The audit metadata records `trigger=consecutive_failures`
+  vs `trigger=error_rate` so the cause is visible in the audit log.
+
+- **Bulk-source alias routes (Task 13).** `POST /v1/admin/sources/bulk-reindex`
+  and `POST /v1/admin/sources/bulk-rotate` are self-documenting
+  aliases that funnel through the existing
+  `POST /v1/admin/sources/bulk` concurrency / audit pipeline.
+  Callers no longer need to know the action enum to hit the most
+  common bulk operations.
+
+- **Multimodal IngestEvent.ContentType (Task 15).** A new
+  `content_type` JSON field on `IngestEvent` lets connectors that
+  produce non-text artifacts (image attachments, audio transcripts,
+  video thumbnails) tag the event so a future multimodal router
+  can dispatch to specialised parse stages without re-sniffing the
+  MIME. `omitempty` preserves byte-level wire compatibility for
+  text events.
+
+- **Billing usage webhook (Task 24).** `POST /v1/admin/webhooks/billing`
+  (plus GET and DELETE) lets external billing systems subscribe
+  to per-tenant usage events. The endpoint enforces HTTPS, a
+  32-char minimum shared secret, audit-logs the lifecycle, and
+  exposes a `BillingWebhookStore` seam (Upsert / Get / Delete).
+  The emit path lands in a future round once the billing team has
+  the storage schema; the contract is locked so integrations can
+  proceed in parallel.
+
+- **Analytics connector-health view (Task 25).** `GET /v1/admin/analytics/connector-health`
+  surfaces the existing fleet-health aggregation behind a `window`
+  query parameter (`1h` / `24h` / `7d` / `30d`). Today the payload
+  is a point-in-time snapshot, but the response shape (`tenant_id`,
+  `window`, `as_of`, `summary`) is locked in so a future time-
+  series backend can be swapped behind it without breaking
+  portal clients.
+
+- **OpenAPI + runbook gates (Tasks 20, 22).** Four new per-
+  connector runbooks (quip / freshservice / pagerduty / zohodesk)
+  with the standard credential-rotation / quota / outage /
+  error-code sections; runbook floor 50 → 54; openapi.yaml
+  documents the new bulk-reindex / bulk-rotate / analytics
+  / webhooks-billing routes; `TestOpenAPI_RouterCoverage` passes.
+
+- **Documentation refresh (Tasks 27-30).** README is rewritten as
+  a public-facing project doc; the round-by-round status blocks
+  that had grown to look like an internal task tracker are
+  consolidated into the PROGRESS.md changelog; the Phase-2+
+  table footnote in PROPOSAL is aligned with the extended
+  catalog.

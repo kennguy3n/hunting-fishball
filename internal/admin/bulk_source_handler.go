@@ -96,9 +96,38 @@ func (h *BulkSourceHandler) WithCredRotator(r BulkSourceCredRotator) *BulkSource
 	return h
 }
 
-// Register mounts POST /v1/admin/sources/bulk.
+// Register mounts POST /v1/admin/sources/bulk and the two
+// Round-24 Task 13 single-action aliases:
+//
+//	POST /v1/admin/sources/bulk-reindex
+//	POST /v1/admin/sources/bulk-rotate
+//
+// The aliases short-circuit clients that only ever issue one
+// action and want a self-documenting route. They re-use the
+// same body shape minus the `action` field.
 func (h *BulkSourceHandler) Register(rg *gin.RouterGroup) {
 	rg.POST("/v1/admin/sources/bulk", h.bulk)
+	rg.POST("/v1/admin/sources/bulk-reindex", h.bulkActionAlias(BulkSourceActionReindex))
+	rg.POST("/v1/admin/sources/bulk-rotate", h.bulkActionAlias(BulkSourceActionRotateCreds))
+}
+
+// bulkActionAlias returns a handler that decodes the request
+// body without an `action` field, fills it in, and delegates
+// to the shared bulk pipeline so audit + concurrency semantics
+// are identical.
+func (h *BulkSourceHandler) bulkActionAlias(action BulkSourceAction) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var body struct {
+			SourceIDs []string `json:"source_ids"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+
+			return
+		}
+		c.Set("alias_bulk_request", BulkSourceRequest{Action: action, SourceIDs: body.SourceIDs})
+		h.bulk(c)
+	}
 }
 
 // BulkSourceRequest is the JSON body shape.
@@ -130,8 +159,13 @@ func (h *BulkSourceHandler) bulk(c *gin.Context) {
 		return
 	}
 	var req BulkSourceRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if v, exists := c.Get("alias_bulk_request"); exists {
+		// Alias route already decoded the body; reuse it so the
+		// shared pipeline below stays identical.
+		req = v.(BulkSourceRequest)
+	} else if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+
 		return
 	}
 	switch req.Action {
