@@ -1,9 +1,9 @@
 # hunting-fishball — Product Proposal
 
 > **Audience.** Engineering leads, design partners, and reviewers evaluating the
-> shape of the platform before code is written.
+> shape of the platform.
 >
-> **Status.** Greenfield. This document is the source of truth for the product
+> **Status.** Active. This document is the source of truth for the product
 > thesis; [`ARCHITECTURE.md`](ARCHITECTURE.md) details how it is realized;
 > [`PHASES.md`](PHASES.md) sequences delivery; [`PROGRESS.md`](PROGRESS.md)
 > tracks the actual state.

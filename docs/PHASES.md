@@ -295,13 +295,12 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
       → ListDocuments → FetchDocument for every connector and
       asserts the registry has at least 54 entries.
       `make test-connector-smoke`.
-- [x] Connector completeness audit (Round 15, Task 9 — extended
-      in Round 16, 17, 18, and 20, Task 9):
+- [x] Connector completeness audit:
       `internal/connector/audit_test.go` is a process-global
       gate that fails CI if any connector source drops
       `ErrInvalidConfig`, `ErrNotSupported`, `ErrRateLimited`,
       or `http.NewRequestWithContext`. The audited list now
-      covers all 49 first-class connectors (excluding the
+      covers all 53 first-class connectors (excluding the
       `google_shared_drives` registry wrapper which delegates
       to the googledrive connector).
 

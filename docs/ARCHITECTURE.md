@@ -2,7 +2,7 @@
 
 > **Audience.** Engineers building or operating the platform.
 >
-> **Status.** Greenfield. This document describes the *target* architecture.
+> **Status.** Active. This document describes the system architecture.
 > Tracked deliverables are in [`PHASES.md`](PHASES.md); status is in
 > [`PROGRESS.md`](PROGRESS.md).
 
@@ -147,7 +147,7 @@ The Go orchestrator owns *all* state and *all* tenancy enforcement. The
 Python services see only the data the Go orchestrator chose to send and
 the tenant-scoped headers.
 
-**Health checks (Round 12 Task 5).** Each Python sidecar registers the
+**Health checks.** Each Python sidecar registers the
 gRPC health protocol (`grpc_health.v1.Health`) at boot. Operators can
 probe each service uniformly with `grpc_health_probe -addr=:<port>`,
 matching the surface the Go process exposes via `/healthz` / `/readyz`.
@@ -265,8 +265,8 @@ g.Go(func() error { return runStore(ctx, embedCh, storeCh, qdrant, falkor, pg) }
   (graph), Tantivy (lexical), and PostgreSQL (metadata). Writes are
   batched; commits go through a transactional outbox so partial failures
   do not leave dangling state.
-- **Stage 3b: Entity extraction (gRPC → GraphRAG, optional, Round-4
-  Task 2).** When `CONTEXT_ENGINE_GRAPHRAG_ENABLED=true`, the
+- **Stage 3b: Entity extraction (gRPC → GraphRAG, optional).** When
+  `CONTEXT_ENGINE_GRAPHRAG_ENABLED=true`, the
   coordinator hooks `internal/pipeline/graphrag.go` between Embed
   and Store. The GraphRAG service in `services/graphrag/` returns
   nodes + edges extracted from the parsed blocks; the coordinator
@@ -337,44 +337,44 @@ block breaks the request's wall-clock down by backend so operators
 can identify the long pole without reaching for a trace; values are
 0 when the corresponding backend is not configured.
 
-**Bulk retrieval (Phase 8 / Task 12).** Clients populating dashboards
+**Bulk retrieval.** Clients populating dashboards
 or running multi-query experiments use `POST /v1/retrieve/batch` to
 fan out up to 32 sub-requests at once. The handler caps in-flight
 work at `max_parallel` (default 8); per-request policy and privacy
 isolation is preserved so one failed query does not fail the batch.
 Schema: see `docs/openapi.yaml` (BatchRequest / BatchResponse).
 
-**Admin surface (Phase 8 batch).** The admin handlers are grouped
+**Admin surface.** The admin handlers are grouped
 under `/v1/admin/`:
 
 - `POST /v1/admin/sources`, `GET`, `PATCH`, `DELETE`,
   `GET /v1/admin/sources/:id/health` — connector CRUD + health.
 - `GET /v1/admin/sources/:id/progress` — per-namespace sync progress
-  (`internal/admin/sync_progress_handler.go`, Task 14).
+  (`internal/admin/sync_progress_handler.go`).
 - `GET /v1/admin/dashboard` — tenant-wide health + throughput +
   P95 + per-backend availability summary
-  (`internal/admin/dashboard_handler.go`, Task 19).
+  (`internal/admin/dashboard_handler.go`).
 - `GET /v1/admin/dlq`, `GET /v1/admin/dlq/:id`,
   `POST /v1/admin/dlq/:id/replay` — dead-letter inspection + retry
-  (`internal/admin/dlq_handler.go`, Task 5).
+  (`internal/admin/dlq_handler.go`).
 - `POST /v1/admin/reindex` — re-emit Stage 2–4 events for an
   existing tenant / source / namespace
-  (`internal/admin/reindex_handler.go`, Task 7).
+  (`internal/admin/reindex_handler.go`).
 - `POST /v1/admin/policy/drafts` (+ list / get / promote / reject /
   simulate / simulate/diff / conflicts) — policy framework.
 - `DELETE /v1/admin/tenants/:tenant_id` — tenant deletion workflow.
 - `GET /v1/admin/audit` (also reachable as `/v1/audit-logs` for
   back-compat) — audit log search/filter with `action=` /
   `resource_id=` / `source_id=` / `q=` / `since=` / `until=`
-  (`internal/audit/handler.go`, Task 13).
+  (`internal/audit/handler.go`).
 
-**Public-API rate limit (Phase 8 / Task 8).** A Gin middleware on
+**Public-API rate limit.** A Gin middleware on
 the `/v1/` group enforces a per-tenant token bucket backed by Redis
 when `CONTEXT_ENGINE_API_RATE_LIMIT` is set; HTTP 429 + `Retry-After`
 on overage. Falls open on Redis failure so a transient cache outage
 does not blackhole the API.
 
-**Request ID middleware (Phase 8 / Task 20).** Every inbound request
+**Request ID middleware.** Every inbound request
 either echoes a sanitised `X-Request-ID` or has one minted as a ULID.
 The ID is bound to the gin context (`request_id`), the request
 context, the response header, and the per-request `slog` logger so
@@ -559,7 +559,7 @@ Every component emits **OpenTelemetry** traces, metrics, and logs.
 
 - **Logs.** Structured JSON; every line carries `tenant_id`, `trace_id`,
   `component`. PII is redacted at the log line by the logger middleware.
-- **Per-connector runbooks.** Operations runbooks for every Phase 7
+- **Per-connector runbooks.** Operations runbooks for every
   connector live in [`docs/runbooks/`](runbooks/) — one Markdown
   file per connector covering credential rotation, quota /
   rate-limit incidents, outage detection, and connector-specific
@@ -586,7 +586,7 @@ Dashboards are owned by SRE and stored in the platform backend's
 - **Forgetting.** Cryptographic destruction of per-tenant keys renders
   any residual snapshots unreadable.
 
-### 7.1 Webhook security (Round-4 Task 3)
+### 7.1 Webhook security
 
 Connectors that implement `WebhookReceiver` (GitHub, GitLab,
 Jira, Teams, Slack) validate the originating webhook before
@@ -613,7 +613,7 @@ returns 401 before any storage or audit side-effects. Per-
 connector unit tests cover both valid and invalid signatures
 plus replay-window edges where applicable.
 
-### 7.2 Connector credential rotation (Round-4 Task 16)
+### 7.2 Connector credential rotation
 
 `POST /v1/admin/sources/:id/rotate-credentials`
 (`internal/admin/credential_rotation.go`) accepts a new
@@ -651,13 +651,13 @@ degradation. It returns the best result set it could compute, with a
 `policy.degraded` flag and a structured `policy.applied` list explaining
 which backends contributed.
 
-Phase 8 / Task 16 ships `tests/e2e/degradation_test.go`, exercising
+`tests/e2e/degradation_test.go` ships, exercising
 the four canonical failure modes in-process (vector down, all
 backends down, slow backend exceeding the budget, and Redis cache
 down). The retrieval handler is asserted to never return a 5xx and
 to always carry `policy.degraded` for any backend that errored.
 
-**Graceful shutdown (Phase 8 / Task 10).** Both binaries trap
+**Graceful shutdown.** Both binaries trap
 `SIGTERM` / `SIGINT` and run an ordered `lifecycle.Step` sequence:
 
 - `cmd/api`: `http-server` (drain in-flight requests) → `redis` →
@@ -675,7 +675,7 @@ single hung resource doesn't block process exit.
 
 ## 9. Directory structure
 
-The code layout below is what the Phase 0 scaffolding lands. Each
+The code layout below mirrors the running system. Each
 package has a single owner contract (interface + tests) so future phases
 can grow inside the same tree without restructuring.
 
@@ -688,2770 +688,481 @@ hunting-fishball/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces (DeltaSyncer / WebhookReceiver /
 │   │   │                      # Provisioner), process-global registry.
-│   │   │                      # 54 connectors after Round 24.
-│   │   ├── googledrive/       # Google Drive connector (Phase 1) +
-│   │   │                      # shared_drives.go (Round 15) which
-│   │   │                      # registers google_shared_drives as a
-│   │   │                      # dedicated registry entry filtering
-│   │   │                      # out My Drive.
-│   │   ├── slack/             # Slack connector + Events API (Phase 1)
-│   │   ├── kchat/             # KChat internal chat (Round 15,
-│   │   │                      # Phase 1): channels/messages REST +
-│   │   │                      # /channels.changes delta cursor +
-│   │   │                      # HMAC-verified webhook handler.
-│   │   ├── sharepoint/        # SharePoint Online (Phase 7, Graph delta)
-│   │   ├── onedrive/          # OneDrive personal (Phase 7, Graph delta)
-│   │   ├── dropbox/           # Dropbox v2 (Phase 7, list_folder cursor)
-│   │   ├── box/               # Box (Phase 7, events stream)
-│   │   ├── notion/            # Notion (Phase 7, last_edited_time)
-│   │   ├── confluence/        # Confluence Cloud (Phase 7, CQL delta)
-│   │   ├── jira/              # Jira Cloud (Phase 7, JQL + webhooks)
-│   │   ├── github/            # GitHub issues / PRs (Phase 7, webhooks)
-│   │   ├── gitlab/            # GitLab issues (Phase 7, webhooks)
-│   │   ├── teams/             # Microsoft Teams (Phase 7, Graph delta +
-│   │   │                      # change notifications)
-│   │   ├── s3/                # S3-compatible object storage (Round 15);
-│   │   │                      # stdlib AWS-style SigV4 signing in
-│   │   │                      # sigv4.go — no vendor SDK.
-│   │   ├── linear/            # Linear GraphQL (Round 15);
-│   │   │                      # updatedAt > delta filter + webhooks.
-│   │   ├── asana/             # Asana tasks (Round 15); modified_since
-│   │   │                      # delta cursor.
-│   │   ├── discord/           # Discord channel messages (Round 15);
-│   │   │                      # after=snowflake delta cursor.
-│   │   ├── salesforce/        # Salesforce SOQL (Round 15);
-│   │   │                      # SystemModstamp delta filter.
-│   │   ├── hubspot/           # HubSpot CRM v3 (Round 15);
-│   │   │                      # hs_lastmodifieddate search delta.
-│   │   ├── mattermost/        # Mattermost chat (Round 16);
-│   │   │                      # since=<ms-epoch> delta on
-│   │   │                      # /channels/<id>/posts.
-│   │   ├── clickup/           # ClickUp v2 REST (Round 16);
-│   │   │                      # date_updated_gt delta on /list/<id>/task.
-│   │   ├── monday/            # Monday.com GraphQL (Round 16);
-│   │   │                      # __last_updated__ column delta;
-│   │   │                      # wraps the HTTP-200
-│   │   │                      # ComplexityException envelope to
-│   │   │                      # connector.ErrRateLimited.
-│   │   ├── pipedrive/         # Pipedrive REST v1 (Round 16);
-│   │   │                      # /recents?since_timestamp delta.
-│   │   ├── okta/              # Okta Management API (Round 16);
-│   │   │                      # filter=lastUpdated gt delta;
-│   │   │                      # DEPROVISIONED → ChangeDeleted.
-│   │   ├── gmail/             # Gmail REST (Round 16); read-only
-│   │   │                      # ingestion via history.list
-│   │   │                      # historyId cursor.
-│   │   ├── rss/               # Generic RSS / Atom (Round 16);
-│   │   │                      # max pubDate / updated cursor.
-│   │   ├── confluence_server/ # Confluence Server / DC (Round 16);
-│   │   │                      # PAT or basic auth; CQL
-│   │   │                      # lastModified > "<RFC3339>" delta.
-│   │   ├── entra_id/          # Microsoft Entra ID (Round 17, Identity);
-│   │   │                      # Graph delta tokens on /users/delta +
-│   │   │                      # /groups/delta; @removed and
-│   │   │                      # accountEnabled=false → ChangeDeleted.
-│   │   ├── google_workspace/  # Google Workspace Directory (Round 17,
-│   │   │                      # Identity); Admin SDK users + groups;
-│   │   │                      # updatedMin RFC3339 delta; suspended=true
-│   │   │                      # → ChangeDeleted.
-│   │   ├── outlook/           # Microsoft 365 Outlook mailboxes (Round 17,
-│   │   │                      # Email); Graph @odata.deltaLink rotation
-│   │   │                      # on /messages/delta.
-│   │   ├── workday/           # Workday REST (Round 17, HR);
-│   │   │                      # Updated_From RFC3339 filter on /workers;
-│   │   │                      # active=false → ChangeDeleted.
-│   │   ├── bamboohr/          # BambooHR (Round 17, HR); basic-auth
-│   │   │                      # with api_key as username and "x" as
-│   │   │                      # password; /v1/employees/changed?since
-│   │   │                      # ISO8601 delta; action="Deleted" →
-│   │   │                      # ChangeDeleted.
-│   │   ├── personio/          # Personio (Round 17, HR); OAuth 2.0
-│   │   │                      # client-credentials grant + updated_from
-│   │   │                      # RFC3339 delta; status="inactive" →
-│   │   │                      # ChangeDeleted.
-│   │   ├── sitemap/           # sitemap.xml crawl (Round 17, Generic);
-│   │   │                      # XML decoder follows <sitemapindex>
-│   │   │                      # shards bounded by maxDepth to avoid
-│   │   │                      # cycles; multi-format <lastmod> parser.
-│   │   ├── coda/              # Coda (Round 17, Knowledge);
-│   │   │                      # sortBy=updatedAt&direction=DESC walk
-│   │   │                      # with pageToken pagination.
-│   │   ├── sharepoint_onprem/ # SharePoint Server / on-prem (Round 18,
-│   │   │                      # ECM); NTLM / app-password REST against
-│   │   │                      # /_api/web/lists; Modified-cursor delta.
-│   │   ├── azure_blob/        # Azure Blob Storage (Round 18, Storage);
-│   │   │                      # SAS / shared-key signed REST,
-│   │   │                      # x-ms-blob-last-modified cursor.
-│   │   ├── gcs/               # Google Cloud Storage (Round 18,
-│   │   │                      # Storage); OAuth bearer + JSON API
-│   │   │                      # storage.googleapis.com/storage/v1/b/<bucket>/o
-│   │   │                      # walk with timeCreated/updated filter.
-│   │   ├── egnyte/            # Egnyte (Round 18, ECM); OAuth +
-│   │   │                      # /pubapi/v1/fs/<path> + events cursor
-│   │   │                      # delta at /pubapi/v2/events/cursor.
-│   │   ├── bookstack/         # BookStack wiki (Round 18, Knowledge);
-│   │   │                      # Token-ID + Token-Secret header on
-│   │   │                      # /api/pages with updated_at filter/sort.
-│   │   ├── upload_portal/     # Signed-upload portal (Round 18, Receiver);
-│   │   │                      # HMAC-verified multipart receiver
-│   │   │                      # implementing WebhookReceiver, emitting
-│   │   │                      # SourceDocument events into Kafka.
-│   │   ├── zendesk/           # Zendesk Support (Round 20, Support);
-│   │   │                      # API token / OAuth bearer against
-│   │   │                      # {subdomain}.zendesk.com/api/v2; tickets
-│   │   │                      # + Help Center articles; incremental
-│   │   │                      # export at /api/v2/incremental/tickets
-│   │   │                      # .json?start_time=<unix> with
-│   │   │                      # Retry-After honoured on 429.
-│   │   ├── servicenow/        # ServiceNow Table API (Round 20, ITSM);
-│   │   │                      # basic/OAuth against
-│   │   │                      # {instance}.service-now.com; incident /
-│   │   │                      # change / kb_knowledge via
-│   │   │                      # /api/now/table/<table>; delta via
-│   │   │                      # sysparm_query=sys_updated_on>javascript:
-│   │   │                      # gs.dateGenerate(...) with sysparm_offset
-│   │   │                      # page walk.
-│   │   ├── freshdesk/         # Freshdesk REST v2 (Round 20, Support);
-│   │   │                      # API key as basic-auth user (password
-│   │   │                      # "X", same pattern as BambooHR); tickets
-│   │   │                      # via /api/v2/tickets?updated_since=
-│   │   │                      # <ISO8601>&page=<n>.
-│   │   ├── airtable/          # Airtable REST (Round 20, DB); Bearer
-│   │   │                      # PAT/OAuth against /v0/<baseId>/
-│   │   │                      # <tableIdOrName>; delta via
-│   │   │                      # filterByFormula=LAST_MODIFIED_TIME()>
-│   │   │                      # '<ISO8601>' + offset continuation.
-│   │   ├── trello/            # Trello REST (Round 20, PM); API key +
-│   │   │                      # token query params; cards by board
-│   │   │                      # via /1/boards/<id>/cards; delta via
-│   │   │                      # /1/boards/<id>/actions?since=
-│   │   │                      # <ISO8601> with before cursor.
-│   │   ├── intercom/          # Intercom REST v2 (Round 20, Support);
-│   │   │                      # Bearer token; conversations +
-│   │   │                      # articles; delta via POST
-│   │   │                      # /conversations/search with
-│   │   │                      # updated_at > <unix>.
-│   │   ├── webex/             # Webex Messages (Round 20, Chat);
-│   │   │                      # Bearer Bot or Integration OAuth;
-│   │   │                      # messages by room via /v1/messages?
-│   │   │                      # roomId=<id> with before/max cursor
-│   │   │                      # pagination + created timestamp filter.
-│   │   ├── bitbucket/         # Bitbucket Cloud (Round 20, VCS); App
-│   │   │                      # password basic-auth or OAuth consumer;
-│   │   │                      # pullrequests + issues via
-│   │   │                      # /2.0/repositories/<workspace>/<repo>/
-│   │   │                      # pullrequests; delta via
-│   │   │                      # q=updated_on>"<ISO8601>" + pagelen +
-│   │   │                      # next link pagination.
-│   │   ├── quip/              # Quip (Round 24, Docs); Bearer + threads
-│   │   │                      # via /1/threads/recent; updated_usec
-│   │   │                      # microsecond cursor.
-│   │   ├── freshservice/      # Freshservice (Round 24, ITSM); API key
-│   │   │                      # basic-auth user with password "X";
-│   │   │                      # /api/v2/tickets + updated_since +
-│   │   │                      # page-based pagination matching the
-│   │   │                      # Round-22 Freshdesk Link: rel="next"
-│   │   │                      # fix.
-│   │   ├── pagerduty/         # PagerDuty (Round 24, Incident);
-│   │   │                      # Authorization: Token token=... scheme;
-│   │   │                      # /incidents + since=<ISO8601> + more /
-│   │   │                      # offset pagination.
-│   │   └── zoho_desk/         # Zoho Desk (Round 24, Support);
-│   │                          # Authorization: Zoho-oauthtoken + orgId
-│   │                          # header; /api/v1/tickets +
-│   │                          # modifiedTimeRange=<since,until> with
-│   │                          # 100/page ceiling.
-│   ├── credential/            # AES-256-GCM envelope encryption for
-│   │                          # connector credentials
-│   ├── audit/                 # AuditLog model, repository (transactional
-│   │                          # outbox), Kafka outbox poller, Gin handler
-│   ├── admin/                 # Phase 2: source-management API
-│   │                          # (handler / repo / model), per-source
-│   │                          # Redis token-bucket rate limiter,
-│   │                          # source-health tracker, forget-on-
-│   │                          # removal worker. Phase 4 added
-│   │                          # simulator_handler.go which mounts
-│   │                          # /v1/admin/policy/{drafts,simulate,
-│   │                          # conflicts}
-│   ├── policy/                # Phase 4: privacy modes
-│   │                          # (privacy_mode.go), allow / deny ACLs
-│   │                          # (acl.go), recipient policy
-│   │                          # (recipient.go) — wired into
-│   │                          # internal/retrieval via
-│   │                          # policy_snapshot.go. Phase 4
-│   │                          # simulator: snapshot.go (port +
-│   │                          # PolicySnapshot.Clone), simulator.go
-│   │                          # (what-if), simulator_diff.go
-│   │                          # (data-flow diff), simulator_conflict.go
-│   │                          # (conflict detection), draft.go +
-│   │                          # promotion.go (audited promotion FSM,
-│   │                          # AuditWriter.CreateInTx so the audit
-│   │                          # row rides the outer tx),
-│   │                          # live_store.go (transactional GORM
-│   │                          # writes to migrations/004_policy.sql
-│   │                          # tables) + live_resolver.go (the read
-│   │                          # counterpart used by both retrieval
-│   │                          # and the simulator)
-│   ├── pipeline/              # 4-stage pipeline (Phase 1):
-│   │                          # consumer / coordinator / fetch / parse
-│   │                          # / embed / store. Phase 2 added
-│   │                          # producer.go (per-tenant partition-key
-│   │                          # routing) + backfill.go (paced
-│   │                          # initial sync, IngestEvent.SyncMode)
-│   ├── retrieval/             # POST /v1/retrieve handler (Phase 1)
-│   │                          # + parallel fan-out merger / reranker
-│   │                          # / policy filter (Phase 3:
-│   │                          # merger.go, reranker.go,
-│   │                          # storage_adapter.go) + Phase 4 policy
-│   │                          # snapshot resolver (policy_snapshot.go)
-│   │                          # + Phase 4 privacy strip enrichment
-│   │                          # (privacy_strip.go)
-│   ├── storage/               # Qdrant + Postgres storage clients
-│   │                          # (Phase 1) + BM25 (tantivy.go),
-│   │                          # FalkorDB (falkordb.go), Redis
-│   │                          # semantic cache (redis_cache.go)
-│   │                          # (Phase 3)
-│   ├── shard/                 # Phase 5: shard manifest API
-│   │                          # (handler.go, repository.go),
-│   │                          # generation worker (generator.go),
-│   │                          # delta protocol (delta.go),
-│   │                          # cryptographic-forgetting orchestrator
-│   │                          # (forget.go), client contract
-│   │                          # (contract.go) shared by iOS / Android /
-│   │                          # desktop on-device runtimes, coverage
-│   │                          # endpoint (handler.go::coverage),
-│   │                          # GORM-backed CoverageRepo
-│   │                          # (coverage_repo.go), version-lookup
-│   │                          # adapter for the device-first hint
-│   │                          # (version_lookup.go), and per-tier
-│   │                          # eviction policy (eviction.go)
-│   ├── models/                # Phase 5 / Task 13: model catalog.
-│   │                          # ModelEntry / ModelCatalog / Provider /
-│   │                          # StaticProvider (catalog.go) and
-│   │                          # GET /v1/models/catalog (handler.go)
-│   ├── b2c/                   # Phase 6 / Tasks 14 + 17: B2C client SDK
-│   │                          # bootstrap. Mounts /v1/health,
-│   │                          # /v1/capabilities, and
-│   │                          # /v1/sync/schedule (handler.go)
-│   ├── observability/         # Phase 8: OpenTelemetry tracing
-│   │                          # helper + attribute-key constants
-│   │                          # (tracing.go); used by the pipeline
-│   │                          # coordinator and the retrieval
-│   │                          # fan-out. Plus Prometheus collectors
-│   │                          # (metrics.go) and a Gin middleware
-│   │                          # (middleware.go) scraped at /metrics
-│   │                          # on cmd/api and cmd/ingest. Phase 6 /
-│   │                          # Phase 8 structured JSON logging:
-│   │                          # logger.go wraps log/slog with a
-│   │                          # tenant_id + trace_id JSON handler;
-│   │                          # GinLoggerMiddleware injects the
-│   │                          # request-scoped logger from the
-│   │                          # W3C traceparent + tenant context
-│   ├── grpcpool/              # Phase 8: round-robin gRPC connection
-│   │                          # pool with per-call deadline +
-│   │                          # circuit breaker (closed → open →
-│   │                          # half-open) for the Python sidecars
-│   ├── lifecycle/             # Phase 8 / Task 10: ordered shutdown
-│   │                          # runner. Step.Add() / Run() with a
-│   │                          # configurable deadline; used by
-│   │                          # cmd/api and cmd/ingest to drain
-│   │                          # in-flight work before closing
-│   │                          # Postgres / Redis / Kafka.
-│   ├── config/                # Phase 8 / Task 11: startup config
-│   │                          # validation (validate.go). Aggregates
-│   │                          # required-env + URL format errors
-│   │                          # into a single ConfigError. ValidateAPI
-│   │                          # / ValidateIngest run before any
-│   │                          # gorm.Open / redis.NewClient call.
-│   ├── migrate/               # Phase 8 / Task 18: SQL migration
-│   │                          # runner (runner.go). Reads
-│   │                          # migrations/NNN_name.sql in order,
-│   │                          # tracks applied migrations in the
-│   │                          # schema_migrations table, supports
-│   │                          # DryRun. Wired behind AUTO_MIGRATE.
-│   ├── eval/                  # Round-4 Task 1: retrieval evaluation
-│   │                          # harness (suite + metrics + runner +
-│   │                          # admin handler) — see §4.5
-│   ├── errors/                # Round-4 Task 7: structured error
-│   │                          # catalog (typed codes + Gin
-│   │                          # middleware that maps Go errors to
-│   │                          # the wire JSON shape)
-│   ├── policy/                # see Phase 4 entry above; Phase 6 /
-│   │                          # Task 15 added device_first.go
-│   │                          # (Decide → prefer_local hint) consumed
-│   │                          # by internal/retrieval/handler.go;
-│   │                          # live_resolver.go now reads
-│   │                          # channel_policies.deny_local_retrieval
-│   │                          # so the channel_disallowed reason
-│   │                          # round-trips end-to-end
-│   ├── pipeline/              # see Phase 1 entry above; Phase 8 /
-│   │                          # Task E15 added dlq_observer.go
-│   │                          # (DLQ consumer → Prometheus counter
-│   │                          # context_engine_dlq_messages_total +
-│   │                          # structured per-envelope logging)
-│   ├── util/                  # internal helper packages shared by
-│   │                          # the admin + audit handlers. Round-12
-│   │                          # carved `util/strutil` (cursor /
-│   │                          # pagination helpers) out of the
-│   │                          # `internal/admin/pagination.go` and
-│   │                          # `internal/audit/handler.go` call
-│   │                          # sites so both packages decode the
-│   │                          # same opaque cursor envelope.
-│   └── admin/                 # see Phase 2 / 4 entries. Phase 5 /
-│                              # Task E16 added tenant_delete.go:
-│                              # 5-step TenantDeleter workflow + the
-│                              # DELETE /v1/admin/tenants/:tenant_id
-│                              # endpoint backed by
-│                              # migrations/008_tenant_status.sql.
-│                              # Phase 8 / Task 5 added dlq_handler.go
-│                              # (GET /v1/admin/dlq + replay), Task 7
-│                              # added reindex_handler.go
-│                              # (POST /v1/admin/reindex), Task 8 added
-│                              # api_ratelimit.go (per-tenant Redis
-│                              # token bucket on the /v1/ group),
-│                              # Task 14 added sync_progress.go +
-│                              # sync_progress_handler.go
-│                              # (GET /v1/admin/sources/:id/progress),
-│                              # Task 19 added dashboard_handler.go
-│                              # (GET /v1/admin/dashboard).
+│   │   │                      # 54 production connectors.
+│   │   ├── googledrive/       # Google Drive — change-tokens delta
+│   │   ├── slack/             # Slack — Events API + RTM history
+│   │   ├── kchat/             # KChat internal chat — channels.changes delta + webhook
+│   │   ├── sharepoint/        # SharePoint Online — Graph $delta
+│   │   ├── onedrive/          # OneDrive personal — Graph $delta
+│   │   ├── dropbox/           # Dropbox v2 — list_folder cursor
+│   │   ├── box/               # Box — events stream
+│   │   ├── notion/            # Notion — last_edited_time
+│   │   ├── confluence/        # Confluence Cloud — CQL delta
+│   │   ├── jira/              # Jira Cloud — JQL + webhooks
+│   │   ├── github/            # GitHub issues / PRs — webhooks
+│   │   ├── gitlab/            # GitLab issues — webhooks
+│   │   ├── teams/             # Microsoft Teams — Graph $delta + change notifications
+│   │   ├── s3/                # S3-compatible object storage — stdlib SigV4
+│   │   ├── linear/            # Linear GraphQL — updatedAt filter + webhooks
+│   │   ├── asana/             # Asana tasks — modified_since
+│   │   ├── discord/           # Discord channel messages — snowflake cursor
+│   │   ├── salesforce/        # Salesforce SOQL — SystemModstamp filter
+│   │   ├── hubspot/           # HubSpot CRM v3 — hs_lastmodifieddate search
+│   │   ├── mattermost/        # Mattermost chat — since=<ms-epoch>
+│   │   ├── clickup/           # ClickUp v2 REST — date_updated_gt
+│   │   ├── monday/            # Monday.com GraphQL — __last_updated__
+│   │   ├── pipedrive/         # Pipedrive REST v1 — /recents?since_timestamp
+│   │   ├── okta/              # Okta Management API — lastUpdated filter
+│   │   ├── gmail/             # Gmail REST — history.list historyId cursor
+│   │   ├── rss/               # Generic RSS / Atom — max pubDate cursor
+│   │   ├── confluence_server/ # Confluence Server / Data Center — CQL lastModified
+│   │   ├── entra_id/          # Microsoft Entra ID — Graph $deltatoken
+│   │   ├── google_workspace/  # Google Workspace Directory — updatedMin filter
+│   │   ├── outlook/           # Microsoft 365 Outlook — Graph @odata.deltaLink
+│   │   ├── workday/           # Workday REST — Updated_From filter
+│   │   ├── bamboohr/          # BambooHR — /employees/changed?since
+│   │   ├── personio/          # Personio — OAuth client-credentials + updated_from
+│   │   ├── sitemap/           # sitemap.xml crawl — multi-format <lastmod>
+│   │   ├── coda/              # Coda — pageToken walk
+│   │   ├── sharepoint_onprem/ # SharePoint Server / on-prem — REST + Modified cursor
+│   │   ├── azure_blob/        # Azure Blob Storage — SAS / shared-key, blob-last-modified
+│   │   ├── gcs/               # Google Cloud Storage — JSON API + timeCreated/updated
+│   │   ├── egnyte/            # Egnyte — events cursor delta
+│   │   ├── bookstack/         # BookStack wiki — /api/pages updated_at sort
+│   │   ├── upload_portal/     # Signed-upload portal — HMAC-verified multipart WebhookReceiver
+│   │   ├── zendesk/           # Zendesk Support — incremental ticket export
+│   │   ├── servicenow/        # ServiceNow Table API — sys_updated_on cursor
+│   │   ├── freshdesk/         # Freshdesk REST v2 — updated_since
+│   │   ├── airtable/          # Airtable REST — LAST_MODIFIED_TIME() filter
+│   │   ├── trello/            # Trello REST — actions since cursor
+│   │   ├── intercom/          # Intercom REST v2 — conversations search
+│   │   ├── webex/             # Webex Messages — before/max cursor
+│   │   ├── bitbucket/         # Bitbucket Cloud — updated_on cursor
+│   │   ├── quip/              # Quip — updated_usec microsecond cursor
+│   │   ├── freshservice/      # Freshservice — updated_since + page-based
+│   │   ├── pagerduty/         # PagerDuty — since=<ISO8601> + more/offset
+│   │   └── zoho_desk/         # Zoho Desk — modifiedTimeRange + orgId header
+│   ├── credential/            # AES-256-GCM envelope encryption for connector creds
+│   ├── audit/                 # AuditLog model, transactional outbox, Kafka poller, Gin handler
+│   ├── admin/                 # source-management API, simulator, DLQ, reindex, sync-progress,
+│   │                          # per-tenant API ratelimit, tenant-deletion workflow,
+│   │                          # connector-health + analytics handlers
+│   ├── policy/                # privacy modes / ACLs / recipient policy, simulator (snapshot,
+│   │                          # diff, conflict, draft FSM, audited promotion), GORM live
+│   │                          # store + resolver, device-first hint
+│   ├── pipeline/              # 4-stage pipeline (Fetch → Parse → Embed → Store) with
+│   │                          # producer / consumer / coordinator, dedup, priority buffer,
+│   │                          # per-stage breakers, retention worker, reindex orchestrator,
+│   │                          # DLQ observer
+│   ├── retrieval/             # POST /v1/retrieve fan-out (vector + BM25 + graph + memory),
+│   │                          # RRF merger, reranker, semantic cache, policy snapshot
+│   │                          # resolver, privacy-strip enrichment, batch / explain / stream
+│   ├── storage/               # Qdrant, Postgres, Tantivy (BM25 via bleve), FalkorDB,
+│   │                          # Redis semantic cache, content-hash dedup
+│   ├── shard/                 # shard manifest API + delta protocol + cryptographic-forgetting
+│   │                          # orchestrator + GORM coverage repo + per-tier eviction
+│   ├── models/                # model catalog (ModelEntry / Provider) + GET /v1/models/catalog
+│   ├── b2c/                   # B2C client SDK bootstrap (/v1/health, /v1/capabilities,
+│   │                          # /v1/sync/schedule)
+│   ├── observability/         # OpenTelemetry tracing, Prometheus collectors, Gin middleware,
+│   │                          # structured slog logger with W3C traceparent + tenant context
+│   ├── grpcpool/              # round-robin gRPC pool with per-call deadlines + circuit breaker
+│   ├── lifecycle/             # ordered Step.Add() shutdown runner with deadline budget
+│   ├── config/                # startup env validation (ConfigError aggregator)
+│   ├── migrate/               # SQL migration runner (schema_migrations + DryRun)
+│   ├── eval/                  # retrieval evaluation harness (Precision@K / Recall@K / MRR / NDCG)
+│   ├── errors/                # structured error catalog + Gin middleware → wire JSON
+│   └── util/                  # internal helpers (e.g. util/strutil cursor / pagination)
 ├── proto/
 │   ├── docling/v1/            # Python Docling parsing service
 │   ├── embedding/v1/          # Python embedding service
-│   ├── graphrag/v1/           # Round-4 Task 2: GraphRAG entity
-│   │                          # extraction (ExtractEntities RPC,
-│   │                          # nodes + edges, Stage 3b)
+│   ├── graphrag/v1/           # GraphRAG entity extraction (Stage 3b)
 │   └── memory/v1/             # Mem0 persistent memory service
-├── services/                  # Python ML microservices (Phase 3)
+├── services/                  # Python ML microservices (gRPC)
 │   ├── _proto/                # generated Python gRPC stubs
 │   ├── docling/               # Docling gRPC server + Dockerfile
 │   ├── embedding/             # sentence-transformers gRPC server
-│   ├── graphrag/              # Round-4 Task 2: GraphRAG gRPC server
-│   │                          # (entity + relation extraction)
+│   ├── graphrag/              # GraphRAG entity + relation extraction
 │   ├── memory/                # Mem0 gRPC server + Dockerfile
 │   └── gen_protos.sh          # regenerates _proto/ from proto/
 ├── pkg/                       # public shared types (reserved)
-├── migrations/
-│   ├── 001_audit_log.sql      # audit_logs table + indexes
-│   ├── 002_sources.sql        # Phase 2 sources table + indexes
-│   ├── 003_source_health.sql  # Phase 2 source_health table
-│   ├── 004_policy.sql         # Phase 4 tenant_policies +
-│   │                          # channel_policies + policy_acl_rules
-│   │                          # + recipient_policies tables
-│   ├── 005_policy_drafts.sql  # Phase 4 policy_drafts table
-│   │                          # (JSONB payload + status FSM)
-│   ├── 006_shards.sql         # Phase 5 shards table (manifest +
-│   │                          # version + chunk_count + status)
-│   ├── 007_channel_deny_local.sql  # Phase 5 / 6: adds
-│   │                          # channel_policies.deny_local_retrieval
-│   │                          # — wires the channel_disallowed reason
-│   │                          # in policy.device_first.go
-│   ├── 008_tenant_status.sql  # Phase 5 / Task E16: tenants table
-│   │                          # with tenant_status column for the
-│   │                          # 5-step TenantDeleter workflow
-│   ├── 009_dlq_messages.sql   # Phase 8 / Task 5: dlq_messages
-│   │                          # table for the DLQ admin surface
-│   ├── 010_retention_policy.sql # Phase 8 / Task 6: retention_rules
-│   │                          # table backing the RetentionPolicy
-│   │                          # layered tenant/source/namespace scope
-│   ├── 011_varchar_ids.sql    # Round-4 Task 0: revert CHAR(N) to
-│   │                          # VARCHAR(N) so wildcard sentinels
-│   │                          # don't blank-pad on read
-│   ├── 012_eval_suites.sql    # Round-4 Task 1: eval_suites table
-│   │                          # for the retrieval evaluation harness
-│   ├── 013_sync_schedules.sql # Round-4 Task 5: sync_schedules
-│   │                          # table powering the cron scheduler
-│   ├── 014_tenant_usage.sql   # Round-4 Task 17: tenant_usage
-│   │                          # daily rollup table
-│   ├── 015..037_*.sql         # Rounds 5-13 admin / pipeline /
-│   │                          # retrieval surface: query analytics +
-│   │                          # source (033), pinned results,
-│   │                          # connector templates, synonyms,
-│   │                          # notification delivery log, latency
-│   │                          # + chunk-quality + cache-config,
-│   │                          # sync history + schedules, audit
-│   │                          # retention, slow query analytics,
-│   │                          # api_keys (037)
-│   ├── 038_slow_queries.sql   # Round-14 Task 3: persisted slow
-│   │                          # retrievals (tenant_id, latency_ms,
-│   │                          # created_at indexes)
-│   ├── 039_tenant_payload_limits.sql # Round-14 Task 8: per-tenant
-│   │                          # payload-cap overrides for the
-│   │                          # observability/payload_limiter.go
-│   │                          # TenantOverride callback
-│   ├── 040_dlq_category.sql   # Round-14 Task 14: category column
-│   │                          # (transient | permanent | unknown)
-│   │                          # for dlq_messages; auto-replayer
-│   │                          # skips permanent rows
-│   └── rollback/              # Round-4 Task 20: per-migration
-│                              # *.down.sql, applied via
-│                              # `make migrate-rollback`. Parity
-│                              # with the forward set is enforced
-│                              # by `migrations/migration_order_test.go`
-│                              # (Round-11 Task 14) and
-│                              # `rollback/rollback_test.go`.
+├── migrations/                # 43 versioned SQL migrations (audit_log, sources, source_health,
+│   │                          # policy, policy_drafts, shards, channel_deny_local,
+│   │                          # tenant_status, dlq_messages, retention_policy, eval_suites,
+│   │                          # sync_schedules, tenant_usage, query analytics, pinned results,
+│   │                          # connector templates, synonyms, notifications, latency /
+│   │                          # chunk-quality / cache-config, sync history, audit retention,
+│   │                          # slow queries, payload limits, DLQ category, chunk_embedding_version,
+│   │                          # document_content_type, connector_sync_cursors).
+│   └── rollback/              # per-migration *.down.sql; parity enforced by migration_order_test.go
 ├── tests/
-│   ├── e2e/                   # docker-compose smoke test
-│   │                          # (build tag: //go:build e2e)
-│   ├── integration/           # Go ↔ Python gRPC integration tests
-│   │                          # (build tag: //go:build integration)
+│   ├── e2e/                   # docker-compose smoke tests (build tag `e2e`)
+│   ├── integration/           # Go ↔ Python gRPC integration tests (build tag `integration`)
 │   ├── benchmark/             # pipeline + retrieval benchmarks
-│   ├── regression/            # Round-4 Task 15: PR #12 regression
-│   │                          # manifest + meta-tests
-│   └── capacity/              # Phase 8 capacity test
-│                              # (`make capacity-test`,
-│                              # CAPACITY_DOCS_PER_MIN +
-│                              # CAPACITY_DURATION env tunables)
-├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES /
-│   │                          # PROGRESS / CUTOVER
-│   ├── runbooks/              # Phase 7 per-connector ops runbooks
-│   │                          # (one Markdown file per connector +
-│   │                          # a README index): credential rotation,
-│   │                          # quota / rate-limit incidents, outage
-│   │                          # detection, and connector-specific
-│   │                          # error codes
-│   └── contracts/             # Phase 5 / 6 client-side contracts:
-│                              # uniffi-ios.md, uniffi-android.md,
-│                              # napi-desktop.md,
-│                              # local-first-retrieval.md,
-│                              # bonsai-integration.md,
-│                              # b2c-retrieval-sdk.md,
-│                              # privacy-strip-render.md,
-│                              # background-sync.md
-├── deploy/                    # Phase 8 HorizontalPodAutoscaler
-│                              # manifests: hpa-api.yaml,
-│                              # hpa-ingest.yaml, hpa-docling.yaml,
-│                              # hpa-embedding.yaml — each targets the
-│                              # CPU + custom Prometheus metric for
-│                              # its deployment
-├── scripts/                   # contributor / CI helper scripts.
-│                              # `doctor.sh` (Round-13 Task 16) walks
-│                              # the prereq checklist (Go ≥ 1.25,
-│                              # Docker, docker-compose, Python 3.11+,
-│                              # protoc, golangci-lint, e2e env vars)
-│                              # for `make doctor`; `migrate-dry-run-pg.sh`
-│                              # (Round-13 Task 20) launches a
-│                              # disposable Postgres 16 container and
-│                              # replays every up + rollback migration
-│                              # in lexical order to catch PG-specific
-│                              # syntax the SQLite dry-run misses.
-├── docker-compose.yml         # local dev: Postgres / Redis / Kafka /
-│                              # Qdrant / FalkorDB / Docling /
-│                              # embedding / memory
-├── Makefile                   # build / test / vet / lint / proto-gen /
-│                              # test-e2e / test-integration / bench /
-│                              # eval / alerts-check / migrate-dry-run /
-│                              # doctor / fuzz / capacity-test
-├── .github/workflows/ci.yml   # CI fast lane (fast-check, fast-test,
-│                              # fast-build, fast-lint, fast-eval,
-│                              # fast-alerts, fast-rollback-parity,
-│                              # fast-migrate-dry-run, fast-proto-check,
-│                              # fast-python) gated by the
-│                              # `fast-required` aggregator + full lane
-│                              # (full-proto-gen, full-e2e,
-│                              # full-integration, full-connector-smoke,
-│                              # full-bench-e2e, full-capacity-test,
-│                              # full-migrate-dry-run-pg) + nightly
-│                              # `nightly-fuzz`.
+│   ├── regression/            # regression manifest + meta-tests
+│   └── capacity/              # capacity harness (`make capacity-test`)
+├── docs/                      # PROPOSAL / ARCHITECTURE / PHASES / PROGRESS / CUTOVER
+│   ├── runbooks/              # per-connector ops runbooks (credential rotation, quota,
+│   │                          # outage detection, error codes)
+│   └── contracts/             # client-side contracts: uniffi-ios.md, uniffi-android.md,
+│                              # napi-desktop.md, local-first-retrieval.md,
+│                              # bonsai-integration.md, b2c-retrieval-sdk.md,
+│                              # privacy-strip-render.md, background-sync.md
+├── deploy/                    # HorizontalPodAutoscaler manifests, Prometheus alert rules
+├── scripts/                   # contributor / CI helpers (`doctor.sh`, `migrate-dry-run-pg.sh`)
+├── docker-compose.yml         # local dev: Postgres / Redis / Kafka / Qdrant / FalkorDB /
+│                              # Docling / embedding / memory
+├── Makefile                   # build / test / vet / lint / proto-gen / e2e / integration /
+│                              # bench / eval / alerts-check / migrate-dry-run / doctor /
+│                              # fuzz / capacity-test
+├── .github/workflows/ci.yml   # CI fast lane gated by `fast-required` aggregator + full
+│                              # lane (e2e / integration / connector smoke / capacity /
+│                              # migrate-dry-run-pg) + nightly fuzz
 ├── go.mod
 └── go.sum
 ```
 
-### Tech choices realised in Phase 0
+### Tech choices — platform foundations
 
-- **Web framework:** `github.com/gin-gonic/gin` (matches `ai-agent-platform`).
+- **Web framework:** `github.com/gin-gonic/gin`.
 - **ORM:** `gorm.io/gorm` with `gorm.io/driver/postgres` in production
   and `github.com/glebarez/sqlite` in repository tests.
-- **Kafka client:** `github.com/IBM/sarama` (the user-stated default in the
-  Phase 0 scope).
-- **gRPC:** `google.golang.org/grpc` and `google.golang.org/protobuf`.
+- **Kafka client:** `github.com/IBM/sarama`.
+- **gRPC:** `google.golang.org/grpc` + `google.golang.org/protobuf`; in-cluster traffic
+  uses `NewClient` with `insecure.NewCredentials()`.
 - **ULIDs:** `github.com/oklog/ulid/v2`.
-- **Crypto:** `crypto/aes` + `crypto/cipher` from the standard library;
-  the envelope format mirrors the wire format used by
-  `ai-platform-backend-go/pkg/crypto/encryption` so payloads stay
-  cross-compatible.
-- **Observability:** `go.opentelemetry.io/otel` is wired through go.mod
-  but not yet instrumented; instrumentation lands in Phase 1 alongside
-  the pipeline.
-
-### Tech choices added in Phase 1
-
-- **Vector store client:** stdlib `net/http` + JSON against the Qdrant
-  REST API (per-tenant collections, hard tenant filter on every search).
-  A native Go client lands when Phase 3's fan-out work begins.
-- **HTTP and external API clients (Google Drive, Slack):** stdlib
-  `net/http` only — keeps the binary surface small and means the same
-  test machinery (`httptest.Server`) covers every connector.
+- **Crypto:** `crypto/aes` + `crypto/cipher` from the standard library; the envelope
+  format mirrors `ai-platform-backend-go/pkg/crypto/encryption` so payloads stay
+  cross-compatible across services.
+- **Vector store client:** stdlib `net/http` + JSON against the Qdrant REST API;
+  per-tenant collections with a hard tenant filter on every search.
 - **Postgres driver in production:** `gorm.io/driver/postgres`.
-- **gRPC clients:** `google.golang.org/grpc` `NewClient` with
-  `insecure.NewCredentials()` for in-cluster traffic; the pipeline
-  embedder also exposes a `RemoteEmbedder` interface so external
-  embedding APIs can plug in behind per-tenant policy.
 
-### Tech choices added in Phase 3
-
-- **BM25 search:** `github.com/blevesearch/bleve/v2` — pure-Go full
-  text index. We chose `bleve` over `tantivy-go` because the latter
-  requires a Rust toolchain at build time, which violates the "Go
-  binary, no native deps" invariant. The BM25 client is wrapped
-  behind a small interface so the backend can swap to `tantivy-go`
-  later without changing the retrieval handler.
-- **Graph traversal:** `github.com/FalkorDB/falkordb-go` (FalkorDB is
-  a Redis module that speaks GRAPH.* commands). One graph per
-  tenant, named after the tenant id.
-- **Redis client / semantic cache:** `github.com/redis/go-redis/v9`.
-  Cache key is a SHA-256 over `(tenant_id, channel_id,
-  query_embedding, scope_hash)` with a per-tenant key prefix; tests
-  use `github.com/alicebob/miniredis/v2` for an in-process Redis.
-- **Errgroup fan-out:** `golang.org/x/sync/errgroup` with a per-call
-  context derived from a per-backend deadline; backend errors are
-  logged and surfaced as `policy.degraded`, never as a 5xx.
-- **Python ML services:** `grpcio` + `grpcio-tools` for the gRPC
-  server, `docling` for parsing, `sentence-transformers` for
-  embeddings, and `mem0ai` for memory. Each service is a thin gRPC
-  shim over the upstream library.
-
-### Tech choices added in Phase 2
-
-- **Source-management API:** Gin handlers in `internal/admin/`
-  scoped under the auth middleware group. The `SourceRepository`
-  uses GORM against Postgres in production and the in-memory
-  `glebarez/sqlite` driver in tests.
-- **Per-tenant Kafka routing:** Sarama `SyncProducer` with
-  partition keys of the form `tenant_id||source_id` (the doubled
-  `||` separator is the on-wire spec; `pipeline.PartitionKey`
-  exposes a constant). The consumer parses keys with
-  `pipeline.ParsePartitionKey` and rejects body/key mismatches as
-  poison messages, defending against spoofed partition routing.
-  Single-pipe `tenant_id|source_id` keys are accepted as a one-
-  release migration aid and surfaced via
-  `ConsumerConfig.OnLegacyKey` so production can metric the rate
-  and remove the fallback once the topic drains.
-- **Backfill rate control:** A `pipeline.RateController` interface
-  decouples the orchestrator from the limiter implementation.
-  `pipeline.TickerRate` is the wall-clock pacer used in tests; the
-  production wiring uses `admin.BoundController` over the Redis
-  token bucket.
-- **Per-source rate limiter:** Atomic Lua token bucket in Redis
-  keyed by `(tenant_id, source_id)`. Loaded once via `ScriptLoad`
-  with a `Eval` fallback for `NOSCRIPT` after a Redis flush.
-- **Source-health tracking:** A separate `source_health` Postgres
-  table (one row per (tenant_id, source_id)) keeps `last_success_at`,
-  `last_failure_at`, `lag`, `error_count`, and a derived `status`
-  column. `admin.DeriveStatus` computes the status from configurable
-  thresholds.
-- **Forget-on-removal worker:** A Redis `SET NX EX` fenced lease
-  prevents concurrent forget-job runs from racing a re-add. The
-  worker fans out to a list of `ForgetSweeper` implementations (one
-  per storage tier) so per-backend cleanup logic stays in the
-  storage layer.
-
-### Tech choices added in Phase 4
-
-- **Privacy modes:** `internal/policy/privacy_mode.go` defines a
-  total order over `no-ai` < `local-only` < `local-api` <
-  `hybrid` < `remote`. `EffectiveMode` returns the stricter of
-  (tenantMode, channelMode); unknown modes fail closed (treated
-  as more strict than the strictest known mode).
-- **Allow / deny ACL evaluator:** `internal/policy/acl.go` evaluates
-  rules with deny-over-allow precedence. Rules can match by
-  source ID, namespace ID, or path glob (with a `**`
-  cross-segment extension on top of `path.Match`).
-- **Recipient policy:** Per-(tenant, channel) allow/deny list of
-  downstream skill consumers. `RecipientPolicy.IsAllowed` defaults
-  open or closed according to the channel's
-  `recipient_default` column.
-- **Retrieval wiring:** `internal/retrieval/policy_snapshot.go`
-  defines a `PolicyResolver` port and `PolicySnapshot` carrier;
-  the handler resolves the snapshot before fan-out (failing
-  closed on error) and applies ACL + recipient gates after the
-  existing `PolicyFilter` runs.
-
-### Tech choices added in Phase 4 (simulator)
-
-- **Snapshot package home:** `internal/policy/snapshot.go` is the
-  canonical home of `PolicySnapshot` and the `PolicyResolver`
-  port; `internal/retrieval/policy_snapshot.go` keeps a type
-  alias so the retrieval handler does not have to import the
-  policy package's transitive deps. The snapshot exposes
-  `Clone()` so the simulator can run draft policy through the
-  retrieval pipeline without aliasing the live cache.
-- **What-if simulator:** `internal/policy/simulator.go` runs
-  retrieval twice — once with the live `PolicySnapshot` and once
-  with the draft — through the same `RetrieverFunc`, then diffs
-  the two hit lists into `Added` / `Removed` / `Changed`
-  (privacy-label flips). The `Retriever` is a narrow port so
-  tests can plug in a fake corpus and the production wiring can
-  later forward to the real retrieval handler.
-- **Data-flow diff:** `internal/policy/simulator_diff.go`
-  aggregates hits by `privacy_label` to compute the per-tier
-  count delta and a human-readable summary
-  ("draft routes 12% more matches through 'remote'"). The
-  summary's tie-breaker prefers tiers where `Live > 0` so
-  brand-new buckets do not collapse the percentage to a raw
-  count and hide the policy intent.
-- **Conflict detection:** `internal/policy/simulator_conflict.go`
-  surfaces three categories before promotion:
-  `privacy_mode_override` (channel weaker than tenant),
-  `acl_overlap` (deny+allow on the same path glob), and
-  `recipient_contradiction` (channel allows a skill the tenant
-  denies). Conflicts have `error` or `warning` severity and a
-  deterministic order so admin-portal renders are stable across
-  reads.
-- **Draft policy store:** `internal/policy/draft.go` (table
-  `policy_drafts`, migration
-  `migrations/005_policy_drafts.sql`) is a per-tenant repository
-  with a `draft → promoted | rejected` status FSM. Drafts are
-  isolated from the live `PolicyResolver` — the resolver never
-  reads from the drafts table — so an in-progress edit cannot
-  leak into retrieval. `Get` / `MarkPromoted` / `MarkRejected`
-  scope by `tenant_id` and return `ErrDraftNotFound` on a tenant
-  mismatch, denying cross-tenant access without leaking the row's
-  existence.
-- **Audited promotion:** `internal/policy/promotion.go` is the
-  promotion FSM. `PromoteDraft` runs conflict detection
-  (blocks on any error-severity conflict), applies the snapshot
-  to the live tables via the `LiveStore` port, marks the draft
-  promoted, and emits a `policy.promoted` audit event — all in
-  the same `*gorm.DB` transaction so partial failure leaves the
-  draft in `draft` and the live tables untouched. `RejectDraft`
-  is the rejection counterpart.
-- **GORM live store:** `internal/policy/live_store.go` is the
-  production `LiveStore`. It writes the live policy tables in
-  `migrations/004_policy.sql` (`tenant_policies`,
-  `channel_policies`, `policy_acl_rules`, `recipient_policies`)
-  inside the supplied transaction. Wipe-and-replace semantics on
-  the rule tables make a draft the desired-state representation:
-  promote = "make live look exactly like this draft", with no
-  diff-and-merge ambiguity. The audit emit is part of the same
-  transaction: `policy.AuditWriter.CreateInTx` joins the
-  `policy.promoted` / `policy.rejected` row to the outer tx, so a
-  `LiveStore` failure rolls the audit log back along with the rest
-  rather than leaving a "promoted" event for a promotion that never
-  happened.
-- **GORM live resolver:** `internal/policy/live_resolver.go`
-  (`LiveResolverGORM`) is the read counterpart to `LiveStoreGORM`.
-  It hydrates a `PolicySnapshot` from the same live policy tables —
-  resolving the strict-vs-permissive merge of tenant + channel
-  privacy mode, unioning tenant-wide and channel-specific ACL rules,
-  and respecting the channel's `recipient_default` for
-  `RecipientPolicy.DefaultAllow`. Wired into the retrieval
-  handler's `PolicyResolver` port and into the simulator's
-  `LiveResolver` port in `cmd/api/main.go`, so the same live state
-  drives production retrieval and what-if simulation.
-- **Snapshot-driven retrieval:**
-  `retrieval.Handler.RetrieveWithSnapshot` is the simulator's
-  in-process bridge into the retrieval pipeline. It runs the full
-  embed → fan-out → RRF merge → rerank → ACL/recipient gate
-  sequence against an explicit `PolicySnapshot`, deliberately
-  bypassing the semantic cache (a draft snapshot's rules must not
-  contaminate the live cache or vice versa). `cmd/api/main.go`
-  projects `policy.SimRetrieveRequest` ↔ `retrieval.RetrieveRequest`
-  through a thin `simulatorRetriever` adapter so the simulator and
-  the gin handler share one retrieval implementation.
-- **Admin HTTP surface:** `internal/admin/simulator_handler.go`
-  mounts the policy endpoints under `/v1/admin/policy/`:
-  `POST/GET /drafts`, `GET /drafts/:id`,
-  `POST /drafts/:id/promote|reject`, `POST /simulate`,
-  `POST /simulate/diff`, `POST /conflicts`. The handler is
-  written against narrow ports (`DraftStore`, `PromotionService`,
-  `SimulatorEngine`) so tests can run with in-memory fakes.
-- **Privacy strip enrichment:** `internal/retrieval/privacy_strip.go`
-  builds a structured `PrivacyStrip` (`mode`, `processed_where`,
-  `model_tier`, `data_sources`, `policy_applied`) from the
-  resolved `PolicySnapshot` and the chunk's `privacy_label`. The
-  retrieval handler attaches the strip to every `RetrieveHit`
-  on both the fresh and cached paths; the strip is rebuilt at
-  serve time from the live snapshot rather than cached, so a
-  policy change between cache write and read does not surface a
-  stale disclosure.
-
-### Tech choices added in Phase 5
-
-- **Shard manifest API:** `internal/shard/handler.go` mounts
-  `GET /v1/shards/:tenant_id` (full manifest list) and
-  `GET /v1/shards/:tenant_id/delta?since=<v>` (incremental delta)
-  against `internal/shard/repository.go`, a GORM-backed metadata
-  store. The repository columns mirror the on-device shard contract
-  (`tenant_id`, `user_id`, `channel_id`, `privacy_mode`,
-  `shard_version`, `chunks_count`, `status`,
-  `created_at`/`updated_at`) so a client can resume sync after a
-  network interruption from the last seen `shard_version`.
-- **Shard generation worker:** `internal/shard/generator.go` runs
-  inside `cmd/ingest/main.go` as an optional Stage 4 fan-out hook
-  triggered by a `shard.requested` Kafka event. It calls
-  `policy.PolicyResolver.Resolve` for the requested
-  (tenant, user, channel, privacy_mode) tuple before reading from
-  the storage plane, so the produced shard is policy-bounded by
-  construction — privacy-mode + ACL + recipient gates run before
-  the chunk IDs and embeddings hit the manifest.
-- **Delta sync protocol:** `internal/shard/delta.go` diffs two
-  shard versions into add/remove operations and emits stable JSON
-  the client can apply offline. Versions are monotonic per
-  (tenant_id, user_id, channel_id, privacy_mode) so concurrent
-  generations on the server don't observe ABA.
-- **Cryptographic-forgetting orchestrator:**
-  `internal/shard/forget.go` extends the Phase 2
-  `internal/admin/forget_worker.go` pattern to the full tenant
-  delete workflow described in §5: mark `pending_deletion` →
-  drain the pipeline → drop Qdrant collections, FalkorDB graphs,
-  Tantivy directories, and Redis keys → destroy the per-tenant
-  DEKs in the credential store → mark `deleted`.
-  `cmd/api/main.go` mounts `DELETE /v1/tenants/:tenant_id/keys`
-  as the trigger.
-
-### Tech choices added in Phase 7
-
-- **Connector skeleton:** Each new connector (`internal/connector/<name>/`)
-  follows the Phase 1 pattern — stdlib `net/http`, a small
-  `Connection` struct implementing `connector.Connection`, an
-  iterator-style `DocumentIterator` for paginated listing, and an
-  `init()` side-effect that calls
-  `connector.RegisterSourceConnector`. Tests use
-  `httptest.NewServer` against handcrafted JSON fixtures.
-- **Microsoft Graph (SharePoint, OneDrive, Teams):** Bearer token
-  auth on every request; delta tokens captured from the
-  `@odata.deltaLink` query parameter; pagination follows
-  `@odata.nextLink`. Teams encodes its hierarchical
-  Team→Channel→Messages structure as `team_id/channel_id` in the
-  `Namespace.ID` so the same iterator can serve list and fetch.
-- **Atlassian (Confluence, Jira):** Basic auth with email + API
-  token. Jira additionally implements `WebhookReceiver` for the
-  Atlassian webhook payload (issue created / updated / deleted).
-- **Dropbox / Box:** Bearer token auth; `list_folder/continue`
-  cursor for Dropbox delta and the `events` stream
-  (`next_stream_position`) for Box.
-- **Notion:** Notion REST API with `last_edited_time` filter for
-  delta and bearer-token auth.
-- **GitHub / GitLab:** REST API with personal-access-token auth
-  (`Authorization: token <pat>` for GitHub, `PRIVATE-TOKEN: <pat>`
-  for GitLab). Both implement `WebhookReceiver` for issue events.
-- **Connector registration wiring:** `cmd/api/main.go` and
-  `cmd/ingest/main.go` blank-import every connector so the
-  `init()` registry hooks fire on startup. The order is
-  alphabetical to keep diffs minimal across phases.
-
-### Tech choices added in Phase 8
-
-- **OpenTelemetry tracing (`internal/observability/`):** A small
-  package centralises the tracer name (`context-engine`), the
-  `StartSpan(ctx, name, attrs...)` helper, the
-  `RecordError(span, err)` shim, and the attribute keys reused
-  across packages (`tenant_id`, `document_id`, `backend`,
-  `hit_count`, `latency_ms`, `stage`). The pipeline coordinator
-  wraps each retry of each stage in `pipeline.<stage>` and the
-  retrieval fan-out wraps each backend call in
-  `retrieval.<backend>` with `latency_ms` + `hit_count`
-  attributes. `RetrieveResponse.TraceID` echoes the trace id so
-  clients can correlate slow requests with backend traces.
-- **Per-stage worker pools (`pipeline.StageConfig`):** The
-  coordinator spawns N goroutines per stage that share the
-  upstream channel, with the downstream channel closed via a
-  `sync.WaitGroup` after all stage workers exit — so adding
-  parallelism does not race the close-on-shutdown invariant.
-  Defaults are 1-per-stage to preserve pre-Phase-8 ordering;
-  callers crank up `EmbedWorkers` first since the embedder is
-  normally the long-pole.
-- **Sticky Kafka rebalance (`pipeline.ConsumerTuning` +
-  `SaramaConfigWith`):** Sticky assignment keeps a partition glued
-  to one consumer across restarts, preserving per-source ordering
-  through a rebalance. `SessionTimeout` and `MaxPollInterval` are
-  exposed for tuning against the upstream broker config.
-- **Storage connection pools:** Qdrant uses a sized
-  `http.Transport` (`MaxIdleConnsPerHost` configurable via
-  `CONTEXT_ENGINE_QDRANT_POOL_SIZE`); the Redis client used by the
-  semantic cache and the FalkorDB adapter takes
-  `CONTEXT_ENGINE_REDIS_POOL_SIZE`; Postgres goes through GORM's
-  `*sql.DB` with `SetMaxOpenConns` / `SetMaxIdleConns` /
-  `SetConnMaxLifetime` driven by `CONTEXT_ENGINE_PG_MAX_OPEN` and
-  `CONTEXT_ENGINE_PG_MAX_IDLE`.
-- **gRPC connection pool (`internal/grpcpool/`):** Round-robin
-  selection across `Size` long-lived `*grpc.ClientConn`s with a
-  per-call deadline and a circuit breaker. The breaker tracks
-  consecutive failures; once `Threshold` is hit it transitions to
-  open, refuses calls for `OpenFor`, then half-opens — a single
-  trial call decides closed (success) or open (failure). Callers
-  Borrow / Release; the helper does not wrap the generated stubs
-  because every sidecar has a different proto surface.
-- **Capacity test harness (`tests/capacity/`):** A Go test that
-  submits N documents/minute through the coordinator with fake
-  fetch / parse / embed / store stages, asserts every Submit
-  completes within a per-call deadline (no producer
-  back-pressure), and logs P50 / P95 / P99 submit latency.
-  `make capacity-test` runs it in the standard test profile;
-  `CAPACITY_DOCS_PER_MIN` and `CAPACITY_DURATION` configure the
-  load shape for soak runs.
-- **Prometheus metrics (`internal/observability/metrics.go` +
-  `middleware.go`):** Six Go collectors register against a shared
-  `prometheus.Registry` (so unit tests can spin up an isolated
-  registry per test): `context_engine_api_requests_total`,
-  `context_engine_api_request_duration_seconds`,
-  `context_engine_kafka_consumer_lag`,
-  `context_engine_pipeline_stage_duration_seconds`,
-  `context_engine_retrieval_backend_duration_seconds`,
-  `context_engine_retrieval_backend_hits`. The Gin middleware
-  records request count + duration on every API route. The
-  pipeline coordinator records per-stage duration via
-  `observability.ObserveStageDuration` from
-  `runWithRetry`. The retrieval handler records per-backend
-  duration via `observability.ObserveBackendDuration` from
-  `fanOut`. The Kafka consumer reports lag via
-  `observability.SetKafkaConsumerLag` after every commit. The
-  Python sidecars share `services/_metrics.py::ServiceMetrics`,
-  which exposes a per-prefix triplet (`<prefix>_requests_total`,
-  `<prefix>_duration_seconds`, `<prefix>_queue_depth`) on a
-  separate sidecar HTTP listener (default port 9090).
-- **HPA manifests (`deploy/`):** Four Kubernetes HPAs target the
-  matching collectors: `hpa-api.yaml` scales the API deployment
-  on CPU + `context_engine_api_requests_per_second`;
-  `hpa-ingest.yaml` scales the ingest deployment on CPU +
-  `context_engine_kafka_consumer_lag`; `hpa-docling.yaml` and
-  `hpa-embedding.yaml` scale the Python sidecars on CPU +
-  memory + `<prefix>_queue_depth`. Each manifest sets explicit
-  scale-up / scale-down stabilization windows so the autoscaler
-  is not chatty under bursty traffic.
-- **Mem0 tenant prefix partitioning
-  (`services/memory/memory_server.py`):** Every Mem0 `add` /
-  `search` keys on `<tenant_prefix>:<user_id>`, where the prefix
-  is resolved from `MEM0_TENANT_PREFIX_TEMPLATE` (default
-  `"{tenant_id}"`). Metadata records both `tenant_id` and
-  `tenant_prefix`; `search` additionally drops stray rows whose
-  metadata `tenant_id` mismatches as a defence-in-depth guard.
-  The Go memory client (`cmd/api/main.go::memoryAdapter`) passes
-  `tenant_id` on every `SearchMemory` gRPC call.
-- **Liveness / readiness probes (`cmd/api/readyz.go`,
-  `cmd/ingest/health.go`):** Both binaries expose `GET /healthz`
-  (always 200) and `GET /readyz` (returns 503 + the failed
-  dependency name). The API binary checks Postgres + Redis +
-  Qdrant; the ingest binary checks Postgres + Redis + every
-  Kafka broker via `net.DialTimeout`. The probes share the same
-  HTTP listener as `/metrics`, so a single Kubernetes
-  `livenessProbe` / `readinessProbe` selector covers both.
-- **Retrieval latency optimisations:** `QdrantClient.Warmup` issues
-  N parallel `GET /` requests on startup to pre-establish the
-  `http.Transport` connection pool; `FalkorDBClient.KeepAlive`
-  runs a background ticker that pings `GRAPH.LIST` so the redis
-  connection pool stays warm during idle periods. Both are
-  wired into `cmd/api/main.go` after the listener starts. A new
-  `RetrieveResponse.Timings` envelope (vector_ms / bm25_ms /
-  graph_ms / memory_ms / merge_ms / rerank_ms) breaks each
-  request's wall-clock down by backend so operators can
-  identify the long pole without reaching for traces. The
-  budget is enforced by
-  `tests/benchmark/p95_e2e_test.go::TestE2E_RetrieveP95` (build
-  tag `e2e`, `make bench-e2e`) which fails the build if
-  retrieval P95 > 500 ms or round-trip P95 > 1 s.
-
-### Tech choices added in Phase 6
-
-- **B2C client SDK bootstrap (`internal/b2c/`):** A single Gin
-  handler mounts three endpoints the B2C splash / boot path
-  consumes: `GET /v1/health` returns `status` + server time +
-  build version (cheap, no DB); `GET /v1/capabilities` reports
-  enabled retrieval backends + supported privacy modes + the
-  `device_first` / `local_shard_sync` feature flags so a B2C UI
-  built three months ago can still degrade gracefully against a
-  newer server; `GET /v1/sync/schedule` returns recommended
-  foreground / background polling intervals (defaults: 60 s
-  foreground, 15 min background, ±30 s jitter, 30 s / 5 min
-  hard floors). The wire format is contract-pinned in
-  `docs/contracts/b2c-retrieval-sdk.md` and
-  `docs/contracts/background-sync.md`.
-- **Device-first policy (`internal/policy/device_first.go`):**
-  `Decide(DeviceFirstInputs) DeviceFirstDecision` is a pure
-  function that returns a structured `prefer_local` hint with a
-  stable failure label (`device_tier_too_low`,
-  `channel_disallowed`, `privacy_blocks_local`,
-  `no_local_shard`, `prefer_local`). The retrieval handler
-  consults it on every successful `POST /v1/retrieve` (cache
-  hit + fresh fan-out) and surfaces the result on the response
-  envelope (`RetrieveResponse.prefer_local`,
-  `.local_shard_version`, `.prefer_local_reason`).
-  `shard.VersionLookup` adapts the GORM-backed shard repository
-  to the retrieval handler's narrow `ShardVersionLookup` port —
-  shards live in a separate package from retrieval to avoid an
-  import cycle, and lookup errors fail closed to
-  `prefer_local=false` so a transient DB hiccup degrades
-  gracefully.
-
-### Tech choices added in Phase 5 (Tasks 9-13, 19)
-
-- **Client contract interface (`internal/shard/contract.go`):**
-  `ShardClientContract` is the four-method contract every
-  on-device runtime (iOS XCFramework, Android AAR, Electron
-  N-API addon) must implement. The Go-side interface lives in
-  the shard package and is mirrored in
-  `docs/contracts/uniffi-ios.md`,
-  `docs/contracts/uniffi-android.md`, and
-  `docs/contracts/napi-desktop.md`. The supporting wire types
-  (`ShardScope`, `ShardDelta`, `LocalQuery`,
-  `LocalRetrievalResult`, `LocalHit`) carry JSON tags that match
-  the on-device runtime's serialization so the same struct
-  round-trips between Go and Rust without translation.
-- **Shard coverage endpoint
-  (`internal/shard/handler.go::coverage`):** `GET /v1/shards/`
-  `:tenant_id/coverage?privacy_mode=...` returns
-  `CoverageResponse` (shard chunks, corpus chunks,
-  coverage_ratio, is_authoritative). Clients use it to run the
-  decision tree in `docs/contracts/local-first-retrieval.md`.
-  The `CoverageRepo` port is optional; when no implementation
-  is wired, the handler returns `is_authoritative=false` so the
-  client treats the ratio as advisory and falls back to remote.
-- **Model catalog (`internal/models/`):** `ModelCatalog`,
-  `ModelEntry`, and `Provider` give the API binary a typed
-  surface for the on-device model manifest;
-  `StaticProvider` ships a hard-coded baseline of three
-  Bonsai-1.7B builds (q4_0 / q8_0 / fp16) with the per-tier
-  `EvictionPolicy` baked into the response. `Validate()` runs
-  on construction so a typo in a hard-coded entry can't ship.
-  `EligibleForTier(tier)` returns the smallest model whose
-  `tier_floor` ≤ the device's reported tier.
-  `GET /v1/models/catalog` is the wire endpoint; the contract
-  is documented in `docs/contracts/bonsai-integration.md`.
-- **Eviction policy (`internal/shard/eviction.go`):**
-  `EvictionPolicy` carries `MaxShardSizeMB`,
-  `MinFreeMemoryMB`, and `ThermalEvictMultiplier`;
-  `ShouldEvict(EvictionInputs) EvictionDecision` is a pure
-  function returning a stable reason
-  (`unknown_tier` / `shard_too_large` / `memory_pressure` / `keep`).
-  `DefaultEvictionPolicies()` ships baseline policies for Low /
-  Mid / High; the policies are part of the catalog response so
-  they can be tuned server-side without an on-device release.
-
-### Tech choices added in Phase 8 (Bonsai contract)
-
-- **Bonsai benchmark contract
-  (`tests/benchmark/bonsai_contract_test.go`):**
-  `BonsaiContract` is a Go-side slice of `TierBenchmark` rows
-  defining min tokens/sec, max first-token latency, and max
-  memory per tier. `SatisfiesContract(tier, tps, ttft, mem)`
-  is the helper the on-device repos (`kennguy3n/knowledge`,
-  `kennguy3n/llama.cpp`) call against measured numbers; an
-  unknown tier or any out-of-envelope tuple returns a stable
-  failure label so on-device CI can fail fast with a clear
-  diagnostic.
-
-### Tech choices added in Round 6
-
-Round 6 adds breadth across retrieval quality, multi-tenant
-operability, and pipeline observability. Each entry below is
-self-contained and references the package + admin surface that
-implements it.
-
-- **MMR diversifier** (`internal/retrieval/diversifier.go`).
-  Reranker-adjacent stage that re-orders the merged result set
-  with `(1-lambda) * relevance - lambda * max_similarity` — i.e.
-  higher `lambda` ⇒ more diversification, matching the API
-  contract on `RetrieveRequest.Diversity`. Lambda defaults to 0.0
-  (passthrough, pure relevance) so existing deployments are
-  unaffected; clients opt in via `RetrieveRequest.Diversity`.
-- **Semantic deduplication** (`internal/pipeline/dedup.go`).
-  Stage-4-adjacent pre-write hook computing cosine similarity
-  between chunk embeddings. Drops near-duplicates above a
-  configurable threshold; toggled via `CONTEXT_ENGINE_DEDUP_ENABLED`
-  (threshold via `CONTEXT_ENGINE_DEDUP_THRESHOLD`, default 0.95).
-- **Per-source embedding model config**
-  (`internal/admin/embedding_config.go`,
-  `migrations/019_source_embedding_config.sql`). Tenants set a
-  non-default model on a (tenant, source) basis; the embed stage
-  reads the config and forwards the model name to the embedding
-  gRPC service.
-- **Query expansion via synonyms**
-  (`internal/retrieval/query_expander.go`,
-  `internal/admin/synonyms_handler.go`). A `SynonymExpander`
-  augments the inbound query before fan-out, expanding the text
-  sent to BM25 and memory backends without changing the vector
-  query (vectors already capture synonymy).
-- **Priority queues in pipeline coordinator**
-  (`internal/pipeline/priority.go`,
-  `internal/pipeline/coordinator.go`). High-priority items
-  (steady-state syncs, admin overrides) cut to the front of the
-  Stage-1 queue; low-priority items (backfills) age in and are
-  not starved beyond a configurable timeout.
-- **Chunk-level ACL** (`internal/policy/chunk_acl.go`,
-  `migrations/020_chunk_acl.sql`). Per-chunk allow/deny rules
-  evaluated after the source-level AllowDenyList; useful for
-  cases where one chunk inside an allowed namespace must be
-  hidden (PII, legal hold, etc.).
-- **Adaptive connector rate limiting**
-  (`internal/connector/adaptive_rate.go`). Wraps the existing
-  Redis token bucket; on a 429 the bucket rate halves (down to a
-  floor); on success the rate creeps back up. Prevents thundering
-  herds against rate-limited SaaS APIs.
-- **Source schema discovery endpoint**
-  (`internal/admin/schema_handler.go`). Calls the connector's
-  `ListNamespaces` so operators can preview what a source exposes
-  before wiring policy.
-- **Pipeline backpressure metrics**
-  (`internal/observability/metrics.go`,
-  `deploy/alerts/pipeline_backpressure.yaml`). Gauge
-  `context_engine_pipeline_channel_depth{stage}` is updated after
-  every coordinator submit; the alert rule fires when any
-  channel sits above the warning threshold for 5 minutes.
-- **Retrieval A/B testing framework**
-  (`internal/admin/abtest.go`, `migrations/021_ab_tests.sql`).
-  Active experiments route a deterministic percentage of
-  requests (FNV bucket of the request key) to a `variant_config`
-  and log both arms for offline comparison.
-- **Admin notification preferences**
-  (`internal/admin/notification.go`,
-  `migrations/022_notification_preferences.sql`). Per-tenant
-  webhook/email subscriptions fan audit events (sync started,
-  source purged, policy promoted) to operator-owned endpoints.
-- **Shard pre-generation scheduler**
-  (`internal/shard/scheduler.go`). Background loop that
-  enumerates active tenants and emits `shard.requested` events
-  for stale or missing shards so the hot read path never waits
-  on a lazy build.
-- **API versioning middleware**
-  (`internal/observability/api_version.go`). Resolves the
-  client's chosen API version from `/vN/` path prefix or the
-  `Accept-Version` header, rejects unknown versions with 406,
-  echoes the resolved version in `X-API-Version`.
-- **Tenant data portability**
-  (`internal/admin/tenant_export.go`). Asynchronous full-tenant
-  export job; collector + publisher are pluggable so production
-  can stream to S3 / Postgres LO without code changes.
-- **Pipeline dry-run mode**
-  (`internal/pipeline/reindex.go`,
-  `internal/admin/reindex_handler.go`). Operators can preview
-  the cardinality of a reindex submission before unleashing it
-  by passing `dry_run: true`; the orchestrator skips emission
-  and returns the enumerated document count.
-- **Connector template system**
-  (`internal/admin/connector_template.go`,
-  `migrations/023_connector_templates.sql`). Operators codify
-  per-tenant connector defaults; `POST /v1/admin/sources`
-  accepts an optional `template_id` and merges the template's
-  `default_config` into the new source.
-- **Cross-tenant isolation audit**
-  (`internal/admin/isolation_audit.go`). Pluggable per-backend
-  checkers (Qdrant collections, Redis prefixes, FalkorDB graphs)
-  produce a structured pass/fail report; useful as a scheduled
-  smoke test.
-- **SSE streaming retrieval**
-  (`internal/retrieval/stream_handler.go`). `POST
-  /v1/retrieve/stream` emits `event: backend` frames as each
-  backend completes plus a terminal `event: done` carrying the
-  policy-filtered merged result; clients render partial UI as
-  vector / BM25 / graph / memory finish.
-- **Pipeline stage retry analytics**
-  (`internal/pipeline/retry_analytics.go`,
-  `internal/admin/retry_stats_handler.go`). Each stage records
-  retry/success/failure outcomes and per-reason counts;
-  `GET /v1/admin/pipeline/retry-stats` exposes a JSON snapshot
-  used by dashboards and runbook automation.
-
-### Tech choices added in Round 7
-
-Round 7 layers operational hardening on top of Round 6: every
-new feature reuses an existing storage/admin surface and most
-hang off the same Postgres migrations chain (024 → 031). The
-import graph stays one-way (admin imports retrieval; retrieval
-never imports admin) thanks to a pair of new setters on
-`*retrieval.Handler` that let the wiring layer attach the
-admin-owned ABTestRouter and QueryAnalyticsRecorder after
-construction.
-
-- **Retrieval query analytics**
-  (`internal/admin/query_analytics.go`,
-  `migrations/024_query_analytics.sql`). Every successful
-  Retrieve emits a `QueryAnalyticsEvent` containing the truncated
-  query text, query hash, top-k, per-backend timings, hit count,
-  cache-hit flag, and (when set) experiment name/arm.
-  `GET /v1/admin/analytics/queries` supports time-range,
-  tenant, and top-N filters; the top-N path feeds the cache
-  warmer (Task 9).
-- **Notification dispatcher retry + dead-letter**
-  (`internal/admin/notification.go`,
-  `internal/admin/notification_delivery_log.go`,
-  `migrations/025_notification_delivery_log.sql`).
-  `WebhookDelivery.Send` now retries with 1s/5s/15s
-  exponential backoff; every attempt is persisted to
-  `notification_delivery_log` and surfaced via
-  `GET /v1/admin/notifications/delivery-log`.
-- **A/B test results aggregator**
-  (`internal/admin/abtest_results.go`). Reads `query_analytics`
-  rows tagged with an experiment + arm and groups them per arm
-  to compute avg/p50/p95 latency, hit count, and cache-hit rate.
-  Endpoint: `GET /v1/admin/retrieval/experiments/:name/results`.
-- **Credential health worker**
-  (`internal/admin/credential_health.go`,
-  `migrations/026_credential_valid.sql`). Periodically calls
-  `connector.Validate()` for every active source, persists a
-  boolean `credential_valid` on `source_health`, and emits a
-  `source.credential_invalid` audit event on failure. Endpoint:
-  `GET /v1/admin/sources/:id/credential-health`.
-- **Retrieval cache warming**
-  (`internal/retrieval/cache_warmer.go`,
-  `internal/admin/cache_warm_handler.go`). Replays a list of
-  `(tenant, query)` tuples through the retrieval handler to
-  populate the Redis semantic cache; optional `auto_top_n` mode
-  pulls the tuples from `query_analytics`. Endpoint:
-  `POST /v1/admin/retrieval/warm-cache`.
-- **Bulk source operations**
-  (`internal/admin/bulk_source_handler.go`). Fan-out
-  pause/resume/disconnect with per-source error isolation —
-  one failure does not abort the batch. Each per-source action
-  emits its own audit event. Endpoint:
-  `POST /v1/admin/sources/bulk`.
-- **Per-tenant latency budgets**
-  (`internal/admin/latency_budget.go`,
-  `migrations/027_latency_budgets.sql`). Stores per-tenant
-  `max_latency_ms` and seeds the retrieval handler's request
-  default when the request omits the field. Endpoints:
-  `GET/PUT /v1/admin/tenants/:id/latency-budget`.
-- **Chunk quality scoring**
-  (`internal/pipeline/chunk_scorer.go`,
-  `internal/admin/chunk_quality_handler.go`,
-  `migrations/028_chunk_quality.sql`). Stage-4 pre-write hook
-  scores each chunk on text length, language detection
-  confidence, embedding magnitude, and duplicate ratio.
-  Aggregated per source via
-  `GET /v1/admin/chunks/quality-report`.
-- **Source sync conflict resolver**
-  (`internal/pipeline/conflict_resolver.go`). Last-writer-wins
-  policy keyed on a monotonic `content_version` per
-  (tenant, document); stale writes are dropped, emitting a
-  `chunk.conflict_resolved` audit event with the resolution
-  strategy.
-- **Audit trail export**
-  (`internal/admin/audit_export.go`). Streams matching audit
-  rows as CSV or JSON Lines using chunked transfer encoding so
-  multi-million-row exports finish without buffering. Endpoint:
-  `GET /v1/admin/audit/export?format=csv|jsonl&since=&until=&...`.
-- **Per-tenant cache TTL**
-  (`internal/admin/cache_config.go`,
-  `migrations/029_cache_config.sql`). Stores per-tenant
-  semantic-cache TTL; the Redis writer falls back to the global
-  default when no row exists. Endpoints:
-  `GET/PUT /v1/admin/tenants/:id/cache-config`.
-- **Connector sync history**
-  (`internal/admin/sync_history.go`,
-  `migrations/030_sync_history.sql`). Pipeline consumer records
-  start/end/status/docs_processed/docs_failed per sync run.
-  Endpoint: `GET /v1/admin/sources/:id/sync-history?limit=N`.
-- **Retrieval result pinning**
-  (`internal/admin/pinned_results.go`,
-  `internal/retrieval/pin_apply.go`,
-  `migrations/031_pinned_results.sql`). Admins pin specific
-  chunk IDs to fixed positions for an exact-match query. The
-  retrieval handler invokes `ApplyPins` after the policy filter
-  and before MMR diversity, deduplicating any hit that already
-  appears in the pin list. Endpoints:
-  `POST/GET/DELETE /v1/admin/retrieval/pins`.
-- **Pipeline stage health dashboard**
-  (`internal/admin/pipeline_health.go`). Reads the in-process
-  Prometheus registry and aggregates per-stage throughput,
-  P50/P95 latency, retry rate, queue depth, and DLQ totals.
-  Endpoint: `GET /v1/admin/pipeline/health`.
-- **Rollback scripts 015–031**
-  (`migrations/rollback/*.down.sql`). Every numeric prefix
-  under `migrations/` now has a matching `down.sql`;
-  `migrations/rollback/rollback_test.go` locks the contract.
-
----
-
-## 10. Deployment & Scaling
-
-### 10.1 Kubernetes deployments
-
-Both Go binaries (`context-engine-api`, `context-engine-ingest`)
-and the three Python sidecars (`docling`, `embedding`, `memory`)
-are deployed as Kubernetes `Deployment`s with explicit
-`resources.requests` and `resources.limits`. The HPA manifests
-in [`deploy/`](../deploy/) target each deployment by name:
-
-| Manifest | Target | Replicas (min/max) | Trigger metric |
-|----------|--------|--------------------|----------------|
-| `deploy/hpa-api.yaml` | `context-engine-api` | 2 / 20 | CPU 70% + `context_engine_api_requests_per_second` |
-| `deploy/hpa-ingest.yaml` | `context-engine-ingest` | 2 / 16 | CPU 70% + `context_engine_kafka_consumer_lag` |
-| `deploy/hpa-docling.yaml` | `docling` | 2 / 12 | CPU 80% + memory 80% + `docling_parse_queue_depth` |
-| `deploy/hpa-embedding.yaml` | `embedding` | 2 / 16 | CPU 80% + memory 85% + `embedding_queue_depth` |
-
-Each manifest sets explicit
-`behavior.scaleUp.stabilizationWindowSeconds` (60 s) and
-`behavior.scaleDown.stabilizationWindowSeconds` (300 s) so the
-autoscaler does not thrash under bursty traffic. The custom
-metrics are exposed on the deployment's `/metrics` endpoint and
-scraped by the cluster's Prometheus adapter, which projects them
-into the Kubernetes `external.metrics.k8s.io` / `pods/` API the
-HPA consumes.
-
-### 10.2 Resource sizing guidance
-
-The defaults below are starting points; tune against measured
-load.
-
-| Workload | CPU request | CPU limit | Memory request | Memory limit | Notes |
-|----------|-------------|-----------|----------------|--------------|-------|
-| `context-engine-api` | 500m | 2 | 512 Mi | 1 Gi | Gin handlers + Qdrant / FalkorDB / Mem0 fan-out; the long pole is the embedder gRPC call so memory stays modest |
-| `context-engine-ingest` | 500m | 2 | 512 Mi | 1 Gi | Kafka consumer + 4-stage pipeline; bump for high-fanout connectors |
-| `docling` | 1 | 4 | 1 Gi | 4 Gi | Parsing is CPU-heavy; PDF / DOCX peaks dominate |
-| `embedding` | 2 | 8 | 2 Gi | 8 Gi | sentence-transformers loads a 90 MB model; memory floor is 2 Gi |
-| `memory` (Mem0) | 200m | 1 | 256 Mi | 1 Gi | Lightweight gRPC wrapper |
-
-The Postgres pool size (`CONTEXT_ENGINE_PG_MAX_OPEN`) and the
-Redis pool size (`CONTEXT_ENGINE_REDIS_POOL_SIZE`) should track
-the API binary's CPU limit (one connection per ~125m of CPU
-limit is a defensible starting point); the Qdrant pool
-(`CONTEXT_ENGINE_QDRANT_POOL_SIZE`) tracks the expected QPS
-divided by the average vector-search latency.
-
-### 10.3 Probes and readiness
-
-Both Go binaries expose `/healthz` (cheap liveness) and
-`/readyz` (dependency-aware readiness) on the same listener as
-`/metrics`. The API binary checks Postgres + Redis + Qdrant; the
-ingest binary checks Postgres + Redis + every Kafka broker via
-`net.DialTimeout`. A single Kubernetes `livenessProbe` /
-`readinessProbe` selector covers both binaries.
-
-### 10.4 Stage-aware concurrency
-
-The ingest binary's per-stage worker pools
-(`pipeline.StageConfig`) live alongside the deployment's CPU
-request: the four `*Workers` env vars
-(`CONTEXT_ENGINE_FETCH_WORKERS`,
-`CONTEXT_ENGINE_PARSE_WORKERS`,
-`CONTEXT_ENGINE_EMBED_WORKERS`,
-`CONTEXT_ENGINE_STORE_WORKERS`) crank up parallelism on the
-goroutine side without pushing the pod to a higher replica
-count. The embedder is normally the long-pole, so
-`EMBED_WORKERS` is the first knob to turn.
-
-### 10.5 Rollout strategy
-
-API binary deployments use `RollingUpdate` with `maxSurge: 1`
-and `maxUnavailable: 0` so retrieval availability stays
-constant during a release. Ingest deployments allow
-`maxUnavailable: 1` since Kafka consumer rebalances are
-sticky-tuned (`pipeline.ConsumerTuning`) and a brief partition
-re-assignment is acceptable.
-
-The Python sidecars use `RollingUpdate` with `maxSurge: 1` and
-`maxUnavailable: 0` plus a 30 s `terminationGracePeriodSeconds`
-so an in-flight gRPC call can drain.
-
-### 10.6 On-device tier scaling
-
-The on-device tier does not scale horizontally — each device
-runs its own runtime. Scaling concerns instead surface as:
-
-1. **Model catalog updates** — `GET /v1/models/catalog` ships a
-   per-tier eviction policy (`eviction_config`) so server
-   operators can tune shard retention without an on-device
-   release. See `docs/contracts/bonsai-integration.md`.
-2. **Sync schedule updates** — `GET /v1/sync/schedule` lets the
-   server shorten polling during a heavy reindex (e.g. when a
-   tenant adds a new connector with millions of documents) so
-   the on-device shard catches up faster, then relax once the
-   catch-up is done. See `docs/contracts/background-sync.md`.
-3. **Benchmark contract** — `BonsaiContract` defines the
-   per-tier performance floor each on-device measurement must
-   clear; failing tiers stop publishing the affected platform
-   release.
-
-### 10.7 Alerting (Round-4 Task 10)
-
-`deploy/alerts.yaml` is a Prometheus `PrometheusRule` manifest
-that ships alongside the HPA manifests in `deploy/`. The rule
-groups cover:
-
-| Alert | Expression (paraphrased) | Severity |
-|---|---|---|
-| `IngestionLagHigh` | `context_engine_kafka_consumer_lag > 10000` for 5m | page |
-| `DLQRateHigh` | `rate(context_engine_dlq_messages_total[5m]) > 1` | page |
-| `RetrievalP95High` | retrieval handler P95 > 500ms for 5m | warn |
-| `SourceUnhealthy` | per-source `error_count` over threshold | warn |
-| `PipelineStageSlow` | per-stage P95 anomaly | warn |
-
-`make alerts-check` runs
-`internal/observability/alertcheck` against the YAML to validate
-the rule shape (every group has a name, every rule has an
-expression, severity is set). The alert names match the runbook
-filenames under `docs/runbooks/` so an on-call engineer can hop
-from PagerDuty to a runbook in a single click.
-
-### 10.8 Health and operational endpoints (Round-4)
-
-Three operational endpoints supplement Kubernetes liveness
-probes:
-
-- `GET /v1/admin/health/indexes` (Round-4 Task 19,
-  `internal/admin/index_health.go`) runs every registered
-  `BackendChecker` (postgres, qdrant, redis when configured)
-  in parallel with a 5s timeout. Returns 200 with a
-  per-backend status payload when every backend is green;
-  returns 503 with the same payload when any backend fails so
-  load balancers can drain unhealthy replicas without
-  guessing.
-- `GET /v1/admin/sources/:id/sync/stream` (Round-4 Task 18,
-  `internal/admin/sync_progress_stream.go`) is a Server-Sent
-  Events stream that polls `sync_progress` every
-  `StreamPollInterval` (5s), diffs counters against the prior
-  snapshot, and emits `discovered` / `processed` / `failed` /
-  `completed` events plus a 30s heartbeat for proxy
-  keepalive.
-- `GET /v1/admin/tenants/:id/usage` (Round-4 Task 17,
-  `internal/admin/metering.go`) returns a daily rollup of the
-  tenant's API calls and ingestion counters from the
-  `tenant_usage` table. The in-process `Counter`
-  (`FlushOnInterval`) buffers per-request increments and
-  flushes them via UPSERT, so the hot retrieval path never
-  pays a per-request DB write.
-
-### 10.9 Migration rollbacks (Round-4 Task 20)
-
-Every forward migration in `migrations/` ships a matching
-`migrations/rollback/<n>_<name>.down.sql`. `make migrate-rollback`
-walks them in reverse against `CONTEXT_ENGINE_DATABASE_URL`. Each
-rollback drops the indexes the forward migration created, then
-the tables, using `IF EXISTS` for idempotency. Migrations that
-ALTER COLUMN (`007_channel_deny_local`,
-`011_varchar_ids`) revert their column shape changes. The
-`migrations/rollback/rollback_test.go` test pins one rule:
-**every numeric prefix under `migrations/` has a matching
-prefix under `migrations/rollback/`** — a reviewer who forgets
-the down-script gets caught at unit-test time, not at incident
-time.
-
-### Tech choices added in Round 10
-
-- **LatencyBudgetLookup port — per-tenant deadline at request
-  ingress.** The retrieval handler now reads the tenant's
-  `max_latency_ms` from `internal/admin/latency_budget_gorm.go`
-  via the new `LatencyBudgetLookup` port whenever a request omits
-  `limits.max_latency_ms`. The lookup runs on a 200ms timeout so a
-  slow store never poisons the hot path. This is the missing
-  bridge between the Round-7 budget store and the per-request
-  context deadline that already existed in the handler.
-
-- **CacheTTLLookup port — per-tenant Redis `PEXPIRE`.** The Redis
-  semantic-cache (`internal/storage/redis_cache.go`) now consults
-  `internal/admin/cache_config_gorm.go` through the new
-  `CacheTTLLookup` port on every `Set`. When a row exists, the
-  per-tenant TTL is used; otherwise the global default applies.
-  This makes the Round-7 `cache_config` table a load-bearing
-  control rather than dead inventory.
-
-- **SyncHistoryRecorder hook — backfill provenance for free.**
-  The pipeline coordinator now invokes a `SyncHistoryRecorder`
-  port on every backfill kickoff and finishes the row on
-  completion/error. `cmd/ingest/main.go` wires the production
-  recorder through the Round-7 `internal/admin/sync_history_gorm.go`
-  store. Net effect: every backfill becomes a row in
-  `sync_history` with start/end/status/docs_processed/docs_failed,
-  unlocking the existing admin `/v1/admin/sync-history` UI.
-
-- **ChunkScorer pre-write hook — Stage 4 chunk quality.** The
-  coordinator now calls `pipeline.ChunkScorer.Score()` on every
-  block before Stage 4 writes (gated by
-  `CONTEXT_ENGINE_CHUNK_SCORING_ENABLED`) and persists the four-
-  axis score (length, language, embedding norm, near-duplicate)
-  through the Round-9 GORM `ChunkQualityStore`. Operators get
-  observability into low-quality chunks without a separate batch
-  job.
-
-- **Periodic workers in cmd/api and cmd/ingest.** Four wired-as-
-  goroutines workers shipped in this round:
-  - `credential_health` runs on
-    `CONTEXT_ENGINE_CREDENTIAL_CHECK_INTERVAL` (default 1h) in
-    `cmd/api/main.go`.
-  - `token_refresh` runs on
-    `CONTEXT_ENGINE_TOKEN_REFRESH_INTERVAL` (default 15m) in
-    `cmd/api/main.go`.
-  - `retention_worker` runs on
-    `CONTEXT_ENGINE_RETENTION_ENABLED` (or the legacy
-    `CONTEXT_ENGINE_RETENTION_INTERVAL`) in `cmd/ingest/main.go`.
-  - `scheduler` runs on `CONTEXT_ENGINE_SCHEDULER_ENABLED`
-    (default `true`) in `cmd/ingest/main.go`.
-  Each worker registers with the lifecycle shutdown runner so a
-  SIGTERM drains them before the binary exits.
-
-- **Query expansion in the retrieval hot path.** The handler
-  gained `SetQueryExpander` so the production `SynonymExpander`
-  reaches every retrieve request. The end-to-end chain
-  (`SynonymStoreGORM` → `SynonymExpander` → `Handler` → BM25) is
-  pinned by `tests/integration/query_expansion_test.go`.
-
-- **OpenAPI + connector-runbook completeness gates.**
-  `docs/openapi_test.go` now pins every route registered in
-  `cmd/api/main.go` against `docs/openapi.yaml`, and
-  `docs/runbooks/runbook_test.go` pins every registered
-  connector against `docs/runbooks/<name>.md` with the four
-  required sections. Both gates run in the fast lane.
-
-- **CI lane audit.** Fast lane gains `fast-proto-check` (running
-  `make proto-check` so committed gRPC stubs cannot drift). Full
-  lane gains `full-connector-smoke`, `full-bench-e2e`, and
-  `full-capacity-test`. A new nightly-only `nightly-fuzz` job
-  runs `make fuzz`, which itself now covers
-  `./internal/admin/...` in addition to `./internal/retrieval/...`.
-
-### Tech choices added in Round 9
-
-- **GORM cutover complete.** The five remaining in-memory admin
-  fakes (`NotificationStore`, `ABTestStore`,
-  `ConnectorTemplateStore`, `SynonymStore`, `ChunkQualityStore`)
-  are now Postgres-backed. Each follows the same Round-8 pattern:
-  a `*Row` struct with `TableName()`, an `AutoMigrate` call inside
-  `cmd/api/main.go`, and SQLite-backed unit tests using
-  `github.com/glebarez/sqlite` so the package test suite stays
-  hermetic. After Round 9, no admin handler has an in-memory store
-  fallback — every persisted handler is Postgres-only.
-
-- **Post-merge cross-backend dedup.** The RRF merger
-  (`internal/retrieval/merger.go`) now collapses chunks with the
-  same `chunk_id` arriving from multiple backends (vector + BM25 +
-  graph) before they reach the reranker, keeping the higher-scored
-  entry. This bounds the rerank request size to `O(distinct_chunks)`
-  instead of `O(backends × top_k)`, which matters on the long tail
-  of queries where ≥2 backends return the same blob.
-
-- **Per-stage timeouts decouple retry attempts.** The coordinator
-  now reads `CONTEXT_ENGINE_FETCH_TIMEOUT` / `_PARSE_TIMEOUT` /
-  `_EMBED_TIMEOUT` / `_STORE_TIMEOUT` and wraps each retry attempt
-  in `context.WithTimeout`. Previously the *initial* deadline was
-  shared across retries, so the second/third attempt inherited a
-  stale (near-expired) context — Round-9 makes every attempt
-  independent so a flaky sidecar burst genuinely retries instead of
-  failing on a 1-second residual deadline.
-
-- **Cache warm-on-miss with `context.WithoutCancel`.** When the
-  retrieval handler sees a cache miss and
-  `CONTEXT_ENGINE_CACHE_WARM_ON_MISS=true`, the cache write is
-  scheduled in a fire-and-forget goroutine using
-  `context.WithoutCancel(reqCtx)`. The response returns the moment
-  the result is materialised; Redis-write latency never enters
-  the user's hot path. The detached context inherits values
-  (tenant ID, trace context) but not deadlines or cancellation.
-
-- **gRPC sidecar circuit-breaker Prometheus gauge.** The pool
-  (`internal/grpcpool/pool.go`) emits
-  `context_engine_grpc_circuit_breaker_state{target}` with the
-  spec values `0=closed, 1=half-open, 2=open`. To keep the wire
-  protocol stable as new states get added, the emit path uses an
-  explicit `gaugeValueForState(State) int` switch — not the
-  enum's `iota` value — so renumbering the `State` constants
-  cannot silently drift the wire signal.
-
-- **Prometheus recording rules + multi-file `alertcheck`.**
-  `deploy/recording-rules.yaml` ships pre-computed series
-  (`context_engine_retrieval_availability`, `_p95_latency_ms`,
-  `_pipeline_throughput_per_minute`, `_error_rate_per_minute`,
-  `_cache_hit_rate`) so Grafana panels render in O(1) lookups
-  instead of 5-minute range queries. The `alertcheck` binary now
-  accepts multiple manifest paths and recognises the `record`
-  rule form (with severity/summary checks correctly scoped to
-  alert rules only). `make alerts-check` validates both files.
-
-- **Connection-pool health gauges + sampler goroutine.** Three
-  new gauges
-  (`context_engine_postgres_pool_open_connections`,
-  `_redis_pool_active_connections`,
-  `_qdrant_pool_idle_connections`) report live pool stats. A
-  `PoolSampler` goroutine started from `cmd/api/main.go` reads
-  `db.Stats().OpenConnections`, `redis.PoolStats().TotalConns -
-  IdleConns`, and `qdrant.IdleConnCapacity()` every 30s and
-  publishes the readings. The Qdrant signal reports the
-  configured idle ceiling rather than the live count because
-  `net/http.Transport` doesn't expose live idle-conn counts on
-  its public surface — a stable baseline matching operator
-  capacity is still actionable for alerting.
-
-- **Regression manifest tying PR-#16 + PR-#17 fixes to tests.**
-  `tests/regression/round78_manifest.go` extends the Round-4
-  regression manifest with each Devin Review fix and the
-  regression test that pins it. A meta-test
-  (`round78_manifest_test.go`) reads each entry and verifies the
-  named source file contains a `func TestX(` declaration —
-  so renaming a test without updating the manifest fails CI.
-
-### Tech choices added in Round 8
-
-- **Stage 4 deduplication is now in the hot path.** The
-  coordinator constructs a `pipeline.Deduplicator` from the
-  configured embedding dimension and the
-  `CONTEXT_ENGINE_DEDUP_NEAR_THRESHOLD` cosine cutoff
-  (default `0.97`). The store worker calls `Deduplicator.Drop`
-  on every chunk before persisting to Qdrant/FalkorDB/Postgres;
-  near-duplicate chunks are dropped with an audit-style metric.
-  Gated behind `CONTEXT_ENGINE_DEDUP_ENABLED`.
-
-- **Priority buffer in front of Submit.** When
-  `CONTEXT_ENGINE_PRIORITY_ENABLED=true`, `Coordinator.Submit`
-  routes events through `pipeline.PriorityBuffer`, which
-  drains high-priority (steady-state) events before
-  low-priority (backfill) events. This guarantees that a
-  live-user-triggered ingestion (e.g. a Slack message just
-  posted) is never starved by a long-running backfill.
-
-- **Per-source embedding-model overrides.** The Stage 3 embed
-  worker consults
-  `admin.EmbeddingConfigRepository.Get(sourceID)` and passes
-  the resolved model name to the embedding gRPC service.
-  When no row exists the worker falls back to the default
-  model. This unblocks experiments like “use
-  `text-embedding-3-large` for the GitHub source and
-  `bge-large` for everything else” without forking the
-  pipeline.
-
-- **Retry analytics wired into `runWithRetry`.** Every
-  attempt — success, retry, failure — is recorded on
-  `pipeline.RetryAnalytics`. `GET
-  /v1/admin/pipeline/retry-stats` now returns live data from
-  the ingest binary instead of a static placeholder.
-
-- **Notification dispatcher in the audit pipeline.** The
-  audit repository is wrapped with a
-  `notifyingAuditRepository` that calls
-  `NotificationDispatcher.Dispatch` after every successful
-  audit-log insert. The dispatcher walks the per-tenant
-  notification preferences for the event type, fans the
-  payload out to webhook and email targets, and persists
-  every attempt in `notification_delivery_log` (with
-  `next_retry_at` for retryable failures).
-
-- **All six admin stores are now Postgres-backed.**
-  `QueryAnalyticsStoreGORM`, `PinnedResultStoreGORM`,
-  `SyncHistoryGORM`, `LatencyBudgetGORM`, `CacheTTLGORM`, and
-  `CredentialHealthGORM` use the same GORM patterns as the
-  rest of the admin surface. `cmd/api/main.go` no longer
-  instantiates the in-memory variants; those remain only as
-  test fakes.
-
-- **Retrieval handler hooks for admin-owned state.** Three
-  new setters on `retrieval.Handler` decouple the retrieval
-  pipeline from `cmd/api`'s wiring:
-  - `SetLatencyBudgetLookup` — bounds the request context
-    via `context.WithTimeout(req.Context, budget)` so a
-    per-tenant `max_latency_ms` actually shortens the
-    request deadline.
-  - `SetCacheTTLLookup` — consulted on every
-    `cache.Set(...)` so per-tenant TTL overrides flow
-    through to Redis `EXPIRE`.
-  - `SetPinLookup` — invoked after policy filtering and
-    before caching; pinned chunks are inserted via
-    `pin_apply.ApplyPins` at the configured positions.
-
-- **Notification retry worker.** A new background worker
-  (`admin.NotificationRetryWorker`) scans
-  `notification_delivery_log` for rows whose `next_retry_at`
-  has passed, redelivers them via the configured
-  `NotificationDelivery`, and applies linear backoff. Rows
-  that exhaust `DefaultMaxRetryAttempts` (5) are
-  dead-lettered: `status=failed` with `next_retry_at`
-  cleared.
-
-- **Credential health worker.** `cmd/ingest/main.go`
-  registers a background goroutine that ticks every
-  `CONTEXT_ENGINE_CREDENTIAL_HEALTH_INTERVAL` (default `1h`).
-  Each tick lists every active source, invokes
-  `connector.Validate()`, persists the outcome to
-  `source_health.credential_*`, and emits the audit event
-  `source.credential_invalid` on failure (which then fans out
-  through the notification dispatcher).
-
-- **CI fast-lane gains alerts-check and rollback-parity.**
-  `.github/workflows/ci.yml` adds two PR-blocking jobs:
-  `fast-alerts` runs `make alerts-check` (validates
-  `deploy/alerts.yaml`) and `fast-rollback-parity` runs the
-  `migrations/rollback/...` tests that enforce every forward
-  migration has a matching down-script.
-
-### Tech choices added in Round 11
-
-- **Stage-4 hook timeout guard.** Every Stage-4 GORM hook
-  (`scoreAndRecordBlocks`, `recordSyncStart`,
-  `FinishBackfillRun`) is wrapped in `runWithHookTimeout`,
-  which spawns a goroutine to invoke the hook and uses
-  `context.WithTimeout` to bail at the configured deadline.
-  The default is 500ms (overridable via
-  `CONTEXT_ENGINE_HOOK_TIMEOUT`). The wrapper is fail-open:
-  on timeout the pipeline keeps draining. Expirations bump
-  `HookTimeoutsTotal{hook}` so operators have a rolling
-  signal of which hook is sick.
-
-- **Batch retrieval diversity threading.** The batch handler
-  copies the request's `Diversity` (MMR lambda) into every
-  `Handler.Retrieve` call so a per-batch lambda is honoured
-  rather than silently dropped. The SSE streaming handler
-  similarly threads the per-backend explain trace through
-  every event when the caller sets `explain: true`.
-
-- **Prometheus cardinality policy.** No metric may use
-  `tenant_id` as a label. Tenant identity is a log field
-  (`slog.With("tenant_id", ...)`) only. Enforced by a
-  grep-based test against the source of
-  `internal/observability/metrics.go`; CI rejects any new
-  metric registration that violates the rule. This caps
-  Prometheus's series cardinality at the number of
-  service-level metrics, not the per-tenant cross-product.
-
-- **GORM graceful degradation pattern.** Three lookup
-  call-sites on the retrieve hot path
-  (`LatencyBudgetLookup`, `CacheTTLLookup`, `PinLookup`) are
-  wrapped in goroutine-based `safe*` helpers in
-  `internal/retrieval/graceful_degradation.go`. Each helper
-  invokes the lookup in a goroutine, watches for a 200ms
-  `context.WithTimeout` deadline, and recovers from
-  panics. On timeout/panic the wrapper logs a
-  `slog.Warn{tenant_id, store}`, increments
-  `context_engine_gorm_store_lookup_errors_total{store}`,
-  and returns a documented fallback so the retrieval handler
-  succeeds on defaults rather than returning 500. The 200ms
-  budget is intentionally fixed (no env override) so the
-  hot-path SLO never drifts.
-
-- **Migration ordering test.** `migrations/migration_order_test.go`
-  asserts three structural invariants on the migrations
-  directory: no duplicate numeric prefixes (catches merge
-  conflicts), strictly monotonic numbering from `001`
-  (catches deleted migrations), and rollback parity (every
-  forward migration has a matching
-  `rollback/NNN_*.down.sql`). Replaces the weaker presence
-  check in `rollback_test.go`.
-
-- **Query analytics source tagging.** Every retrieval event
-  now carries a `source` enum (`user` | `cache_warm` |
-  `batch`). The retrieve handler defaults to `user`; the
-  batch handler tags `batch`; the cache-warm worker tags
-  `cache_warm`. Operators querying `query_analytics` can
-  now distinguish organic traffic from warm-up and batch
-  traffic without filtering by `query_text`. Migration
-  `033_query_analytics_source.sql` adds the column with
-  default `'user'` so historical rows remain queryable.
-
-- **Health probe latency enrichment.** `/readyz` returns a
-  `latencies` map (`postgres_ms`, `redis_ms`, `qdrant_ms`)
-  measured via a single timed ping per backend. This is the
-  hook external monitoring uses to distinguish "up-but-slow"
-  from "up-and-healthy" — a backend that returns 200 in
-  300ms while p95 is normally 5ms is degraded, not healthy.
-
-### Tech choices added in Round 12
-
-- **DLQ auto-replay pattern.** Round 12 Task 6 introduces
-  `internal/pipeline/dlq_auto_replay.go`, a background worker
-  that periodically scans `dlq_messages` for rows with
-  `replay_count < max_auto_retries` and `next_replay_at <=
-  now()`. Eligible rows are re-emitted via the same
-  `Replayer` the admin handler uses, with a capped
-  exponential backoff (1m / 5m / 30m). The worker is gated on
-  `CONTEXT_ENGINE_DLQ_AUTO_REPLAY=true` so it stays off in
-  environments where operators want to keep manual control
-  over the DLQ. Metric
-  `context_engine_dlq_auto_replays_total{result=success|failure}`
-  tracks throughput; every replay is also written back to
-  the row's `replay_count` + `next_replay_at` so the worker
-  honours the same idempotency invariants the manual handler
-  enforces.
-
-- **gRPC health checks on Python sidecars.** Each of the
-  three Python services (`services/docling`,
-  `services/embedding`, `services/memory`) now registers a
-  `grpc_health.v1.Health` servicer at boot. Operators get a
-  uniform `grpc_health_probe -addr=:50051` against every
-  Phase-3 worker, identical to the surface the Go process
-  exposes via `/healthz` and `/readyz`. The health protocol
-  also unlocks Kubernetes' built-in `grpc` readiness probe
-  on the Python pods, replacing the previous TCP-only
+### Tech choices — connector framework
+
+- **HTTP clients:** stdlib `net/http` only with `http.NewRequestWithContext` —
+  no vendor SDKs. The same `httptest.Server` test machinery covers every
+  connector. Common error sentinels live in `internal/connector/`:
+  `ErrInvalidConfig`, `ErrNotSupported`, and `ErrRateLimited` (HTTP 429 wrap).
+- **Connector contract:** every connector implements `SourceConnector` plus the
+  optional `DeltaSyncer`, `WebhookReceiver`, and `Provisioner` interfaces.
+  Connectors are registered in the process-global registry and blank-imported
+  by `cmd/api/main.go` and `cmd/ingest/main.go`.
+- **Auth models in practice:** OAuth bearer (Microsoft Graph, Google, Notion,
+  Linear, Asana, Salesforce, HubSpot, Box, Intercom, Webex), API token (Slack,
+  KChat, Confluence Cloud, Jira, GitHub, GitLab, Zendesk, ServiceNow, PagerDuty,
+  Quip), API key as basic-auth user with password `"x"` (BambooHR, Freshdesk,
+  Freshservice), shared secret + `orgId` header (Zoho Desk), HMAC-verified
+  webhook (signed-upload portal), SAS / shared-key signed REST (Azure Blob).
+- **Delta sync patterns:** Microsoft Graph `$deltatoken` / `@odata.deltaLink`
+  rotation, RFC3339 / ISO-8601 `updated_since` filters, microsecond `updated_usec`
+  cursors (Quip), epoch-millisecond `since=<ms>` cursors (Mattermost), snowflake
+  `after=<id>` cursors (Discord), Linear / Monday GraphQL `updatedAt` filters,
+  Salesforce `SystemModstamp`, HubSpot `hs_lastmodifieddate`, Gmail `historyId`,
+  Bitbucket / Trello / Webex page cursors. Empty cursors bootstrap to "now"
+  without replaying history; that invariant is pinned by
+  `internal/connector/bootstrap_audit_test.go`.
+- **Rate limiting:** every connector wraps HTTP 429 (and HTTP-200 GraphQL
+  complexity-exception envelopes for Monday) as `connector.ErrRateLimited`
+  with `Retry-After` honoured. The retry / backoff lives in the pipeline, not
+  the connector.
+- **Completeness audit:** `internal/connector/audit_test.go` is a process-global
+  CI gate. It fails the build if any connector source drops `ErrInvalidConfig`,
+  `ErrNotSupported`, `ErrRateLimited`, or `http.NewRequestWithContext`.
+- **Smoke / runbook gates:** `tests/e2e/connector_smoke_test.go` pins the
+  registry to at least 54 entries and drives a full
+  Validate → Connect → ListNamespaces → ListDocuments → FetchDocument lifecycle
+  per connector. `docs/runbooks/runbook_test.go` enforces a matching per-connector
+  runbook with the four required sections (credential rotation, quota /
+  rate-limit incidents, outage detection, and error-code surface).
+- **Schema validation:** `internal/connector/schema_validator.go` exposes
+  `CredentialSchemaProvider` + `ValidateCredentialsErr` (object / required /
+  properties / type / enum / additionalProperties) wired into
+  `POST /v1/admin/sources/preview` before `Validate()` is called.
+
+### Tech choices — pipeline
+
+- **Stages:** the 4-stage Fetch → Parse → Embed → Store pipeline in
+  `internal/pipeline/` is wired as a coordinator over goroutines + channels.
+  Stage 2 (Parse) is a gRPC client to the Python Docling sidecar; Stage 3
+  (Embed) is a gRPC client to the Python embedding sidecar with a
+  `RemoteEmbedder` seam so external embedding APIs can plug in behind
+  per-tenant policy.
+- **Per-tenant Kafka routing:** Sarama `SyncProducer` keys partitions with
+  `tenant_id||source_id` (`pipeline.PartitionKey`). The consumer rejects
+  body/key mismatches as poison messages and surfaces single-pipe legacy keys
+  via `ConsumerConfig.OnLegacyKey` so production can metric the rate.
+- **Backfill rate control:** `pipeline.RateController` interface decouples the
+  orchestrator from the limiter implementation. `pipeline.TickerRate` paces
+  tests; production wiring uses `admin.BoundController` over the Redis token
+  bucket.
+- **Per-source rate limiter:** atomic Lua token bucket in Redis keyed by
+  `(tenant_id, source_id)`. Loaded once via `ScriptLoad` with an `Eval`
+  fallback for `NOSCRIPT` after a Redis flush.
+- **Dedup, priority, and ACL hooks (flag-gated):**
+  `CONTEXT_ENGINE_DEDUP_ENABLED` enables content-hash dedup at Stage 4;
+  `CONTEXT_ENGINE_PRIORITY_BUFFER_ENABLED` enables a priority buffer for
+  hot-tenant fairness; `CONTEXT_ENGINE_CHUNK_ACL_ENABLED` gates per-chunk ACLs
+  + shard pre-gen filtering.
+- **Stage-4 hook framework:** `CONTEXT_ENGINE_CHUNK_SCORING_ENABLED` enables
+  the chunk-quality scoring hook; `CONTEXT_ENGINE_HOOK_TIMEOUT` (default
+  `500ms`) bounds GORM hook latency so a sick store can never stall the hot
+  path.
+- **Stage breakers and graceful backpressure:** per-stage circuit breakers
+  open / half-open / close on stage error rate and feed a Prometheus dashboard.
+  `coordinator.PausedSourceFilter` lets Stage 1 drain in-flight work cleanly
+  when a source is auto-paused, instead of retrying against the paused
+  upstream.
+- **Auto-pauser:** `internal/admin/source_auto_pause.go` watches a sliding
+  window error rate and additionally honours
+  `CONTEXT_ENGINE_SOURCE_AUTO_PAUSE_THRESHOLD` for a consecutive-failure
+  fast-stop. The audit row records `trigger=error_rate` vs
+  `trigger=consecutive_failures`.
+- **Retention worker:** `internal/pipeline/retention_worker.go` periodically
+  sweeps Qdrant / FalkorDB / Tantivy / Postgres against the layered
+  tenant / source / namespace retention rules in
+  `migrations/010_retention_policy.sql`.
+- **Reindex orchestrator:** `internal/pipeline/reindex.go` enumerates
+  documents by `(tenant_id, source_id, [namespace_id])` and re-emits
+  Stage 2-4 events without re-fetching.
+- **DLQ surface:** `migrations/009_dlq_messages.sql` persists every
+  dead-letter envelope. The DLQ admin handler exposes
+  `GET /v1/admin/dlq*`, replay enforces `max_retries`, the DLQ analytics
+  endpoint nests a `by_connector_category` rollup, and
+  `migrations/040_dlq_category.sql` adds a `category` column
+  (`transient` / `permanent` / `unknown`) so the auto-replayer skips
+  permanent rows.
+- **Webhook HMAC verifier:** `internal/connector/webhook_verify.go` is the
+  shared HMAC-SHA256 / SHA-1 / token verifier wired into every connector that
+  implements `WebhookReceiver`.
+
+### Tech choices — retrieval
+
+- **BM25 search:** `github.com/blevesearch/bleve/v2` — pure-Go full-text
+  index, kept behind a small interface so the backend can swap to
+  `tantivy-go` later without changing the retrieval handler. The "Go binary,
+  no native deps" invariant rules out the Rust toolchain at build time.
+- **Graph traversal:** `github.com/FalkorDB/falkordb-go` (FalkorDB is a Redis
+  module that speaks `GRAPH.*` commands). One graph per tenant, named after
+  the tenant id.
+- **Redis client / semantic cache:** `github.com/redis/go-redis/v9`. Cache
+  key is a SHA-256 over `(tenant_id, channel_id, query_embedding,
+  scope_hash)` with a per-tenant key prefix; tests use
+  `github.com/alicebob/miniredis/v2`. The cache is explicitly invalidated by
+  Stage 4 writes via `SemanticCache.Invalidate(chunkIDs)` and per-source via
+  `SemanticCache.InvalidateBySources(sourceIDs)`. `GetOrRefresh` does
+  cache-aside background refresh.
+- **Errgroup fan-out:** `golang.org/x/sync/errgroup` with a per-call context
+  derived from per-backend deadlines. Backend errors are logged and surfaced
+  as `policy.degraded`, never as a 5xx. Per-backend timing rides on
+  `RetrieveResponse.Timings` (vector_ms / bm25_ms / graph_ms / memory_ms /
+  merge_ms / rerank_ms).
+- **Merger and reranker:** reciprocal-rank fusion merger with a Go-side
+  lightweight reranker (BM25 blend + freshness boost) and a `Reranker`
+  interface for a future cross-encoder. The gRPC cross-encoder reranker
+  sidecar (`proto/reranker/v1/`, `services/reranker/`) is wired behind the
+  same interface for tail demotion.
+- **Diversity, dedup, and query expansion (flag-gated):** batch-level
+  diversity in `merger.go`, cross-backend dedup in `dedup.go`, and
+  synonym-driven BM25 expansion gated behind
+  `CONTEXT_ENGINE_QUERY_EXPANSION_ENABLED`.
+- **Cache warming and pinning:** the `/v1/admin/retrieval/warm-cache` and
+  pinned-results admin endpoints (GORM-backed) keep hot queries pre-warmed
+  and let admins force results to the top of the rerank slate.
+- **Chunk merging:** `internal/retrieval/chunk_merger.go` does post-rerank
+  adjacent-short-chunk merging gated behind
+  `CONTEXT_ENGINE_CHUNK_MERGE_ENABLED`.
+- **Explain and stream:** `/v1/retrieve/explain` returns per-chunk scoring
+  breakdowns; `/v1/retrieve/stream` is the SSE streaming surface gated
+  behind `CONTEXT_ENGINE_SSE_STREAMING_ENABLED`.
+- **Bulk retrieval:** `/v1/retrieve/batch` fans concurrent retrievals with a
+  configurable `max_parallel` cap (default 8, hard limit 32) and isolates
+  per-request policy so one failed query does not fail the batch.
+
+### Tech choices — policy framework
+
+- **Privacy modes:** `internal/policy/privacy_mode.go` defines a total order
+  over `no-ai` < `local-only` < `local-api` < `hybrid` < `remote`.
+  `EffectiveMode` returns the stricter of the channel-level and
+  tenant-level modes.
+- **ACLs and recipient policy:** allow / deny ACLs (`acl.go`) and recipient
+  policy (`recipient.go`) compose with privacy modes; they are wired into
+  the retrieval handler via `policy_snapshot.go`.
+- **Simulator:** `simulator.go` is the what-if engine over a
+  copy-on-write `PolicySnapshot.Clone()`; `simulator_diff.go` returns
+  per-tier counts and a percentage data-flow delta; `simulator_conflict.go`
+  detects privacy-mode overrides, ACL overlaps, and recipient-policy
+  contradictions.
+- **Drafts and audited promotion:** `draft.go` is the GORM-backed draft
+  store (`migrations/005_policy_drafts.sql`), isolated from the live
+  resolver. `promotion.go` is the audited promotion FSM with
+  `policy.promoted` / `policy.rejected` audit actions; the audit row rides
+  the outer transaction via `AuditWriter.CreateInTx`, so a `LiveStore`
+  failure rolls the audit row back along with the rest.
+- **Live store + resolver:** `live_store.go` applies snapshots
+  transactionally to `tenant_policies`, `channel_policies`,
+  `policy_acl_rules`, and `recipient_policies` in `004_policy.sql`.
+  `live_resolver.go` is the read counterpart used by both retrieval and
+  the simulator.
+- **Device-first hint:** `internal/policy/device_first.go::Decide` consumes
+  `channel_policies.deny_local_retrieval` (added in
+  `migrations/007_channel_deny_local.sql`) so the `channel_disallowed`
+  reason round-trips end-to-end.
+- **Privacy-strip enrichment:** `internal/retrieval/privacy_strip.go`
+  enriches every retrieval response with the privacy label that fired.
+
+### Tech choices — admin & operations
+
+- **Source-management API:** Gin handlers in `internal/admin/` scoped under
+  the auth middleware group, backed by GORM. `migrations/002_sources.sql`
+  + `003_source_health.sql` model sources and source health.
+- **Source-health tracking:** a separate `source_health` Postgres table
+  keeps `last_success_at`, `last_failure_at`, `lag`, `error_count`, and a
+  derived `status` column. `admin.DeriveStatus` computes the status from
+  configurable thresholds.
+- **Forget-on-removal worker:** a Redis `SET NX EX` fenced lease prevents
+  concurrent forget-job runs from racing a re-add. The worker fans out to a
+  list of `ForgetSweeper` implementations (one per storage tier).
+- **Bulk source surface:** `POST /v1/admin/sources/bulk` runs concurrent
+  source operations under one audit envelope.
+  `POST /v1/admin/sources/bulk-reindex` and
+  `POST /v1/admin/sources/bulk-rotate` are self-documenting aliases that
+  funnel through the same concurrency / audit pipeline.
+- **Credential rotation:** `POST /v1/admin/sources/:id/rotate-credentials`
+  validates new credentials via the connector's `Validate` before swapping;
+  the previous credential is held for `CredentialGracePeriod` (1h) so
+  in-flight requests drain.
+- **GORM-backed stores:** synonyms, retrieval experiments, notification
+  subscriptions, connector templates, latency budgets, cache TTLs, pinned
+  results, query analytics, sync history, chunk quality, audit retention,
+  api_keys, and slow-query analytics each have a dedicated GORM store
+  reachable via `/v1/admin/*` endpoints and protected by a graceful-degrade
+  lookup wrapper with a 200 ms timeout.
+- **DLQ replay and audit retention:** `internal/admin/dlq_handler.go`
+  surfaces DLQ entries with replay (`POST /v1/admin/dlq/:id/replay`);
+  cursor-aware pagination flows through `util/strutil`. The audit-retention
+  worker walks the audit table on a schedule.
+- **Tenant deletion:** `internal/admin/tenant_delete.go` runs a 5-step
+  `TenantDeleter` workflow + `DELETE /v1/admin/tenants/:tenant_id` backed by
+  `migrations/008_tenant_status.sql`.
+- **Sync progress:** `GET /v1/admin/sources/:id/progress` returns
+  discovered / processed / failed / percent_done per namespace, backed by
+  `internal/admin/sync_progress.go`.
+- **Billing webhook + per-tenant usage:** `internal/admin/billing_webhook.go`
+  exposes `POST /v1/admin/webhooks/billing` (plus GET + DELETE) with
+  HTTPS-only URL validation, 32-char minimum shared-secret enforcement,
+  audit-logged lifecycle, and a fakeable `BillingWebhookStore` seam.
+  `migrations/014_tenant_usage.sql` rolls daily tenant usage.
+- **Connector-health and analytics dashboards:**
+  `GET /v1/admin/connectors/health` aggregates per-connector-type
+  healthy/degraded/failing/paused counts plus average lag and error rate.
+  `GET /v1/admin/analytics/connector-health` adds a `window` query
+  parameter (`1h` / `24h` / `7d` / `30d`) with a locked response shape
+  (`tenant_id`, `window`, `as_of`, `summary`) so a future time-series
+  backend can be swapped behind it without breaking clients.
+- **Tenant onboarding wizard:** `POST /v1/admin/tenants/:tenant_id/onboarding`
+  drives the source-by-source onboarding flow.
+- **MessageProbes on /v1/admin/health/summary:** stale connectors, DLQ
+  growth, embedding-model availability, and Tantivy disk usage each have a
   probe.
 
-- **Audit log retention sweeper.** Round 12 Task 17 adds
-  `internal/admin/audit_retention.go`, a background goroutine
-  that deletes `audit_logs` rows older than
-  `CONTEXT_ENGINE_AUDIT_RETENTION_DAYS` (default 90) in
-  batches of 1000 rows per `DELETE`. The batched delete
-  loop keeps each transaction short so the sweeper cannot
-  hold long-running locks on a hot append-only table.
-  Migration `034_audit_retention.sql` adds an index on
-  `audit_logs.created_at` to keep the `WHERE` clause cheap
-  even on Postgres deployments with deep history. The
-  cutoff is computed at the top of each sweep, so a
-  long-running sweep does not drift the cutoff forward
-  mid-loop. Metric: `context_engine_audit_rows_expired_total`.
-
-- **Adaptive rate-limiter observability.** Round 12 Task 13
-  adds two metrics to
-  `internal/connector/adaptive_rate.go`: a gauge
-  `context_engine_adaptive_rate_current{connector}` that
-  tracks the current effective rate, and a counter
-  `context_engine_adaptive_rate_halved_total{connector}`
-  that increments on every adaptive halve. Together they
-  make the adaptive controller observable from Grafana:
-  a halve burst paired with a flat gauge is a stuck
-  rate-limit; a halve burst followed by gauge climb-back
-  is a normal recovery curve.
-
-- **RBAC coverage as a structural test.** Round 12 Task 15
-  adds `tests/integration/rbac_coverage_test.go`, which
-  walks the gin router's registered routes and asserts that
-  every route under `/v1/admin/` includes the RBAC
-  middleware (`internal/admin/rbac.go`) in its handler
-  chain. This is a contract test, not a runtime test —
-  it catches new admin handlers that ship without role
-  gating at the moment a new handler registers, rather
-  than when an attacker discovers the gap.
-
-- **Cache invalidation as a structural test.** Round 12 Task
-  14 adds `internal/retrieval/cache_invalidation_test.go`,
-  which uses Go's AST package to verify every call to
-  `QdrantClient.Upsert`, `FalkorDBClient.WriteNodes`, and
-  `BleveClient.Index` inside `internal/pipeline/` is
-  accompanied by a `cache.Invalidate` call in the same
-  function or its immediate caller. Like the RBAC coverage
-  test, this is a contract test that catches new Stage-4
-  write paths that ship without a cache invalidation
-  companion — the kind of correctness regression that is
-  trivially easy to miss in code review and very expensive
-  to find in production.
-
-- **Scheduler panic recovery.** Round 12 Task 4 promotes the
-  scheduler's panic-recovery wrapper to `SafeTick` and
-  shifts the production loop to use it: the periodic ticker
-  now calls `SafeTick` exclusively, so a panic in any
-  emitter (e.g. a Kafka producer dropping a connection
-  mid-emit) is converted to a logged error + metric bump
-  instead of taking down the scheduler goroutine. Returned
-  errors and recovered panics both increment
-  `context_engine_scheduler_errors_total`. The `last_error`
-  / `last_error_at` columns on the affected
-  `sync_schedules` row persist the most recent failure for
-  operator triage. A clean tick clears those columns so the
-  row reflects current health.
-
-- **Rate-limit status endpoint.** Round 12 Task 16 introduces
-  `GET /v1/admin/sources/:id/rate-limit-status` backed by a
-  `RateLimitInspector` interface in `internal/admin/`. The
-  handler is built on a narrow interface, not the concrete
-  `*RateLimiter`, so the e2e and unit tests can verify the
-  HTTP contract without a Redis dependency. Operators get a
-  six-field snapshot (`current_tokens`, `max_tokens`,
-  `effective_rate`, `halve_count`, `last_429_at`,
-  `is_throttled`) that distinguishes "rate-limited by us"
-  from "rate-limited upstream" in seconds rather than
-  log-diving.
-
-### Tech choices added in Round 13
-
-Round 13 layers a final set of operational and quality
-guardrails on top of Rounds 7-12. The theme is "make the
-platform debuggable, breakable, and recoverable in production":
-new health surfaces, sustained-saturation detectors, payload /
-audit / fallback safety nets, chaos coverage, and dialect-aware
-schema validation.
-
-- **Aggregated health endpoint.** `GET /v1/admin/health/summary`
-  fans out to every health probe (Postgres, Redis, Qdrant,
-  Kafka, gRPC sidecars, credential health) in parallel and
-  returns one JSON document with per-component status, latency,
-  and an overall `healthy | degraded | unhealthy` verdict. The
-  parallel fan-out is bounded by the slowest probe; the per-
-  component timeouts prevent a stuck Qdrant from masking
-  Postgres latency. Implemented in
-  `internal/admin/health_summary_handler.go`.
-
-- **SLO multi-window burn-rate alerts.** `deploy/alerts/slo_burn_rate.yaml`
-  declares the Google-SRE-Book canonical burn-rate alerts for
-  the retrieval P95 SLO (500 ms) and the pipeline throughput
-  SLO. Multi-window means each alert fires only when *both*
-  short (5 m / 1 h) and long (1 h / 6 h) windows agree, so a
-  brief blip doesn't page, but a sustained budget burn does.
-  Wired into `make alerts-check` and asserted in
-  `deploy/alerts_test.go`.
-
-- **Per-stage circuit breakers.** Before Round 13 only the gRPC
-  sidecars had circuit breakers. `internal/pipeline/stage_breaker.go`
-  introduces `StageCircuitBreaker` — a per-stage state machine
-  (closed / open / half-open) that short-circuits to the DLQ
-  when Parse or Embed fail N consecutive times. Gated on
-  `CONTEXT_ENGINE_STAGE_BREAKER_ENABLED` so production can
-  ramp it gradually. Metrics:
-  `context_engine_pipeline_stage_breaker_transitions_total` and
-  `context_engine_pipeline_stage_breaker_short_circuits_total`.
-
-- **Payload size limiter middleware.**
-  `internal/observability/payload_limiter.go` is a Gin
-  middleware + a `net/http` wrapper that rejects bodies larger
-  than `CONTEXT_ENGINE_MAX_REQUEST_BODY_BYTES` (default
-  10 MiB) with HTTP 413. Wired into both `cmd/api` and
-  `cmd/ingest` so a malicious / mis-configured client cannot
-  exhaust pod memory by streaming an unbounded multipart
-  upload. GET/HEAD/DELETE and probe paths
-  (`/metrics`, `/healthz`, `/readyz`) bypass the limiter.
-
-- **Audit log integrity chain.**
-  `internal/audit/integrity.go` exposes
-  `GET /v1/admin/audit/integrity`. The handler reads the
-  recent audit rows, sorts them oldest-first by ID (so the
-  chain is deterministic regardless of query result order),
-  and folds each row into a SHA-256 chain:
-  `next = SHA256(prev || id || tenant_id || actor_id || action || resource_type || resource_id)`.
-  The empty chain hashes a tenant-keyed seed
-  (`audit-chain-empty:<tenant>`) so the response is meaningful
-  even when no rows exist. Operators store the head hash + the
-  last-entry ID between checks; any tampered or deleted row
-  changes the head, while a newly appended row preserves the
-  historical prefix (only the new entry's hash is folded in).
-
-- **Postgres pool leak detector.**
-  `internal/observability/pool_leak_detector.go` polls
-  `db.Stats().OpenConnections` against
-  `CONTEXT_ENGINE_PG_MAX_OPEN` every 30 s and emits a
-  structured warning once utilisation stays above 90 % for
-  three consecutive samples. Publishes the percent reading to
-  `context_engine_postgres_pool_utilization_percent` for the
-  Grafana dashboard. The constructor returns `ErrNoMaxOpen`
-  when the ceiling is unset, which `cmd/api` treats as an
-  opt-in.
-
-- **Embedding fallback path.**
-  `internal/pipeline/embed_fallback.go` provides a
-  deterministic 256-dim hashing-trick embedder that activates
-  when the gRPC sidecar circuit breaker opens and
-  `CONTEXT_ENGINE_EMBED_FALLBACK_ENABLED` is set. The fallback
-  is L2-normalised so cosine similarity stays meaningful, and
-  records the model id `hf-fallback-v1` on the stored chunk so
-  retrieval can filter / down-weight degraded rows. A periodic
-  reindex job is expected to replace them once the sidecar
-  recovers.
-
-- **Chaos coverage.** `tests/e2e/chaos_kafka_test.go` exercises
-  the coordinator's retry + DLQ paths under a simulated Kafka
-  broker outage, and `tests/e2e/concurrent_delete_test.go`
-  proves the cryptographic-forget orchestrator's fenced Redis
-  lease is the single race point. Both use in-process stubs
-  rather than container manipulation so they run reliably in CI
-  without docker-compose timing flakes.
-
-- **OpenAPI completeness gate.**
-  `docs/openapi_test.go::TestOpenAPI_RouterCoverage` parses
-  `internal/admin`, `internal/audit`, and `internal/retrieval`
-  with the Go AST, enumerates every gin route registration
-  prefixed with `/v1/`, normalises `:id` to `{id}`, and asserts
-  each route has a path entry in `docs/openapi.yaml`. This
-  catches the failure mode "new endpoint shipped without a
-  spec entry" — previously a recurring source of contract
-  drift between server and SDK generators.
-
-- **Dialect-aware migration dry-run.**
-  `scripts/migrate-dry-run-pg.sh` launches a disposable
-  Postgres 16 container, applies every `migrations/*.sql` in
-  lexical order, then runs the matching rollbacks in reverse.
-  The previous SQLite-based dry-run could not catch
-  Postgres-specific syntax errors (`JSONB`, `TIMESTAMPTZ`,
-  `ADD COLUMN IF NOT EXISTS`, partial indexes). Wired into
-  CI as `full-migrate-dry-run-pg` (full lane only — it pulls a
-  Postgres image, so it stays out of the fast lane).
-
-- **`make doctor`.** A focused script
-  (`scripts/doctor.sh`) that walks the prereqs a new
-  contributor needs (Go ≥ 1.25, Docker daemon,
-  docker-compose, Python 3.11+, protoc, golangci-lint) and
-  prints a green / red checklist. The script exits non-zero on
-  any required failure so CI can gate too. Reduces onboarding
-  questions in chat.
-
-### Tech choices added in Round 14
-
-- **Per-stage circuit breaker dashboard endpoint.** The breakers
-  added in Round 13 lived in-process only — operators had no
-  way to see live state. `GET /v1/admin/pipeline/breakers`
-  now returns each breaker's state + counters in JSON. The
-  read path is decoupled from the producer side via a small
-  `StageBreakerRegistry` so the admin handler does not need to
-  import the pipeline package directly.
-
-- **In-process latency / throughput ring buffers.** Round-14
-  Tasks 2 and 4 expose P50/P75/P90/P95/P99 retrieval latency
-  per backend and per-stage pipeline throughput via two
-  in-process 60-bucket 1-minute ring buffers. The hot path
-  observes into the buffer directly (no Prometheus round-trip)
-  and the admin handler rolls the window up on demand. Bounded
-  memory, lock-free reads via `sync.RWMutex` snapshots.
-
-- **Persistent slow-query log.** `migrations/038_slow_queries.sql`
-  introduces a write-once `slow_queries` table indexed by
-  `(tenant_id, created_at DESC)`. `LogSlowQuery` writes the
-  row outside the retrieval critical path; the admin endpoint
-  `GET /v1/admin/retrieval/slow-queries` paginates it. Round-13
-  also kept the `slow` column on `query_analytics` for the
-  rollup view — the two surfaces coexist.
-
-- **Two-layer payload validation.** `internal/retrieval/
-  payload_validator.go` validates JSON shape and struct-field
-  invariants for the retrieve / batch / stream endpoints
-  before the handler proper. Rejection routes through the
-  canonical `internal/errors/catalog.go` entry
-  `ERR_INVALID_PAYLOAD`.
-
-- **Audit-integrity worker.** The Round-13 integrity endpoint
-  was lazy (operator-driven). Round 14 adds a periodic worker
-  that verifies the SHA-256 hash chain in the background.
-  Architecturally, the audit package emits the violation
-  metric via a `ObserveFn` callback rather than importing
-  `internal/observability` — same approach as the existing
-  audit-emitter callback. This keeps the audit subsystem
-  re-usable in isolation and avoids the import cycle that
-  surfaced during Round-13 review.
-
-- **API-key grace sweeper + per-tenant payload limits.**
-  Two small admin background workers cement Round-13 surface
-  area: the sweeper transitions `grace`-status rows to
-  `expired` once their `grace_until` passes, and the new
-  `tenant_payload_limits` table (`migrations/039`) lets the
-  payload limiter consult a per-tenant override via the
-  `PayloadLimiterConfig.TenantOverride` callback that already
-  existed.
-
-- **DLQ categorisation.** `migrations/040_dlq_category.sql`
-  adds a `category` column to `dlq_messages`. The consumer
-  derives the category at insert time from the error text
-  (substring rules — `parse`, `schema`, `decode`,
-  `poison` → permanent; `timeout`, `503`, `429`,
-  `connection refused`, `dns` → transient). The
-  auto-replayer skips permanents and the admin list endpoint
-  exposes a `?category=` filter. Legacy rows pre-dating the
-  migration are stamped `unknown` and remain replayable
-  (no flag day).
-
-- **CI parallel split.** The legacy `fast-go` job
-  (gofmt + vet + race + cover + build, all serial) is now
-  three parallel jobs: `fast-check`, `fast-test`,
-  `fast-build`. The new `fast-required` aggregator's
-  `needs:` list explicitly includes all three. Each job pins
-  `actions/cache` on `~/.cache/go-build`. `full-e2e` adds
-  Docker Buildx for image-layer reuse.
-
-- **Round-13 OpenAPI completeness + four new Prometheus
-  alerts.** Round-13 added five admin endpoints but never
-  pinned them in `docs/openapi_test.go`; Round 14 closes that
-  gap and also pins the four new Round-14 endpoints. The new
-  alerts are
-  `AuditIntegrityViolation` (page),
-  `EmbeddingFallbackRateHigh` (warning, > 10% over 15m),
-  `APIKeyGraceExpiringSoon` (warning), and
-  `SlowQueryRateHigh` (warning, > 5% over 15m), each backed
-  by a registered metric.
-
-- **Migration count.** As of Round 14 the highest migration on
-  disk is `migrations/040_dlq_category.sql`. The `migrations/
-  rollback/` directory mirrors every up-migration with a
-  matching `.down.sql`.
-
-### Tech choices added in Round 15
-
-Round 15 expands the connector catalog from 12 to 20 entries
-and adds connector-completeness hardening. No new third-party
-dependencies are introduced; every new connector uses stdlib
-`net/http` against `httptest.NewServer` fixtures in unit tests.
-
-- **Connector catalog expansion (12 → 20).** Round 15 adds
-  eight new entries to the process-global registry:
-  - `kchat` — the missing Phase-1 internal chat connector
-    listed in PROPOSAL.md §4
-    (`internal/connector/kchat/kchat.go`).
-  - `s3` — S3-compatible object storage with stdlib AWS-style
-    SigV4 request signing
-    (`internal/connector/s3/{s3,sigv4}.go`). Works against AWS
-    S3, MinIO, Cloudflare R2, Backblaze B2, and Wasabi without
-    pulling the AWS SDK.
-  - `linear` — Linear GraphQL
-    (`internal/connector/linear/linear.go`) with HMAC-verified
-    webhook handler.
-  - `asana`, `discord`, `salesforce` (SOQL), `hubspot` (CRM v3)
-    — each implements `SourceConnector` + `DeltaSyncer`.
-  - `google_shared_drives` — a wrapper around the existing
-    `googledrive` connector
-    (`internal/connector/googledrive/shared_drives.go`) that
-    filters out My Drive so it presents a shared-drive-only
-    ingestion surface. The wrapper is registered as a separate
-    registry entry; the underlying `googledrive` connector is
-    unchanged.
-
-- **`connector.ErrRateLimited` sentinel.**
-  `internal/connector/source_connector.go` adds a new error
-  sentinel that every iterator wraps on HTTP 429 (and on
-  Slack's `ok=false, error=ratelimited` 200 variant). The
-  adaptive rate limiter in
-  `internal/connector/adaptive_rate.go` matches against
-  `errors.Is(err, connector.ErrRateLimited)` to react. A
-  process-global gate
-  (`internal/connector/audit_test.go`) fails CI if any
-  connector source drops the wrap.
-
-- **`googledrive` shared-drive pagination fix.**
-  `ListNamespaces` now follows `nextPageToken` to completion
-  instead of issuing a single `/drives?pageSize=100` request.
-  Workspaces with >100 shared drives previously dropped any
-  drive beyond the first page; the fix backfills them all.
-
-- **CI `concurrency:` group + `fast-connector-unit` lane.**
-  `.github/workflows/ci.yml` adds a workflow-level
-  `concurrency` block that cancels in-progress runs when a
-  new commit lands on the same PR. The new
-  `fast-connector-unit` job runs
-  `time go test -race -count=1 ./internal/connector/...` in
-  isolation so connector-only PRs get sub-30s feedback; the
-  `fast-required` aggregator gates it alongside the existing
-  fast-lane jobs.
-
-- **Round-15 e2e + regression + integration contract tests.**
-  `tests/e2e/round15_test.go` (build tag `e2e`) exercises the
-  registry count + full KChat lifecycle + 429 propagation.
-  `tests/regression/round1415_manifest.go` + `_test.go`
-  catalogue the Round-14/15 fixes; the meta-test asserts every
-  TestRef resolves to a real `func TestName(` on disk.
-  `tests/integration/connector_contract_test.go` (build tag
-  `integration`) is the compile-time + behaviour-time contract:
-  interface assertions per connector struct, empty-cursor
-  semantics for `DeltaSyncer`, panic-safety for
-  `WebhookReceiver`.
-
-- **Seven new per-connector runbooks.**
-  `docs/runbooks/{kchat,s3,linear,asana,discord,salesforce,hubspot}.md`
-  each cover the four required sections (credential rotation,
-  quota / rate-limit, outage detection / recovery, error
-  codes) enforced by `docs/runbooks/runbook_test.go`.
-  `google_shared_drives` reuses
-  `docs/runbooks/googledrive.md`.
-
-- **Migration count unchanged.** Round 15 introduces no new
-  schema migrations; the highest migration on disk remains
-  `migrations/040_dlq_category.sql`.
-
-### Tech choices added in Round 16
-
-Round 16 expands the connector catalog from 20 to 28 entries
-and wires two new fast-lane CI gates. No new third-party
-dependencies are introduced; every new connector uses stdlib
-`net/http` against `httptest.NewServer` fixtures in unit tests.
-
-- **Connector catalog expansion (20 → 28).** Round 16 adds
-  eight new entries to the process-global registry:
-  - `mattermost` — Mattermost REST API
-    (`internal/connector/mattermost/mattermost.go`). Channel
-    messages + posts; delta via `since=<ms-epoch>` against
-    `/channels/<id>/posts`.
-  - `clickup` — ClickUp v2 REST API
-    (`internal/connector/clickup/clickup.go`). Tasks by
-    list/folder; delta via `date_updated_gt`. Note ClickUp's
-    `Authorization` header carries the raw token (no `Bearer`
-    prefix).
-  - `monday` — Monday.com GraphQL
-    (`internal/connector/monday/monday.go`). Items by board;
-    delta via `__last_updated__` column. Monday signals
-    throttling via the GraphQL error envelope on HTTP 200
-    (`extensions.code=ComplexityException` or
-    `extensions.status_code=429`); the connector's `gql()`
-    helper wraps both to `connector.ErrRateLimited`.
-  - `pipedrive` — Pipedrive REST v1
-    (`internal/connector/pipedrive/pipedrive.go`). Deals /
-    persons / activities; per-token query-string auth
-    (`?api_token=...`); delta via
-    `/recents?since_timestamp=<unix>`.
-  - `okta` — Okta Management API
-    (`internal/connector/okta/okta.go`). Users + groups; delta
-    via `filter=lastUpdated gt "<RFC3339>"`. Pagination uses
-    the RFC 5988 `Link: <url>; rel="next"` header — the
-    `nextLink()` helper parses it. Deprovisioned users emit as
-    `connector.ChangeDeleted` so the downstream index converges
-    on the upstream lifecycle.
-  - `gmail` — Gmail REST API
-    (`internal/connector/gmail/gmail.go`). Read-only ingestion;
-    delta via the `history.list` `historyId` cursor (monotonic
-    int64). DeltaSync bootstrap fetches
-    `/users/me/profile.historyId` and returns it as the
-    bootstrap cursor — no backfill.
-  - `rss` — Generic RSS / Atom feed polling
-    (`internal/connector/rss/rss.go`). Entries as documents;
-    multi-format timestamp parser (RFC3339, RFC1123Z, RFC1123)
-    handles the various publisher conventions; delta via
-    max `<pubDate>` / `<updated>` of the previous poll.
-  - `confluence_server` — Confluence Server / Data Center REST
-    API
-    (`internal/connector/confluence_server/confluence_server.go`).
-    Dual auth: PAT (Bearer) or basic auth (username +
-    password). Delta via CQL
-    `space="<key>" AND lastModified > "<RFC3339>"` against
-    `/rest/api/content/search`. Bootstrap queries
-    `ORDER BY lastModified DESC` with `limit=1` and returns the
-    newest page's `version.when` as the RFC3339 cursor.
-
-- **DeltaSync bootstrap pattern, consistent across the new
-  set.** Every Round-16 connector returns a populated "now"
-  cursor on the first DeltaSync call without backfilling
-  history. The pattern matches the Round-15 HubSpot / Linear /
-  Salesforce / Asana fix: query DESC + limit=1 (or, for Gmail,
-  fetch `/users/me/profile.historyId`) and return the
-  high-water mark.
-
-- **Two new fast-lane CI gates.** `.github/workflows/ci.yml`
-  gains `fast-connector-integration` (runs the
-  `TestConnectorContract` family with the `integration` build
-  tag so the integration contract suite gates every PR without
-  the docker-compose-backed services that block the full lane)
-  and `fast-regression` (runs `go test -count=1
-  ./tests/regression/...` so every regression manifest stays
-  green per-PR). Both are wired into the `fast-required`
-  aggregator.
-
-- **Round-15/16 regression manifest.**
-  `tests/regression/round1516_manifest.go` + `_test.go`
-  catalogue 6 fixes (registry expansion, DeltaSync bootstrap
-  pattern, `ComplexityException` envelope, Gmail history
-  bootstrap, Okta deprovisioned `ChangeDeleted`, audit-coverage
-  widening). The meta-test asserts every TestRef resolves to a
-  real `func TestName(` on disk.
-
-- **Round-16 contract assertions.**
-  `tests/integration/connector_contract_test.go` (build tag
-  `integration`) grew compile-time `SourceConnector` +
-  `DeltaSyncer` assertions per new connector struct and a new
-  `TestConnectorContract_Round16_DeltaSyncerEmptyCursor`
-  table-driven test against Gmail + Okta (heterogeneous
-  bootstrap surfaces).
-
-- **Eight new per-connector runbooks.**
-  `docs/runbooks/{mattermost,clickup,monday,pipedrive,okta,gmail,rss,confluenceserver}.md`
-  each cover the four required sections (credential rotation,
-  quota / rate-limit, outage detection / recovery, error
-  codes) enforced by `docs/runbooks/runbook_test.go`. The
-  registry floor in `runbook_test.go` is now 28.
-
-- **Migration count unchanged.** Round 16 introduces no new
-  schema migrations; the highest migration on disk remains
-  `migrations/040_dlq_category.sql`.
-
-### Tech choices added in Round 17
-
-Round 17 expands the connector catalog from 28 to 36 entries.
-No new third-party dependencies are introduced; every new
-connector uses stdlib `net/http` against `httptest.NewServer`
-fixtures in unit tests and continues the Round-15/16 bootstrap
-contract (empty cursor → DESC + limit=1 → populated cursor
-without history backfill).
-
-- **Connector catalog expansion (28 → 36).** Round 17 adds
-  eight new entries to the process-global registry, grouped by
-  surface family:
-
-  Identity (Graph $deltatoken + Admin SDK updatedMin):
-  - `entra_id` — Microsoft Entra ID
-    (`internal/connector/entra_id/entra_id.go`). Users + groups
-    via Microsoft Graph; delta via `$deltatoken` on
-    `/users/delta` and `/groups/delta`. The deltaLink is
-    persisted as the cursor and replayed on the next call so
-    Graph returns only changes since the last sync.
-    `accountEnabled=false` and the Graph `@removed` tombstone
-    map to `connector.ChangeDeleted`.
-  - `google_workspace` — Google Workspace Directory
-    (`internal/connector/google_workspace/google_workspace.go`).
-    Users + groups via Admin SDK; delta via
-    `updatedMin=<RFC3339>` on
-    `/admin/directory/v1/users?customer=my_customer`.
-    `suspended=true` maps to `connector.ChangeDeleted`.
-
-  Email (Graph @odata.deltaLink for mailbox messages):
-  - `outlook` — Microsoft 365 Outlook mailboxes
-    (`internal/connector/outlook/outlook.go`). Read-only
-    ingestion via the `Mail.Read` scope. Delta via Graph
-    `@odata.deltaLink` rotation on `/messages/delta`; nextLink
-    pagination via `@odata.nextLink`.
-
-  HR (updated-from / changed-since filters with explicit
-  deletion semantics):
-  - `workday` — Workday REST
-    (`internal/connector/workday/workday.go`). Workers via
-    `/workers`; delta via `Updated_From=<RFC3339>` filter.
-    `active=false` + `terminationDate` map to
-    `connector.ChangeDeleted` so the downstream directory drops
-    terminated employees automatically.
-  - `bamboohr` — BambooHR
-    (`internal/connector/bamboohr/bamboohr.go`). Employee
-    directory via `/v1/employees/directory`; delta via
-    `/v1/employees/changed?since=<ISO8601>`. The HTTP basic-auth
-    header puts the api_key as the *username* and a literal
-    `"x"` as the password — pinned by
-    `TestBambooHR_BasicAuthHeader` so a regression that flipped
-    the parameters (and would leak the key via BambooHR's
-    request logs) breaks CI.
-  - `personio` — Personio
-    (`internal/connector/personio/personio.go`). Employees via
-    OAuth 2.0 client-credentials grant (`POST /auth` →
-    bearer); delta via `updated_from=<RFC3339>` on
-    `/company/employees`. `status="inactive"` maps to
-    `connector.ChangeDeleted`.
-
-  Generic (XML sitemap recursion with multi-format lastmod):
-  - `sitemap` — sitemap.xml crawl
-    (`internal/connector/sitemap/sitemap.go`). XML decoder
-    distinguishes `<urlset>` (terminal) from `<sitemapindex>`
-    (recursive); a `maxDepth` guard prevents cycles when a
-    sitemap accidentally references itself. The `<lastmod>`
-    parser accepts RFC3339, RFC3339Nano,
-    `2006-01-02T15:04:05`, and `2006-01-02` so it tolerates the
-    variety of timestamp conventions observed in the wild.
-    Optional basic-auth or Bearer for intranet sitemaps gated
-    behind a CDN.
-
-  Knowledge (REST DESC walk with cursor-based pagination):
-  - `coda` — Coda
-    (`internal/connector/coda/coda.go`). Docs + pages via Coda
-    REST API; delta via `sortBy=updatedAt&direction=DESC` walk
-    with `pageToken` pagination, stopping at the high-water
-    `updatedAt` cursor.
-
-- **Heterogeneous DeltaSync bootstrap surfaces.** Round 17
-  extends the Round-15/16 "no backfill on first call" contract
-  across three new families: Graph `@odata.deltaLink` /
-  `$deltatoken` rotation (Entra ID, Outlook), `updated_from` /
-  `changed-since` RFC3339 filters (Google Workspace, Workday,
-  BambooHR, Personio), and XML `<lastmod>` cursors (Sitemap).
-  The Round-17 `TestConnectorContract_Round17_DeltaSyncerEmptyCursor`
-  table-driven test pins one connector per family.
-
-- **No new CI lanes.** The Round-16 fast-lane gates
-  (`fast-connector-unit` running `./internal/connector/...`,
-  `fast-connector-integration` running `integration`-tagged
-  contract tests, `fast-regression` running
-  `./tests/regression/...`) pick up the new surface
-  automatically. The `fast-required` aggregator continues to
-  gate branch protection.
-
-- **Round-17 regression manifest.**
-  `tests/regression/round1617_manifest.go` + `_test.go`
-  catalogue 6 fixes (registry expansion to 36, DeltaSync
-  bootstrap contract for each new connector, deprovisioned-
-  identity → `ChangeDeleted`, 429 → `ErrRateLimited` sweep,
-  BambooHR basic-auth header order, sitemap-index recursion).
-  The meta-test asserts every TestRef resolves to a real
-  `func TestName(` on disk.
-
-- **Eight new per-connector runbooks.**
-  `docs/runbooks/{entraid,googleworkspace,outlook,workday,bamboohr,personio,sitemap,coda}.md`
-  each cover the four required sections (credential rotation,
-  quota / rate-limit, outage detection / recovery, error
-  codes) enforced by `docs/runbooks/runbook_test.go`. The
-  registry floor in `runbook_test.go` is now 36.
-
-- **Migration count unchanged.** Round 17 introduces no new
-  schema migrations; the highest migration on disk remains
-  `migrations/040_dlq_category.sql`.
-
-### Tech choices added in Round 18
-
-Round 18 expands the connector catalog from 36 to 42 entries
-and layers production-grade hardening on top. No new third-party
-runtime dependencies are introduced — every new connector uses
-stdlib `net/http` and `crypto/hmac`/`crypto/sha256` (Azure Blob
-shared-key signing, upload-portal HMAC) against
-`httptest.NewServer` fixtures in unit tests, and the new gRPC
-cross-encoder reranker pins the existing
-`google.golang.org/grpc` + `google.golang.org/protobuf`
-versions.
-
-- **Connector catalog expansion (36 → 42).** Six new entries
-  in the process-global registry, grouped by surface family:
-
-  ECM (REST + auth-token cursor):
-  - `sharepoint_onprem` — SharePoint Server / on-prem
-    (`internal/connector/sharepoint_onprem/sharepoint_onprem.go`).
-    NTLM or app-password against the on-prem REST surface
-    (`/_api/web/lists`); delta via
-    `Modified gt datetime'<ISO8601>'`. Implements
-    `SourceConnector` + `DeltaSyncer`.
-  - `egnyte` — Egnyte
-    (`internal/connector/egnyte/egnyte.go`). OAuth 2.0 Bearer;
-    file listing via `/pubapi/v1/fs/<path>`; delta via
-    `/pubapi/v2/events/cursor`. Implements `SourceConnector` +
-    `DeltaSyncer`.
-
-  Storage (object-store walk + lifecycle cursor):
-  - `azure_blob` — Azure Blob Storage
-    (`internal/connector/azure_blob/azure_blob.go`). SAS-token
-    or shared-key auth with stdlib HMAC-SHA256 signing; blob
-    listing via `?comp=list&restype=container`; delta via the
-    `x-ms-blob-last-modified` header. Implements
-    `SourceConnector` + `DeltaSyncer`. No vendor SDK.
-  - `gcs` — Google Cloud Storage
-    (`internal/connector/gcs/gcs.go`). OAuth 2.0 bearer; object
-    enumeration via the JSON API
-    (`storage.googleapis.com/storage/v1/b/<bucket>/o`); delta
-    via `timeCreated` / `updated` filter. Implements
-    `SourceConnector` + `DeltaSyncer`.
-
-  Knowledge / wiki (Token-ID + Token-Secret):
-  - `bookstack` — BookStack wiki
-    (`internal/connector/bookstack/bookstack.go`). Token-ID +
-    Token-Secret header; page listing via `/api/pages` with
-    `updated_at` filter + sort. Implements `SourceConnector` +
-    `DeltaSyncer`.
-
-  Receiver (signed-URL multipart upload):
-  - `upload_portal` — signed-upload portal
-    (`internal/connector/upload_portal/upload_portal.go`). HMAC-
-    verified multipart receiver implementing
-    `SourceConnector` + `WebhookReceiver`; validates the
-    signed-URL token, file type, size limit, and tenant scope
-    before emitting `SourceDocument` events into Kafka.
-
-  All six follow the established pattern: `init()` registration
-  via `connector.RegisterSourceConnector`, HTTP 429 wrapped as
-  `connector.ErrRateLimited`, `http.NewRequestWithContext`
-  everywhere, `httptest.NewServer`-backed unit tests, blank-
-  imports in `cmd/api/main.go` and `cmd/ingest/main.go`. The
-  `internal/connector/audit_test.go` floor is now 41 first-
-  class connectors (excluding `google_shared_drives` which
-  shares the Google Drive auth and runbook).
-
-- **Cross-encoder reranker (Task 9).** A new gRPC contract at
-  `proto/reranker/v1/reranker.proto` defines a single
-  `Rerank(RerankRequest) → RerankResponse` RPC. The Go-side
-  `CrossEncoderReranker` (`internal/retrieval/`) calls the
-  Python sidecar stub under `services/reranker/` and is gated
-  behind `CONTEXT_ENGINE_CROSS_ENCODER_ENABLED`. The light-
-  weight Go reranker remains the default.
-
-- **Retrieval query routing (Task 10).** The
-  `QueryClassifier` in `internal/retrieval/query_classifier.go`
-  classifies queries before fan-out: short exact-match
-  queries weight BM25 higher, semantic / conceptual queries
-  weight vector higher, entity queries weight graph higher.
-  Gated behind `CONTEXT_ENGINE_QUERY_ROUTING_ENABLED`.
-
-- **Embedding-model versioning (Task 11).** Migration
-  `041_chunk_embedding_version.sql` adds an embedding-model
-  version column to `chunks`. The new
-  `StaleEmbeddingDetector` marks chunks whose embedding model
-  diverges from the tenant's current model and a background
-  worker re-processes them through Stage 3.
-
-- **DLQ analytics dashboard (Task 12).** New endpoint
-  `GET /v1/admin/dlq/analytics` in
-  `internal/admin/dlq_analytics_handler.go` returns error-
-  category distribution (transient / permanent / unknown),
-  top error messages, failure rate over time, and per-
-  connector failure distribution.
-
-- **Tenant onboarding wizard (Task 13).** New endpoint
-  `POST /v1/admin/tenants/:tenant_id/onboarding` validates
-  prerequisites — at least one connected source, at least one
-  promoted policy draft, a healthy backend — and returns a
-  structured `ready / checks[]` envelope for the admin
-  portal's guided setup flow.
-
-- **Per-chunk explain breakdown (Task 14).** The
-  `explain: true` response now carries per-chunk scoring
-  breakdown: vector similarity, BM25 tf-idf, graph hop depth,
-  memory recency, RRF contribution, pin boost, and MMR
-  diversity penalty.
-
-- **Round-18 testing depth (Tasks 15-18).**
-  `tests/e2e/round18_test.go` (build tag `e2e`) covers the
-  42-entry registry pin, full lifecycle for two new connectors
-  (Azure Blob + BookStack), 429 propagation across the new
-  set, and the reranker / routing paths.
-  `tests/regression/round1718_manifest*.go` cattalogues the
-  Round-17/18 fixes with a meta-test asserting every
-  `TestRef` resolves on disk.
-  `tests/integration/connector_contract_test.go` adds compile-
-  time `SourceConnector` + `DeltaSyncer` assertions for every
-  new connector struct plus a
-  `TestConnectorContract_Round18_DeltaSyncerEmptyCursor`
-  table.
-  `tests/e2e/security_test.go` validates that credential
-  fields never log in plain text, cross-tenant isolation on
-  the new admin endpoints, RBAC coverage, and HMAC signature
-  verification on the upload portal.
-
-- **CI fast-lane improvements (Tasks 19-20).** Two new fast-
-  lane jobs gate every PR: `fast-govulncheck` runs
-  `govulncheck ./...` (also exposed as `make vulncheck`), and
-  `fast-openapi` runs `docs/openapi_test.go` in isolation so
-  the spec coverage is visible without re-running the
-  internal/test bucket. Both are wired into the
-  `fast-required` aggregator.
-
-### Tech choices added in Round 19
-
-Round 19 layers advanced retrieval and operations features on
-top of the Round-18 connector floor. One new migration
-(`042_document_content_type.sql`) and no new third-party
-runtime dependencies — every new feature uses stdlib `net/http`
-and the existing GORM + Gin + Redis stack.
-
-- **Per-source semantic-cache invalidation + cache-aside
-  refresh (Task 21).** `SemanticCache.InvalidateBySources`
-  drops only entries whose hits cite the named sources, via
-  per-source tag sets stored under
-  `cache-tag:source:<tenant>:<source>`.
-  `SemanticCache.GetOrRefresh` returns the cached value
-  immediately and kicks off a detached refresh goroutine when
-  the entry has aged past `staleAfter`, with a 30-second
-  refresh timeout so the goroutine doesn't outlive the
-  process.
-
-- **Multi-modal document prep (Task 22).** New
-  `DocumentContentType` enum (text / image / audio / video)
-  in `internal/pipeline/types.go` plus `ContentTypeFromMIME`.
-  `Document.ContentType` and `StageInput.ContentType`
-  propagate the value so Stage 2 (Parse) can route
-  image / audio / video content to the appropriate parsers.
-  Migration `042_document_content_type.sql` adds a non-null
-  `content_type` column with default `'text'` to both `chunks`
-  and `documents` plus a covering index.
-
-- **Chunk merger (Task 23).** New
-  `internal/retrieval/chunk_merger.go` implements a post-
-  rerank step that combines adjacent same-document short
-  chunks into larger context windows, preserving the reranker
-  order and the maximum score per group. Gated behind
-  `CONTEXT_ENGINE_CHUNK_MERGE_ENABLED` with configurable
-  `MinTextChars` (256), `MaxMergedTextChars` (4096),
-  `MaxGroupSize` (8), and a separator (`"\n\n"`).
-
-- **Per-connector health auto-pause (Task 24).** New
-  `internal/admin/source_auto_pause.go` tracks per-source
-  success / error counters in a sliding-window bucket ring;
-  when the error rate exceeds `ErrorRateThreshold` over
-  `WindowDuration` with at least `MinSampleSize` samples and
-  the source isn't in the `PauseCooldown` window, it calls
-  `PauseSource` on the underlying admin repo and emits an
-  `ActionSourceAutoPaused` (`source.auto_paused`) audit row.
-  The new Prometheus alert `SourceAutopaused` in
-  `deploy/alerts.yaml` pages on
-  `increase(context_engine_source_auto_paused_total[10m]) > 0`.
-
-- **Admin bulk-action expansion (Task 25).** The handler at
-  `POST /v1/admin/sources/bulk` now accepts `reindex` and
-  `rotate-credentials` in addition to pause / resume /
-  disconnect. Two new optional interfaces (`BulkSourceReindexer`,
-  `BulkSourceCredRotator`) wire into the handler via
-  `WithReindexer` / `WithCredRotator` builder methods, so a
-  deployment that doesn't wire them simply rejects the new
-  actions with HTTP 400. Each action emits its own audit
-  event (`ActionReindexRequested`,
-  `ActionSourceCredentialsRotated`) with per-source error
-  isolation.
-
-- **Tenant usage billing webhook (Task 26).** New
-  `internal/admin/billing_webhook.go` runs a daily worker that
-  aggregates per-tenant `tenant_usage` rows for the previous
-  UTC day and POSTs a single JSON envelope (`tenant_id`,
-  `day`, `usage{metric: count}`) per tenant to the configured
-  `CONTEXT_ENGINE_BILLING_WEBHOOK_URL` with a deterministic
-  `X-Idempotency-Key`. Per-tenant error isolation — a
-  failing webhook for one tenant doesn't block the rest of
-  the batch.
-
-- **Operational health-check expansion (Task 27).** A new
-  optional `MessageProbe` interface on
-  `internal/admin/health_summary_handler.go` lets probes
-  attach an operator-actionable message to a degraded /
-  unhealthy row. Four new probes ship in
-  `internal/admin/health_summary_round19_probes.go`:
-  `stale_connectors` (sources that haven't synced in >24h,
-  via `StaleConnectorReader`), `dlq_growth` (DLQ growth rate
-  over the last hour, via `DLQGrowthReader`),
-  `embedding_model` (Stage-3 sidecar reachability, via
-  `EmbeddingModelPinger`), and `tantivy_disk` (index
-  directory disk usage as a fraction of total volume, via
-  `TantivyDiskReader`).
-
-- **Documentation refresh (Tasks 28-30).**
-  `docs/openapi.yaml` gains the two new Round-18 endpoints
-  (`/v1/admin/dlq/analytics`,
-  `/v1/admin/tenants/{tenant_id}/onboarding`) with full
-  schemas, and `docs/openapi_test.go` adds them to the
-  `requiredPaths` list. README, PROGRESS, PHASES, and
-  ARCHITECTURE are all updated to reflect the 42-connector
-  floor and the Round-18/19 capability additions. Migration
-  count on disk is now `042`.
-
-### Tech choices added in Round 20
-
-Round 20 lands eight new Phase-2+ connectors and Phase-C
-production hardening on top of Phase-A. No new third-party
-runtime dependencies — every connector uses stdlib `net/http`
-+ `http.NewRequestWithContext` and the existing
-`internal/connector` registry; the only new infrastructure
-piece is migration `043_connector_sync_cursors.sql`.
-
-- **Zendesk Support (Task 1).** New `internal/connector/zendesk/`
-  with API token / OAuth bearer against
-  `{subdomain}.zendesk.com/api/v2`. Documents are tickets and
-  Help Center articles; delta sync uses the official
-  incremental export endpoint
-  `/api/v2/incremental/tickets.json?start_time=<unix>` which
-  returns `end_time` for cursor advancement and
-  `next_page=null` for completion. HTTP 429 is wrapped as
-  `connector.ErrRateLimited` and the `Retry-After` header is
-  honoured.
-
-- **ServiceNow Table API (Task 2).** New
-  `internal/connector/servicenow/` with basic-auth or OAuth
-  bearer against `{instance}.service-now.com/api/now/table/
-  <table>`. Documents are `incident` / `change_request` /
-  `kb_knowledge` rows; delta uses
-  `sysparm_query=sys_updated_on>javascript:gs.dateGenerate(
-  '<YYYY-MM-DD HH:MM:SS>','UTC')` with `sysparm_offset`
-  pagination. Empty-cursor bootstrap returns a `now()`-stamped
-  cursor without backfilling.
-
-- **Freshdesk REST v2 (Task 3).** New
-  `internal/connector/freshdesk/` with API-key-as-basic-auth-user
-  (password `X`, same pattern as the BambooHR connector).
-  Documents are tickets via `/api/v2/tickets?updated_since=
-  <ISO8601>&page=<n>`; the connector walks `page` until an
-  empty response and advances the cursor to the latest
-  `updated_at`.
-
-- **Airtable REST (Task 4).** New
-  `internal/connector/airtable/` with Bearer token (PAT or
-  OAuth). Documents are records per `/v0/<baseId>/
-  <tableIdOrName>`; delta uses
-  `filterByFormula=LAST_MODIFIED_TIME()>'<ISO8601>'` with
-  `offset=<continuation>` follow-up tokens.
-
-- **Trello REST (Task 5).** New `internal/connector/trello/`
-  with API key + token query-parameter auth. Documents are
-  cards by board via `/1/boards/<id>/cards`; delta uses
-  `/1/boards/<id>/actions?since=<ISO8601>` with the `before`
-  cursor walking older actions in descending order.
-
-- **Intercom REST v2 (Task 6).** New
-  `internal/connector/intercom/` with Bearer token.
-  Documents are conversations and articles; conversation
-  delta uses `POST /conversations/search` with the body
-  `{ "query": { "operator": ">", "field": "updated_at",
-  "value": <unix> } }` and walks the cursor-based
-  `pagination.next`.
-
-- **Webex Messages (Task 7).** New `internal/connector/webex/`
-  with Bearer Bot or Integration OAuth. Documents are messages
-  by room via `/v1/messages?roomId=<id>`; delta uses
-  `before=<msgId>` / `max=<count>` cursor pagination plus a
-  `created` timestamp filter so the connector stops once it
-  passes the stored cursor.
-
-- **Bitbucket Cloud REST v2 (Task 8).** New
-  `internal/connector/bitbucket/` with App password basic-auth
-  or OAuth consumer. Documents are pull requests and issues
-  per `/2.0/repositories/<workspace>/<repo>/pullrequests` and
-  `/2.0/repositories/<workspace>/<repo>/issues`; delta uses
-  `q=updated_on>"<ISO8601>"` query plus `pagelen` and the
-  `next` link Bitbucket returns in each response.
-
-- **Catalogue gates lifted to 50 (Tasks 9-12).**
-  `internal/connector/audit_test.go` floor 41 → 49,
-  `tests/e2e/connector_smoke_test.go` registry pin 42 → 50
-  with per-connector smoke tests for all 8 new connectors,
-  `docs/runbooks/runbook_test.go` floor 42 → 50 with 8 new
-  per-connector runbook markdown files
-  (`zendesk.md` / `servicenow.md` / `freshdesk.md` /
-  `airtable.md` / `trello.md` / `intercom.md` / `webex.md` /
-  `bitbucket.md`) covering credential rotation, quota /
-  rate-limit incidents, outage detection, and error codes.
-  `tests/e2e/round20_test.go` (build tag `e2e`) drives a
-  full Zendesk incremental-export lifecycle and a Bitbucket
-  PR-query lifecycle plus a 429-propagation sweep against
-  all 8 new connectors. `tests/regression/round1920_manifest.go`
-  catalogues every Round-18/19/20 fix with a meta-test
-  asserting each `TestRef` resolves on disk.
-  `tests/integration/connector_contract_test.go` adds
-  compile-time `SourceConnector` + `DeltaSyncer` assertions
-  for all 8 new structs plus
-  `TestConnectorContract_Round20_DeltaSyncerEmptyCursor`
-  table-driven coverage for Zendesk incremental-export,
-  ServiceNow `sys_updated_on`, and Bitbucket `q=` query
-  bootstrap surfaces.
-
-- **Stale connector cleanup + bootstrap audit (Task 13).**
-  `internal/connector/bootstrap_audit_test.go` enumerates the
-  registry and exercises `DeltaSync` with an empty cursor on
-  every connector that satisfies `DeltaSyncer`, asserting the
-  returned cursor is non-empty and (when the connector also
-  exposes `MinIncrementalWindow`) within the bootstrap
-  contract. Connectors caught backfilling are fixed in place.
-
-- **Migration 043 `connector_sync_cursors` (Task 14).** New
-  `migrations/043_connector_sync_cursors.sql` (and
-  `migrations/rollback/043_connector_sync_cursors.down.sql`)
-  carves a dedicated `(tenant_id, source_id, namespace_id) →
-  cursor` table out of the source config blob. The pipeline
-  now reads / writes cursors against this table instead of
-  rewriting the config JSON on every sync, eliminating a
-  per-event optimistic-lock write and avoiding stale
-  credentials in cursor commits.
-
-- **Connector health dashboard (Task 15).** New
-  `internal/admin/connector_health_handler.go` mounts
-  `GET /v1/admin/connectors/health` which joins `sources`
-  and `source_health` and groups by `connector_type`. The
-  response includes per-type counts (healthy / degraded /
-  failing / unknown / paused / removing / removed), average
-  sync lag, average error count, and failing-or-degraded
-  fraction. Backs the portal's connector fleet view.
-
-- **Connector config schema validator (Task 16).** New
-  `internal/connector/schema_validator.go` exposes a
-  `CredentialSchemaProvider` interface (`CredentialSchema()
-  []byte`) and a `ValidateCredentialsErr(raw, schema)` helper
-  that validates the credential blob against the JSON-Schema
-  subset (object / required / properties / type / enum /
-  additionalProperties). Wired into
-  `POST /v1/admin/sources/preview` so configuration errors
-  surface as HTTP 422 with precise field-level messages
-  before `Validate()` is called.
-
-- **Pipeline graceful backpressure (Task 17).** New
-  `PausedSourceFilter` interface on
-  `pipeline.CoordinatorConfig` lets Stage 1 short-circuit
-  when a source has been auto-paused — the event is
-  drained cleanly (Skipped+Completed metrics, OnSuccess
-  fires for offset commit) without calling FetchEvent
-  against the paused upstream.
-
-- **Retrieval cache tag completeness audit (Task 18).**
-  `internal/retrieval/cache_invalidation_test.go` is
-  extended to recognise both the Round-12
-  `Invalidate(chunkIDs)` and the Round-19
-  `InvalidateBySources(sourceIDs)` companion calls, and a
-  new structural test (`TestCacheInvalidation_TagBasedSurfaceExists`)
-  parses `internal/storage/redis_cache.go` to guarantee
-  both surfaces remain on `SemanticCache`.
-
-- **OpenAPI completeness (Task 19).** `docs/openapi.yaml`
-  documents the new `GET /v1/admin/connectors/health`
-  endpoint including the per-connector-type aggregate
-  schema; `docs/openapi_test.go` adds the path to
-  `requiredPaths` so the gate fails if either side drifts.
-
-- **Lint / vet / vuln / cleanup (Tasks 20-21).** Zero
-  `TODO` / `FIXME` / `HACK` markers in newly-added code.
-  `go vet ./...` clean, `golangci-lint run` reports 0
-  issues, `go mod tidy` produces no diff, `go mod verify`
-  green, `govulncheck ./...` reports 0 callable
-  vulnerabilities.
-
-- **Docker compose healthcheck tuning (Task 22).** Explicit
-  `kafka-broker-api-versions.sh` healthcheck on the Kafka
-  container (10s interval, 30s start period, 30 retries) and
-  a TCP healthcheck on Qdrant. The CI `Wait for stack to
-  settle` loop is updated to additionally probe Redis
-  (`redis-cli ping`) and Kafka so a stack-failure surfaces
-  which service is unready.
-
-### Tech choices added in Round 21
-
-Round 21 is the CI-and-docs companion to Round 20 — no new
-runtime code or migrations; all changes are wholly within
-`.github/workflows/`, `docs/`, and `README.md`.
-
-- **Path-filtered CI lanes (Tasks 23-24).** A new
-  `detect-changes` job using
-  [`dorny/paths-filter@v3`](https://github.com/dorny/paths-filter)
-  emits a `connector` and a `regression` output. The
-  `fast-connector-unit`, `fast-connector-integration`, and
-  `fast-regression` jobs depend on `detect-changes` and gate
-  on `if: github.event_name != 'pull_request' ||
-  needs.detect-changes.outputs.<filter> == 'true'`, so doc-
-  only or unrelated PRs skip them. The `fast-required`
-  aggregator is updated to treat `skipped` as `success`
-  ([the loop now branches on
-  `[ "$r" != "success" ] && [ "$r" != "skipped" ]`](../.github/workflows/ci.yml))
-  so branch protection still passes.
-
-- **Unified Go build cache (Task 25).** Every fast-lane Go
-  job now uses the same primary cache key
-  `${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}`
-  with the previous job-specific suffix retained as a
-  `restore-keys` fallback. Any green `fast-check` /
-  `fast-test` / `fast-build` / `fast-connector-*` /
-  `fast-regression` run can now warm the build cache for
-  every other job in the same lane.
-
-- **Documentation refresh (Tasks 26-30).**
-  PROGRESS.md / PHASES.md / ARCHITECTURE.md / README.md are
-  refreshed to the post-Round-20/21 state — 50 connectors,
-  43 migrations on disk, the new endpoints and lane
-  optimisation called out. Audit floor 41 → 49; smoke
-  registry pin 42 → 50; runbook gate 42 → 50.
-
-### Tech choices added in Round 24
-
-- **Connector catalog 50 → 54 (Tasks 1-4).** Quip (Salesforce docs,
-  Bearer + `updated_usec` microsecond cursor), Freshservice
-  (Freshworks ITSM, API key basic-auth user with password `X`,
-  `updated_since=<ISO8601>` + page-based pagination matching
-  Round-22's Freshdesk `Link: rel="next"` fix), PagerDuty
-  (incident knowledge, `Authorization: Token token=...` scheme,
-  `since=<ISO8601>` + `more`/`offset` pagination), and Zoho Desk
-  (`Authorization: Zoho-oauthtoken` + `orgId` header,
-  `modifiedTimeRange=<since,until>` with 100/page ceiling). Each
-  ships full `Validate` / `Connect` / `ListNamespaces` /
-  `ListDocuments` / `FetchDocument` / `DeltaSync` httptest
-  coverage with the empty-cursor bootstrap contract, ErrRateLimited
-  429 wrap, and blank-imports in both binaries.
-
-- **DLQ analytics nested rollup (Task 11).** `GET /v1/admin/dlq/analytics`
-  gains a `by_connector_category` nested map (connector → category
-  → count) so on-call can pin both the noisy connector and its
-  dominant failure class without a second query.
-
-- **Auto-pauser consecutive-failure trigger (Task 12).**
-  `SourceAutoPauseConfig.ConsecutiveFailureThreshold` (env
-  `CONTEXT_ENGINE_SOURCE_AUTO_PAUSE_THRESHOLD`) pauses a source
-  after N consecutive failures regardless of the sliding-window
-  error-rate. The existing rate-based trigger keeps catching slow-
-  burn degradations; the new trigger is a fast-stop for hard-down
-  upstreams. The audit metadata records `trigger=consecutive_failures`
-  vs `trigger=error_rate` so the cause is visible in the audit log.
-
-- **Bulk-source alias routes (Task 13).** `POST /v1/admin/sources/bulk-reindex`
-  and `POST /v1/admin/sources/bulk-rotate` are self-documenting
-  aliases that funnel through the existing
-  `POST /v1/admin/sources/bulk` concurrency / audit pipeline.
-  Callers no longer need to know the action enum to hit the most
-  common bulk operations.
-
-- **Multimodal IngestEvent.ContentType (Task 15).** A new
-  `content_type` JSON field on `IngestEvent` lets connectors that
-  produce non-text artifacts (image attachments, audio transcripts,
-  video thumbnails) tag the event so a future multimodal router
-  can dispatch to specialised parse stages without re-sniffing the
-  MIME. `omitempty` preserves byte-level wire compatibility for
-  text events.
-
-- **Billing usage webhook (Task 24).** `POST /v1/admin/webhooks/billing`
-  (plus GET and DELETE) lets external billing systems subscribe
-  to per-tenant usage events. The endpoint enforces HTTPS, a
-  32-char minimum shared secret, audit-logs the lifecycle, and
-  exposes a `BillingWebhookStore` seam (Upsert / Get / Delete).
-  The emit path lands in a future round once the billing team has
-  the storage schema; the contract is locked so integrations can
-  proceed in parallel.
-
-- **Analytics connector-health view (Task 25).** `GET /v1/admin/analytics/connector-health`
-  surfaces the existing fleet-health aggregation behind a `window`
-  query parameter (`1h` / `24h` / `7d` / `30d`). Today the payload
-  is a point-in-time snapshot, but the response shape (`tenant_id`,
-  `window`, `as_of`, `summary`) is locked in so a future time-
-  series backend can be swapped behind it without breaking
-  portal clients.
-
-- **OpenAPI + runbook gates (Tasks 20, 22).** Four new per-
-  connector runbooks (quip / freshservice / pagerduty / zohodesk)
-  with the standard credential-rotation / quota / outage /
-  error-code sections; runbook floor 50 → 54; openapi.yaml
-  documents the new bulk-reindex / bulk-rotate / analytics
-  / webhooks-billing routes; `TestOpenAPI_RouterCoverage` passes.
-
-- **Documentation refresh (Tasks 27-30).** README is rewritten as
-  a public-facing project doc; the round-by-round status blocks
-  that had grown to look like an internal task tracker are
-  consolidated into the PROGRESS.md changelog; the Phase-2+
-  table footnote in PROPOSAL is aligned with the extended
-  catalog.
+### Tech choices — observability & CI
+
+- **Tracing:** `go.opentelemetry.io/otel` with attribute-key constants in
+  `internal/observability/tracing.go`. The pipeline coordinator and the
+  retrieval fan-out are instrumented; trace ids round-trip through the
+  W3C `traceparent` header.
+- **Metrics:** Prometheus collectors in `internal/observability/metrics.go`
+  exposed via a Gin middleware at `/metrics` on `cmd/api` and `cmd/ingest`.
+  Cardinality policy: **no metric may use `tenant_id` as a label** — tenant
+  identity goes into `slog.With("tenant_id", ...)` log fields instead.
+  `TestMetrics_NoTenantIDLabel` fails the build on violation.
+- **Recording rules:** retrieval P50/P95/P99 and per-stage pipeline timings
+  are aggregated by recording rules so dashboards do not pay the histogram
+  cost.
+- **Pool gauges:** Postgres / Redis / gRPC pool utilisation is exposed as
+  Prometheus gauges.
+- **Alerts:** `deploy/alerts.yaml` (validated by `make alerts-check`)
+  ships PrometheusRule entries for IngestionLagHigh, DLQRateHigh,
+  RetrievalP95High, SourceUnhealthy, ChunkQualityScoreDropped,
+  CacheHitRateLow, CredentialHealthDegraded, GORMStoreLatencyHigh, and
+  per-stage pipeline duration.
+- **Health summary:** `GET /v1/admin/health/summary` aggregates pipeline,
+  retrieval, connector, and storage probes into a single signal for
+  external monitors.
+- **Logging:** `internal/observability/logger.go` wraps `log/slog` with a
+  `tenant_id` + `trace_id` JSON handler. `GinLoggerMiddleware` injects the
+  request-scoped logger from the W3C `traceparent` + tenant context.
+- **gRPC pool:** `internal/grpcpool/` provides a round-robin pool with
+  per-call deadlines and a closed → open → half-open circuit breaker for
+  the Python sidecars. `health.v1` is wired so the pool reads readiness.
+- **Lifecycle:** `internal/lifecycle/shutdown.go` provides an ordered
+  `Step.Add()` runner with a deadline budget. `cmd/api` drains in-flight
+  HTTP then closes Postgres / Redis; `cmd/ingest` stops the consumer,
+  drains the pipeline coordinator, then closes the HTTP probe and
+  Postgres / Redis. Configurable via
+  `CONTEXT_ENGINE_SHUTDOWN_TIMEOUT_SECONDS`.
+- **Startup config validation:** `internal/config/validate.go` aggregates
+  required-env-var + URL-format errors into a single structured
+  `ConfigError`. `ValidateAPI` / `ValidateIngest` run before any
+  `gorm.Open` / `redis.NewClient` call.
+- **Migration runner:** `internal/migrate/runner.go` reads
+  `migrations/NNN_name.sql` in order, tracks applied migrations in
+  `schema_migrations`, and supports `DryRun`. Wired behind `AUTO_MIGRATE`.
+  `migrations/migration_order_test.go` enforces strict monotonic prefixes
+  and forward/rollback parity; `scripts/migrate-dry-run-pg.sh` replays
+  every up + rollback migration against a disposable Postgres 16 container
+  to catch PG-specific syntax the SQLite dry-run misses.
+- **CI fast lane** (`.github/workflows/ci.yml`): `fast-check`, `fast-test`,
+  `fast-build`, `fast-lint`, `fast-eval`, `fast-alerts`,
+  `fast-rollback-parity`, `fast-migrate-dry-run`, `fast-proto-check`,
+  `fast-python`, `fast-connector-unit`, `fast-connector-integration`,
+  `fast-regression`, `fast-govulncheck`, and `fast-openapi`, all gated by
+  the `fast-required` aggregator (which treats `skipped` as `success` so
+  path-filtered lanes do not block doc-only PRs).
+- **CI full lane:** `full-proto-gen`, `full-e2e`, `full-integration`,
+  `full-connector-smoke`, `full-bench-e2e`, `full-capacity-test`,
+  `full-migrate-dry-run-pg`, plus a nightly `nightly-fuzz`.
+- **Path-filtered CI:** a `detect-changes` job using
+  `dorny/paths-filter@v3` gates `fast-connector-unit`,
+  `fast-connector-integration`, and `fast-regression` behind their actual
+  paths on pull requests.
+- **Unified Go build cache:** every fast-lane Go job uses the same primary
+  cache key `${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}` with
+  job-specific suffixes retained as `restore-keys` fallback, so any green
+  fast-lane run warms the build cache for every other job.
+- **make doctor:** `scripts/doctor.sh` walks the developer prereq
+  checklist (Go ≥ 1.25, Docker, docker-compose, Python 3.11+, protoc,
+  golangci-lint, e2e env vars) for `make doctor`.
+
+### Tech choices — on-device tier
+
+- **On-device runtime:** the Rust Knowledge Core exposes a UniFFI surface
+  for iOS (Swift / SwiftUI) and Android (Kotlin / Compose), and an N-API
+  surface for the Electron desktop client. The same contract lives in
+  `internal/shard/contract.go` (Go-side) and the matching Markdown
+  contracts under `docs/contracts/` (uniffi-ios.md, uniffi-android.md,
+  napi-desktop.md, local-first-retrieval.md, bonsai-integration.md,
+  b2c-retrieval-sdk.md, privacy-strip-render.md, background-sync.md).
+- **Shard manifest API:** `internal/shard/` exposes the manifest endpoint
+  (`handler.go` + `repository.go`), a generation worker (`generator.go`),
+  the delta protocol (`delta.go`), and a `coverage` endpoint backed by
+  GORM (`coverage_repo.go`). The version-lookup adapter feeds the
+  device-first hint in `internal/policy/device_first.go`.
+- **Cryptographic forgetting:** `internal/shard/forget.go` orchestrates the
+  per-tier forgetting workflow, with a per-tier `eviction.go` policy.
+- **SLM:** Bonsai-1.7B via `llama.cpp` (CPU / Metal / CUDA / Vulkan / NPU
+  backends). The on-device tier picks the highest-quality backend the
+  device's reference profile supports — see `docs/PROPOSAL.md` §9 for the
+  reference-device thresholds.
+- **B2C client SDK:** `internal/b2c/handler.go` mounts `/v1/health`,
+  `/v1/capabilities`, and `/v1/sync/schedule`. `Capabilities.EnabledBackends`
+  is pinned to render `[]` even when no backends are configured.
+- **Model catalog:** `internal/models/catalog.go` exposes `ModelEntry`,
+  `ModelCatalog`, `Provider`, and `StaticProvider`; `handler.go` mounts
+  `GET /v1/models/catalog`.
+- **Multimodal prep:** `DocumentContentType` (`omitempty` JSON, plus
+  `migrations/042_document_content_type.sql`) and
+  `IngestEvent.ContentType` tag non-text artifacts so a future multimodal
+  router can dispatch to specialised parse stages without re-sniffing the
+  MIME — without breaking byte-level wire compatibility for text events.
