@@ -112,6 +112,47 @@ func TestZohoDesk_Lifecycle(t *testing.T) {
 	}
 }
 
+// TestZohoDesk_ListDocuments_LastPageYieldsAllItems regresses a
+// Round-24 bug in docIterator.Next where the `done` flag was checked
+// at the top of the method. Because fetch() sets `done=true` on the
+// last page (len(env.Data) < perPage), the first call after the
+// final fetch returned item 0 but the next call hit `done==true` and
+// bailed without serving items 1..N-1. The fix moves the `done`
+// check inside the `idx >= len(page)` branch.
+func TestZohoDesk_ListDocuments_LastPageYieldsAllItems(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/myinfo", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	// Three tickets in one shot. 3 < perPage(100) → the iterator
+	// treats this as the last page and sets done=true on the same
+	// fetch that loaded the items.
+	mux.HandleFunc("/api/v1/tickets", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[`+
+			`{"id":"Z1","modifiedTime":"2024-06-01T00:00:00Z"},`+
+			`{"id":"Z2","modifiedTime":"2024-06-02T00:00:00Z"},`+
+			`{"id":"Z3","modifiedTime":"2024-06-03T00:00:00Z"}`+
+			`]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := zohodesk.New(zohodesk.WithBaseURL(srv.URL), zohodesk.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "tickets"}, connector.ListOpts{})
+	defer func() { _ = it.Close() }()
+	var ids []string
+	for it.Next(context.Background()) {
+		ids = append(ids, it.Doc().ID)
+	}
+	if !errors.Is(it.Err(), connector.ErrEndOfPage) {
+		t.Fatalf("iter err=%v", it.Err())
+	}
+	if len(ids) != 3 || ids[0] != "Z1" || ids[1] != "Z2" || ids[2] != "Z3" {
+		t.Fatalf("last-page truncation: ids=%v, want [Z1 Z2 Z3]", ids)
+	}
+}
+
 func TestZohoDesk_DeltaSync_BootstrapReturnsNow(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

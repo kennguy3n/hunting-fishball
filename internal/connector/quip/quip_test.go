@@ -116,6 +116,53 @@ func TestQuip_Lifecycle(t *testing.T) {
 	}
 }
 
+// TestQuip_ListDocuments_LastPageYieldsAllItems regresses a Round-24
+// bug in docIterator.Next where the `done` flag was checked at the
+// top of the method. Because fetch() sets `done=true` on the last
+// page (len(page) < perPage), the first call after the final fetch
+// returned item 0 but the next call hit `done==true` and bailed
+// without serving items 1..N-1. The fix moves the `done` check
+// inside the `idx >= len(page)` branch.
+func TestQuip_ListDocuments_LastPageYieldsAllItems(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/1/users/current", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	// Three threads returned in one shot. 3 < perPage(50) → the
+	// iterator treats this as the last page.
+	mux.HandleFunc("/1/threads/recent", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{`+
+			`"a":{"thread":{"id":"t1","updated_usec":1717200000000003}},`+
+			`"b":{"thread":{"id":"t2","updated_usec":1717200000000002}},`+
+			`"c":{"thread":{"id":"t3","updated_usec":1717200000000001}}`+
+			`}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := quip.New(quip.WithBaseURL(srv.URL), quip.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "threads"}, connector.ListOpts{})
+	defer func() { _ = it.Close() }()
+	got := map[string]bool{}
+	for it.Next(context.Background()) {
+		got[it.Doc().ID] = true
+	}
+	if !errors.Is(it.Err(), connector.ErrEndOfPage) {
+		t.Fatalf("iter err=%v", it.Err())
+	}
+	// Map order in the Quip response is unstable, so compare as a
+	// set. All three thread IDs MUST be served.
+	for _, id := range []string{"t1", "t2", "t3"} {
+		if !got[id] {
+			t.Fatalf("last-page truncation: missing %q from %v", id, got)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("last-page truncation: got %d items, want 3 (%v)", len(got), got)
+	}
+}
+
 func TestQuip_DeltaSync_BootstrapReturnsNow(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

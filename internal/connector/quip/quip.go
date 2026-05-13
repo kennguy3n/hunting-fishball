@@ -161,10 +161,13 @@ type docIterator struct {
 }
 
 func (it *docIterator) Next(ctx context.Context) bool {
-	if it.err != nil || it.done {
+	if it.err != nil {
 		return false
 	}
 	if it.idx >= len(it.page) {
+		if it.done {
+			return false
+		}
 		if !it.fetch(ctx) {
 			return false
 		}

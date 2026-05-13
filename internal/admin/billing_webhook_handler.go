@@ -123,6 +123,9 @@ func (h *BillingWebhookHandler) post(c *gin.Context) {
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
+	if existing, err := h.store.Get(c.Request.Context(), tenantID); err == nil && existing != nil {
+		sub.CreatedAt = existing.CreatedAt
+	}
 	if err := h.store.Upsert(c.Request.Context(), sub); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 

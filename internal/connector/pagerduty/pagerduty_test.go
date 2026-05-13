@@ -150,6 +150,46 @@ func TestPagerDuty_Lifecycle(t *testing.T) {
 	}
 }
 
+// TestPagerDuty_ListDocuments_LastPageYieldsAllItems regresses a
+// Round-24 bug in docIterator.Next where the `done` flag was checked
+// at the top of the method. Because fetch() sets `done=true` on the
+// last page (more=false or len<perPage), the first call after the
+// final fetch returned item 0 but the next call hit `done==true` and
+// bailed without serving items 1..N-1. The fix moves the `done`
+// check inside the `idx >= len(page)` branch.
+func TestPagerDuty_ListDocuments_LastPageYieldsAllItems(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"user":{}}`)
+	})
+	// Three incidents, more=false → done=true is set on the same
+	// fetch that loaded the items.
+	mux.HandleFunc("/incidents", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"incidents":[`+
+			`{"id":"P1","last_status_change_at":"2024-06-01T00:00:00Z"},`+
+			`{"id":"P2","last_status_change_at":"2024-06-02T00:00:00Z"},`+
+			`{"id":"P3","last_status_change_at":"2024-06-03T00:00:00Z"}`+
+			`],"more":false}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := pagerduty.New(pagerduty.WithBaseURL(srv.URL), pagerduty.WithHTTPClient(srv.Client()))
+	conn, _ := c.Connect(context.Background(), connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: validCreds(t)})
+	it, _ := c.ListDocuments(context.Background(), conn, connector.Namespace{ID: "incidents"}, connector.ListOpts{})
+	defer func() { _ = it.Close() }()
+	var ids []string
+	for it.Next(context.Background()) {
+		ids = append(ids, it.Doc().ID)
+	}
+	if !errors.Is(it.Err(), connector.ErrEndOfPage) {
+		t.Fatalf("iter err=%v", it.Err())
+	}
+	if len(ids) != 3 || ids[0] != "P1" || ids[1] != "P2" || ids[2] != "P3" {
+		t.Fatalf("last-page truncation: ids=%v, want [P1 P2 P3]", ids)
+	}
+}
+
 func TestPagerDuty_DeltaSync_BootstrapReturnsNow(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

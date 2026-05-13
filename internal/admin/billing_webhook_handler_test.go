@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -107,6 +108,59 @@ func TestBillingWebhook_PostUpsertGetRoundTrip(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/v1/admin/webhooks/billing", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("delete: expected 200, got %d", w.Code)
+	}
+}
+
+// TestBillingWebhook_Post_PreservesCreatedAtOnReRegistration regresses
+// a Round-24 bug where the POST handler always set CreatedAt=now()
+// even when an existing subscription was being upserted (e.g. secret
+// rotation). The doc-string promises idempotent re-registration, so
+// CreatedAt must reflect the original subscription time.
+func TestBillingWebhook_Post_PreservesCreatedAtOnReRegistration(t *testing.T) {
+	t.Parallel()
+	store := newFakeBillingStore()
+	originalCreatedAt := time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC)
+	// Pre-populate the store with an existing subscription that
+	// was created in 2020.
+	store.subs["t1"] = admin.BillingWebhookSubscription{
+		TenantID:     "t1",
+		URL:          "https://old.example.com/billing",
+		SharedSecret: strings.Repeat("o", 32),
+		CreatedAt:    originalCreatedAt,
+		UpdatedAt:    originalCreatedAt,
+	}
+	r := setupBillingRouter(t, store, "t1")
+	// Re-register with a new URL + secret (typical rotation).
+	secret := strings.Repeat("k", 32)
+	body := `{"url":"https://new.example.com/billing","shared_secret":"` + secret + `"}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/webhooks/billing", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("post: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	// 1. Response body must echo the original CreatedAt.
+	var got admin.BillingWebhookResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.CreatedAt.Equal(originalCreatedAt) {
+		t.Fatalf("re-register: CreatedAt overwritten in response, got %v want %v", got.CreatedAt, originalCreatedAt)
+	}
+	if !got.UpdatedAt.After(originalCreatedAt) {
+		t.Fatalf("re-register: UpdatedAt should advance past original, got %v", got.UpdatedAt)
+	}
+	// 2. The persisted record must also keep CreatedAt unchanged.
+	stored, _ := store.Get(context.Background(), "t1")
+	if stored == nil {
+		t.Fatalf("re-register: store row missing")
+	}
+	if !stored.CreatedAt.Equal(originalCreatedAt) {
+		t.Fatalf("re-register: persisted CreatedAt overwritten, got %v want %v", stored.CreatedAt, originalCreatedAt)
+	}
+	if stored.URL != "https://new.example.com/billing" {
+		t.Fatalf("re-register: URL not updated, got %q", stored.URL)
 	}
 }
 
