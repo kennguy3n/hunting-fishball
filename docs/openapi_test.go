@@ -103,6 +103,9 @@ var requiredPaths = []string{
 	// Round-18 Task 12 + 13 additions.
 	"/v1/admin/dlq/analytics",
 	"/v1/admin/tenants/{tenant_id}/onboarding",
+
+	// Round-20/21 Task 15 + 19 additions.
+	"/v1/admin/connectors/health",
 }
 
 // TestOpenAPI_RequiredPathsDocumented confirms every path on

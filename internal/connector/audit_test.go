@@ -28,12 +28,16 @@ import (
 
 // auditedConnectors is the canonical catalog. Updating this list
 // is intentional — every entry must satisfy the audit checks
-// below. Round 18 extended the floor from 35 → 41 first-class
-// connectors (excluding the google_shared_drives wrapper).
+// below. Round 20 extended the floor from 41 → 49 first-class
+// connectors (excluding the google_shared_drives wrapper) by
+// adding zendesk, servicenow, freshdesk, airtable, trello,
+// intercom, webex, and bitbucket.
 var auditedConnectors = []string{
+	"airtable",
 	"asana",
 	"azure_blob",
 	"bamboohr",
+	"bitbucket",
 	"bookstack",
 	"box",
 	"clickup",
@@ -44,6 +48,7 @@ var auditedConnectors = []string{
 	"dropbox",
 	"egnyte",
 	"entra_id",
+	"freshdesk",
 	"gcs",
 	"github",
 	"gitlab",
@@ -51,6 +56,7 @@ var auditedConnectors = []string{
 	"google_workspace",
 	"googledrive",
 	"hubspot",
+	"intercom",
 	"jira",
 	"kchat",
 	"linear",
@@ -65,13 +71,17 @@ var auditedConnectors = []string{
 	"rss",
 	"s3",
 	"salesforce",
+	"servicenow",
 	"sharepoint",
 	"sharepoint_onprem",
 	"sitemap",
 	"slack",
 	"teams",
+	"trello",
 	"upload_portal",
+	"webex",
 	"workday",
+	"zendesk",
 }
 
 type auditCheck struct {
@@ -88,7 +98,7 @@ var requiredChecks = []auditCheck{
 
 // TestConnectorAudit_Round15 enforces the connector-completeness
 // contract first introduced in Round 15 and re-extended in
-// Round 18 to all 41 first-class connectors (excluding the
+// Round 20 to all 49 first-class connectors (excluding the
 // google_shared_drives wrapper).
 func TestConnectorAudit_Round15(t *testing.T) {
 	t.Parallel()

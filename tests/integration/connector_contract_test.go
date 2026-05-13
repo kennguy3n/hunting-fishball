@@ -29,9 +29,11 @@ import (
 	"testing"
 
 	"github.com/kennguy3n/hunting-fishball/internal/connector"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/airtable"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/asana"
 	azureblob "github.com/kennguy3n/hunting-fishball/internal/connector/azure_blob"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/bitbucket"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/bookstack"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/coda"
@@ -39,11 +41,13 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/discord"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/egnyte"
 	entraid "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/freshdesk"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gcs"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
 	googleworkspace "github.com/kennguy3n/hunting-fishball/internal/connector/google_workspace"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/intercom"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/kchat"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/linear"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/mattermost"
@@ -55,11 +59,15 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/servicenow"
 	sharepointonprem "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint_onprem"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/sitemap"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/slack"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/trello"
 	uploadportal "github.com/kennguy3n/hunting-fishball/internal/connector/upload_portal"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/webex"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/workday"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/zendesk"
 )
 
 // TestConnectorContract_SourceConnectorAssertions is a
@@ -125,6 +133,25 @@ func TestConnectorContract_SourceConnectorAssertions(t *testing.T) {
 	var _ connector.DeltaSyncer = (*egnyte.Connector)(nil)
 	var _ connector.DeltaSyncer = (*bookstack.Connector)(nil)
 	var _ connector.WebhookReceiver = (*uploadportal.Connector)(nil)
+
+	// Round-20 Task 12 — compile-time assertions for the 8 new
+	// connectors. Mirrors the per-round blocks above.
+	var _ connector.SourceConnector = (*zendesk.Connector)(nil)
+	var _ connector.SourceConnector = (*servicenow.Connector)(nil)
+	var _ connector.SourceConnector = (*freshdesk.Connector)(nil)
+	var _ connector.SourceConnector = (*airtable.Connector)(nil)
+	var _ connector.SourceConnector = (*trello.Connector)(nil)
+	var _ connector.SourceConnector = (*intercom.Connector)(nil)
+	var _ connector.SourceConnector = (*webex.Connector)(nil)
+	var _ connector.SourceConnector = (*bitbucket.Connector)(nil)
+	var _ connector.DeltaSyncer = (*zendesk.Connector)(nil)
+	var _ connector.DeltaSyncer = (*servicenow.Connector)(nil)
+	var _ connector.DeltaSyncer = (*freshdesk.Connector)(nil)
+	var _ connector.DeltaSyncer = (*airtable.Connector)(nil)
+	var _ connector.DeltaSyncer = (*trello.Connector)(nil)
+	var _ connector.DeltaSyncer = (*intercom.Connector)(nil)
+	var _ connector.DeltaSyncer = (*webex.Connector)(nil)
+	var _ connector.DeltaSyncer = (*bitbucket.Connector)(nil)
 }
 
 // TestConnectorContract_Round17_DeltaSyncerEmptyCursor exercises
@@ -439,6 +466,94 @@ func TestConnectorContract_WebhookReceiverHandlesEmptyPayload(t *testing.T) {
 				!strings.Contains(strings.ToLower(err.Error()), "payload") {
 				t.Fatalf("%s: unexpected error on empty payload: %v", name, err)
 			}
+		})
+	}
+}
+
+// TestConnectorContract_Round20_DeltaSyncerEmptyCursor exercises
+// the bootstrap contract against three heterogeneous Round-20
+// surfaces: Zendesk's incremental-export (unix watermark),
+// ServiceNow's sys_updated_on (ServiceNow-format timestamp), and
+// Bitbucket's q= query (RFC-3339 ISO 8601). Each must return
+// zero changes plus a non-empty cursor on an empty-cursor call.
+func TestConnectorContract_Round20_DeltaSyncerEmptyCursor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"zendesk", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v2/users/me.json", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"user":{"id":1}}`)
+			})
+			mux.HandleFunc("/api/v2/incremental/tickets.json", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"tickets":[]}`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := zendesk.New(zendesk.WithBaseURL(srv.URL), zendesk.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(zendesk.Credentials{Subdomain: "acme", Email: "a@b", APIToken: "tok"})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "tickets"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+		{"servicenow", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/now/table/sys_user", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"result":[]}`)
+			})
+			mux.HandleFunc("/api/now/table/incident", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"result":[]}`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := servicenow.New(servicenow.WithBaseURL(srv.URL), servicenow.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(servicenow.Credentials{Instance: "x", Username: "u", Password: "p"})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "incident"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+		{"bitbucket", func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/2.0/repositories/ws/r", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"slug":"r"}`)
+			})
+			mux.HandleFunc("/2.0/repositories/ws/r/pullrequests", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"values":[]}`)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := bitbucket.New(bitbucket.WithBaseURL(srv.URL), bitbucket.WithHTTPClient(srv.Client()))
+			creds, _ := json.Marshal(bitbucket.Credentials{Username: "u", AppPassword: "p", Workspace: "ws", Repo: "r"})
+			cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+			conn, err := c.Connect(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			ch, cur, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "ws/r"}, "")
+			if err != nil || len(ch) != 0 || cur == "" {
+				t.Fatalf("delta bootstrap: cur=%q ch=%v err=%v", cur, ch, err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.run(t)
 		})
 	}
 }

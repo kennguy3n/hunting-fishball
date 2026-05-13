@@ -105,7 +105,11 @@ func findStorageWrites(fn *ast.FuncDecl) []string {
 }
 
 // hasInvalidateCall reports whether fn's body calls any method
-// named "Invalidate" (regardless of receiver).
+// whose name starts with "Invalidate" (regardless of receiver).
+// Recognised companion calls include the original Round-12
+// Invalidate(chunkIDs) surface and the Round-19/20 tag-based
+// InvalidateBySources(sourceIDs) variant introduced for fleet-wide
+// source-scoped expiration.
 func hasInvalidateCall(fn *ast.FuncDecl) bool {
 	if fn.Body == nil {
 		return false
@@ -120,7 +124,7 @@ func hasInvalidateCall(fn *ast.FuncDecl) bool {
 		if !ok {
 			return true
 		}
-		if sel.Sel.Name == "Invalidate" {
+		if strings.HasPrefix(sel.Sel.Name, "Invalidate") {
 			seen = true
 			return false
 		}
@@ -235,6 +239,47 @@ func TestCacheInvalidation_PipelineWriteSitesAudit(t *testing.T) {
 	for k := range baseline {
 		if _, ok := have[k]; !ok {
 			t.Logf("baseline entry %q no longer found — drop from manifest (advisory)", k)
+		}
+	}
+}
+
+// TestCacheInvalidation_TagBasedSurfaceExists — Round-20 Task 18.
+//
+// The Round-19 tag-based InvalidateBySources surface is the
+// approved companion for source-scoped reindex flows (manual
+// purge, embedding-model rotation, retention sweep). This
+// structural test guarantees the surface remains present and
+// callable on storage.SemanticCache so admin/orchestration code
+// has a stable target — if a future round inadvertently removes
+// it the test fails loudly.
+func TestCacheInvalidation_TagBasedSurfaceExists(t *testing.T) {
+	t.Parallel()
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	path := filepath.Join(repoRoot, "internal", "storage", "redis_cache.go")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.AllErrors)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := map[string]bool{
+		"Invalidate":          false,
+		"InvalidateBySources": false,
+	}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil {
+			continue
+		}
+		if _, hit := want[fn.Name.Name]; hit {
+			want[fn.Name.Name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("SemanticCache.%s not found — Stage-4 cache invalidation surface incomplete", name)
 		}
 	}
 }

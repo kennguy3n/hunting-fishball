@@ -55,6 +55,44 @@ jobs:
   # ===============================================================
 
   # ----------------------------------------------------------------
+  # Round-20/21 Task 24: detect which surfaces this PR actually
+  # touches so the path-filtered connector + regression lanes can
+  # skip themselves on doc-only / unrelated-only PRs. Push-to-main,
+  # nightly cron, and manual workflow_dispatch force everything to
+  # `true` so the gate stays honest on protected events. The
+  # aggregator below treats `skipped` as `success` for these path-
+  # filtered jobs.
+  # ----------------------------------------------------------------
+  detect-changes:
+    name: Detect path-filtered changes
+    runs-on: ubuntu-latest
+    outputs:
+      connector: ${{ steps.filter.outputs.connector }}
+      regression: ${{ steps.filter.outputs.regression }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          # On push/schedule/dispatch, dorny still runs but lacks a
+          # base ref to diff against — every filter resolves to
+          # `true`, which is the safe default.
+          filters: |
+            connector:
+              - 'internal/connector/**'
+              - 'tests/integration/connector_*'
+              - 'docs/runbooks/**'
+              - 'cmd/api/main.go'
+              - 'cmd/ingest/main.go'
+            regression:
+              - 'tests/regression/**'
+              - 'internal/connector/**'
+              - 'internal/pipeline/**'
+              - 'internal/retrieval/**'
+              - 'internal/storage/**'
+
+  # ----------------------------------------------------------------
   # Round-14 Task 15: the legacy `fast-go` job ran gofmt + vet +
   # test + build serially in one runner. The unit-test step was the
   # long pole, so we split it into three parallel jobs:
@@ -86,8 +124,12 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-check-${{ hashFiles('**/go.sum') }}
+          # Round-20/21 Task 25: shared cache key prefix across
+          # all fast-lane Go jobs so any job can prime the build
+          # cache for the others.
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
           restore-keys: |
+            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-check-
 
       - name: go mod download
@@ -121,8 +163,10 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-test-${{ hashFiles('**/go.sum') }}
+          # Round-20/21 Task 25: shared cache key prefix.
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
           restore-keys: |
+            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-test-
 
       - name: go mod download
@@ -147,8 +191,10 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-build-${{ hashFiles('**/go.sum') }}
+          # Round-20/21 Task 25: shared cache key prefix.
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
           restore-keys: |
+            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-build-
 
       - name: go mod download
@@ -170,6 +216,13 @@ jobs:
   fast-connector-unit:
     name: Fast Go test (connector unit)
     runs-on: ubuntu-latest
+    # Round-20/21 Task 24: skip on PRs that don't touch the
+    # connector surface. Push-to-main / nightly / dispatch still
+    # run unconditionally (detect-changes returns `true`).
+    needs: [detect-changes]
+    if: |
+      github.event_name != 'pull_request' ||
+      needs.detect-changes.outputs.connector == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -183,8 +236,13 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-connector-${{ hashFiles('**/go.sum') }}
+          # Round-20/21 Task 25: unify cache key prefix across
+          # fast-lane jobs so any job can prime the build cache
+          # for the others. The job-specific suffix is preserved
+          # only as a restore-key fallback.
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
           restore-keys: |
+            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-connector-
 
       - name: go mod download
@@ -204,6 +262,12 @@ jobs:
   fast-connector-integration:
     name: Fast Go test (connector contracts, integration tag)
     runs-on: ubuntu-latest
+    # Round-20/21 Task 24: skip on PRs that don't touch the
+    # connector surface.
+    needs: [detect-changes]
+    if: |
+      github.event_name != 'pull_request' ||
+      needs.detect-changes.outputs.connector == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -217,8 +281,10 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-conn-integ-${{ hashFiles('**/go.sum') }}
+          # Round-20/21 Task 25: shared cache key prefix.
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
           restore-keys: |
+            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-conn-integ-
 
       - name: go mod download
@@ -236,6 +302,12 @@ jobs:
   fast-regression:
     name: Fast Go test (regression manifests)
     runs-on: ubuntu-latest
+    # Round-20/21 Task 24: skip on PRs that don't touch the
+    # regression surface.
+    needs: [detect-changes]
+    if: |
+      github.event_name != 'pull_request' ||
+      needs.detect-changes.outputs.regression == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -249,8 +321,10 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-regression-${{ hashFiles('**/go.sum') }}
+          # Round-20/21 Task 25: shared cache key prefix.
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}
           restore-keys: |
+            ${{ runner.os }}-go-build-
             ${{ runner.os }}-go-build-regression-
 
       - name: go mod download
@@ -467,6 +541,13 @@ jobs:
           # doesn't block PRs, and it is not listed in `needs:`
           # above so this required check doesn't wait on it. The
           # report is still surfaced in the Actions tab.
+          #
+          # Round-20/21 Task 24: path-filtered jobs may evaluate
+          # to `skipped` when a PR doesn't touch their surface.
+          # The aggregator must treat `skipped` and `success` as
+          # equivalent passing results for path-filtered jobs so
+          # branch protection does not block doc-only / unrelated
+          # PRs.
           for r in \
             "${{ needs.fast-check.result }}" \
             "${{ needs.fast-test.result }}" \
@@ -482,7 +563,7 @@ jobs:
             "${{ needs.fast-proto-check.result }}" \
             "${{ needs.fast-openapi.result }}" \
             "${{ needs.fast-python.result }}"; do
-            if [ "$r" != "success" ]; then
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
               fail=1
             fi
           done
@@ -564,10 +645,22 @@ jobs:
         run: docker compose up -d --wait
 
       - name: Wait for stack to settle
+        # Round-20 Task 22: tighten the readiness gate so it also
+        # checks Kafka + Redis alongside Qdrant and Postgres. The
+        # explicit healthcheck directives added in docker-compose.yml
+        # make `docker compose ps --filter "health=healthy"` reliable,
+        # but we keep the per-service curl/pg_isready/redis-cli
+        # checks here so a CI failure surfaces *which* service is
+        # not ready without scrolling through `docker compose ps`.
         run: |
+          PG_CID=$(docker ps -qf name=hunting-fishball-postgres)
+          REDIS_CID=$(docker ps -qf name=hunting-fishball-redis)
+          KAFKA_CID=$(docker ps -qf name=hunting-fishball-kafka)
           for i in $(seq 1 30); do
             if curl -fsS http://localhost:6333/healthz >/dev/null && \
-               docker exec $(docker ps -qf name=hunting-fishball-postgres) pg_isready -U hf -d hunting_fishball >/dev/null 2>&1; then
+               docker exec "$PG_CID" pg_isready -U hf -d hunting_fishball >/dev/null 2>&1 && \
+               docker exec "$REDIS_CID" redis-cli ping 2>/dev/null | grep -q PONG && \
+               docker exec "$KAFKA_CID" kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1; then
               echo "stack ready"; exit 0
             fi
             echo "waiting for stack... ($i/30)"; sleep 2

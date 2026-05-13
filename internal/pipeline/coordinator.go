@@ -182,6 +182,33 @@ type CoordinatorConfig struct {
 	// retry budget. A nil map disables the feature so existing
 	// deployments behave as before.
 	StageBreakers map[string]*StageCircuitBreaker
+
+	// PausedSourceFilter — Round-20 Task 17. When non-nil, Stage
+	// 1 calls IsPaused(tenantID, sourceID) before each FetchEvent
+	// call. A "true" result means the source.auto_paused audit
+	// event (or a manual pause) has fired for that source; the
+	// coordinator drains the in-flight event without retrying
+	// against the paused upstream — it increments
+	// CoordinatorMetrics.Skipped + invokes OnSuccess so the
+	// consumer commits the offset cleanly, rather than letting
+	// the retry loop hammer the paused upstream and DLQ.
+	PausedSourceFilter PausedSourceFilter
+}
+
+// PausedSourceFilter is the narrow capability the coordinator
+// uses to short-circuit fetches against paused sources. Round-20
+// Task 17. The admin.SourcePauseStore satisfies it directly.
+type PausedSourceFilter interface {
+	IsPaused(ctx context.Context, tenantID, sourceID string) bool
+}
+
+// PausedSourceFilterFunc adapts a plain function to
+// PausedSourceFilter.
+type PausedSourceFilterFunc func(ctx context.Context, tenantID, sourceID string) bool
+
+// IsPaused implements PausedSourceFilter.
+func (f PausedSourceFilterFunc) IsPaused(ctx context.Context, tenantID, sourceID string) bool {
+	return f(ctx, tenantID, sourceID)
 }
 
 // LoadStageTimeoutsFromEnv reads the four
@@ -410,6 +437,22 @@ func (c *Coordinator) Run(ctx context.Context) error {
 			case se, ok := <-c.stage1:
 				if !ok {
 					return
+				}
+				// Round-20 Task 17: pipeline graceful backpressure
+				// on auto-paused sources. When the source has been
+				// paused (auto or manual) we drain the event
+				// cleanly — increment Skipped, invoke OnSuccess so
+				// the consumer commits the offset, and do not call
+				// FetchEvent against the paused upstream.
+				if c.cfg.PausedSourceFilter != nil && c.cfg.PausedSourceFilter.IsPaused(gctx, se.evt.TenantID, se.evt.SourceID) {
+					c.Metrics.Skipped.Add(1)
+					c.Metrics.Completed.Add(1)
+					c.recordSyncOutcome(se.evt, true)
+					if c.cfg.OnSuccess != nil {
+						c.cfg.OnSuccess(gctx, se.evt)
+					}
+
+					continue
 				}
 				// Round-10 Task 3: a backfill kickoff opens a
 				// sync_history row so the admin endpoint can

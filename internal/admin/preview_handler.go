@@ -175,6 +175,17 @@ func (h *PreviewHandler) preview(c *gin.Context) {
 		Settings:    req.Settings,
 		Credentials: []byte(req.Credentials),
 	}
+	// Round-20 Task 16: schema validation. If the connector
+	// exports a CredentialSchemaProvider, validate the credential
+	// blob against that schema before calling Validate(). This
+	// produces precise field-level errors a connector's
+	// connect-time Validate often can't.
+	if sp, ok := conn.(connector.CredentialSchemaProvider); ok {
+		if vErr := connector.ValidateCredentialsErr(cfg.Credentials, sp.CredentialSchema()); vErr != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": vErr.Error()})
+			return
+		}
+	}
 	if err := conn.Validate(ctx, cfg); err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "validate: " + err.Error()})
 		return
