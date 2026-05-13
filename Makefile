@@ -166,6 +166,11 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz='^FuzzStageBreakerConcurrent$$' -fuzztime=30s ./internal/pipeline/
 	$(GO) test -run='^$$' -fuzz='^FuzzHealthSummaryRequest$$' -fuzztime=30s ./internal/admin/
 	$(GO) test -run='^$$' -fuzz='^FuzzSlowQueryThreshold$$' -fuzztime=30s ./internal/retrieval/
+	# Round-24 Task 10: credential-decode fuzzers for the new connectors.
+	$(GO) test -run='^$$' -fuzz='^FuzzQuipCredentialsDecode$$' -fuzztime=30s ./internal/connector/quip/
+	$(GO) test -run='^$$' -fuzz='^FuzzFreshserviceCredentialsDecode$$' -fuzztime=30s ./internal/connector/freshservice/
+	$(GO) test -run='^$$' -fuzz='^FuzzPagerDutyCredentialsDecode$$' -fuzztime=30s ./internal/connector/pagerduty/
+	$(GO) test -run='^$$' -fuzz='^FuzzZohoDeskCredentialsDecode$$' -fuzztime=30s ./internal/connector/zoho_desk/
 
 # Round-12 Task 7: tenant isolation smoke. Runs the e2e isolation
 # manifest against the live storage plane.

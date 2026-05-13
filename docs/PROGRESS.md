@@ -479,11 +479,88 @@ ships, the matrix is empty. Each row records:
 | Intercom | ✅ (Bearer token) | ✅ (conversations + articles) | ❌ (planned) | ✅ (`POST /conversations/search` with `updated_at > <unix>`) | ❌ | ✅ Round-20 (Phase 2+, Support) |
 | Webex | ✅ (Bearer token) | ✅ (messages by room) | ❌ (planned) | ✅ (`/v1/messages?roomId=<id>` + `before`/`max`) | ❌ | ✅ Round-20 (Phase 2+, Chat) |
 | Bitbucket | ✅ (App password / OAuth) | ✅ (pullrequests + issues per `/2.0/repositories/<ws>/<repo>`) | ❌ (planned) | ✅ (`q=updated_on>"<ISO8601>"` + `pagelen` + `next`) | ❌ | ✅ Round-20 (Phase 2+, VCS) |
+| Quip | ✅ (`/1/users/current`) | ✅ (threads via `/1/threads/recent`) | ❌ | ✅ (`updated_usec` microsecond cursor) | ❌ | ✅ Round-24 (Phase 2+, Docs) |
+| Freshservice | ✅ (`/api/v2/agents/me`) | ✅ (tickets via `/api/v2/tickets`) | ❌ | ✅ (`updated_since=<ISO8601>` + page-based) | ❌ | ✅ Round-24 (Phase 2+, ITSM) |
+| PagerDuty | ✅ (`/users/me` user-token / `/abilities` rest-key) | ✅ (incidents via `/incidents`) | ❌ (planned) | ✅ (`since=<ISO8601>` + `more`/`offset`) | ❌ | ✅ Round-24 (Phase 2+, Incident) |
+| Zoho Desk | ✅ (`/api/v1/myinfo` + `orgId`) | ✅ (tickets via `/api/v1/tickets`) | ❌ | ✅ (`modifiedTimeRange=<since,until>` + 100/page) | ❌ | ✅ Round-24 (Phase 2+, Support) |
 
 ---
 
 ## Changelog
 
+- 2026-05-13: **Round 24: Connector catalog 50 → 54 + production-
+  hardening + doc cleanup.** Tasks 1-4 ship four new connectors —
+  `quip` (Salesforce-owned docs, Bearer + `updated_usec`
+  microsecond cursor), `freshservice` (Freshworks ITSM, API
+  key basic-auth user with password `X`, `updated_since=<ISO8601>`
+  + page-based pagination matching Round-22's Freshdesk
+  `Link: rel="next"` fix), `pagerduty` (incident knowledge,
+  `Authorization: Token token=...` scheme with both user and
+  REST-key token shapes, `since=<ISO8601>` + `more`/`offset`
+  pagination), and `zoho_desk` (Zoho Desk tickets, OAuth
+  `Authorization: Zoho-oauthtoken` + `orgId` header,
+  `modifiedTimeRange=<since,until>` with 100/page ceiling).
+  Each connector ships full `Validate` / `Connect` /
+  `ListNamespaces` / `ListDocuments` / `FetchDocument` /
+  `DeltaSync` httptest coverage, the empty-cursor bootstrap
+  contract that captures `now()` without backfilling, the
+  ErrRateLimited 429 wrap, ErrInvalidConfig / ErrNotSupported
+  references, and blank-imports in `cmd/api/main.go` +
+  `cmd/ingest/main.go`. Task 5 lifts `audit_test.go` floor
+  49 → 53; task 6 lifts `connector_smoke_test.go` registry
+  pin 50 → 54 with full-lifecycle smokes for all four; task 7
+  ships `tests/e2e/round24_test.go` (build tag `e2e`) with
+  the 54-connector registry pin, a Quip lifecycle walk, and
+  a 429-propagation sweep across the new four; task 8 ships
+  `tests/regression/round2223_manifest.{go,_test.go}` pinning
+  every Round-22/23 Devin Review fix (Airtable cursor
+  seconds + microseconds, Freshdesk `Link: rel="next"`
+  pagination, Qdrant healthcheck validation, ConnectorHealthHandler
+  aggregation, Intercom namespace branching, paused-source
+  filter); task 9 adds compile-time `SourceConnector` +
+  `DeltaSyncer` assertions to `tests/integration/connector_contract_test.go`;
+  task 10 adds credential-decode fuzzers for all four
+  connectors and registers them with `make fuzz`. Task 11
+  adds a `by_connector_category` nested rollup to
+  `/v1/admin/dlq/analytics` so on-call can pin both the
+  noisy connector and its dominant failure class without a
+  second query. Task 12 adds a `ConsecutiveFailureThreshold`
+  trigger to the source auto-pauser (config knob
+  `CONTEXT_ENGINE_SOURCE_AUTO_PAUSE_THRESHOLD`) so hard-down
+  upstreams can be paused without waiting for the sliding-
+  window MinSampleSize to fill. Task 13 ships two
+  self-documenting alias routes on top of the existing
+  bulk-source pipeline — `POST /v1/admin/sources/bulk-reindex`
+  and `POST /v1/admin/sources/bulk-rotate`. Task 15 adds a
+  `content_type` field to `IngestEvent` for future
+  multimodal routing (image/audio/video) without breaking
+  the existing JSON shape (omitempty preserves byte-level
+  compatibility). Task 20 adds four per-connector runbooks
+  under `docs/runbooks/` covering credential rotation,
+  quota / rate-limit handling, outage detection, and error
+  codes; task 21 lifts `runbook_test.go` floor 50 → 54 and
+  blank-imports the four new packages. Task 22 documents the
+  bulk-reindex / bulk-rotate / analytics-connector-health /
+  webhooks-billing surfaces in `docs/openapi.yaml`. Task 24
+  stands up `POST /v1/admin/webhooks/billing` (plus GET and
+  DELETE) with HTTPS-only URL validation, 32-char minimum
+  shared-secret enforcement, an audit-logged lifecycle, and a
+  fakeable `BillingWebhookStore` seam — the emit path lands
+  in a future round once the billing team has the storage
+  schema. Task 25 mounts `GET /v1/admin/analytics/connector-health`
+  with a `window` query parameter (1h / 24h / 7d / 30d); the
+  payload today is a point-in-time snapshot, but the response
+  shape is locked in so a future time-series backend can be
+  swapped behind it without breaking clients. Tasks 26-30
+  rewrite the README as a public-facing project doc, trim
+  PROGRESS / PHASES / ARCHITECTURE of the round-by-round
+  status snapshots that had grown to look like an internal
+  task tracker, and align the Phase-2+ table footnote in
+  PROPOSAL with the now-extended catalog. CI invariants:
+  `fast-required` aggregator pinned green; `audit_test.go`,
+  `bootstrap_audit_test.go`, `connector_smoke_test.go`, and
+  `runbook_test.go` floors moved in lockstep with the 50 → 54
+  registry growth.
 - 2026-05-13: **Round 20/21: Connector catalog expansion — 42 →
   50 production connectors + production hardening + CI lane
   optimisation.** Phase A Tasks 1-8 add Zendesk (Support REST

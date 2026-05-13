@@ -252,3 +252,59 @@ func TestBulkSourceHandler_ReindexUnconfiguredFails(t *testing.T) {
 		t.Fatalf("unconfigured reindex expected 400, got %d body=%s", w.Code, w.Body.String())
 	}
 }
+
+// TestBulkSourceHandler_BulkReindexAlias — Round-24 Task 13.
+//
+// Asserts that POST /v1/admin/sources/bulk-reindex (the alias
+// route) walks the same pipeline as the generic /bulk endpoint
+// with action=reindex.
+func TestBulkSourceHandler_BulkReindexAlias(t *testing.T) {
+	repo := newBulkRepo()
+	audr := &recordingAudit{}
+	h, _ := admin.NewBulkSourceHandler(repo, audr)
+	reindexer := &fakeBulkReindexer{}
+	h.WithReindexer(reindexer)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(audit.TenantContextKey, "ta")
+		c.Set(audit.ActorContextKey, "u1")
+		c.Next()
+	})
+	h.Register(r.Group("/"))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sources/bulk-reindex", strings.NewReader(`{"source_ids":["s1","s2"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	if len(reindexer.hits) != 2 {
+		t.Fatalf("expected 2 reindex hits, got %v", reindexer.hits)
+	}
+}
+
+// TestBulkSourceHandler_BulkRotateAlias — Round-24 Task 13.
+func TestBulkSourceHandler_BulkRotateAlias(t *testing.T) {
+	repo := newBulkRepo()
+	audr := &recordingAudit{}
+	h, _ := admin.NewBulkSourceHandler(repo, audr)
+	rotator := &fakeBulkRotator{}
+	h.WithCredRotator(rotator)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(audit.TenantContextKey, "ta")
+		c.Set(audit.ActorContextKey, "u1")
+		c.Next()
+	})
+	h.Register(r.Group("/"))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sources/bulk-rotate", strings.NewReader(`{"source_ids":["s1"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	if len(rotator.hits) != 1 {
+		t.Fatalf("expected 1 rotate hit, got %v", rotator.hits)
+	}
+}

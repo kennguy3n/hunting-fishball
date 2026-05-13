@@ -31,7 +31,8 @@ import (
 // below. Round 20 extended the floor from 41 → 49 first-class
 // connectors (excluding the google_shared_drives wrapper) by
 // adding zendesk, servicenow, freshdesk, airtable, trello,
-// intercom, webex, and bitbucket.
+// intercom, webex, and bitbucket. Round 24 lifts the floor to
+// 53 by adding quip, freshservice, pagerduty, and zoho_desk.
 var auditedConnectors = []string{
 	"airtable",
 	"asana",
@@ -49,6 +50,7 @@ var auditedConnectors = []string{
 	"egnyte",
 	"entra_id",
 	"freshdesk",
+	"freshservice",
 	"gcs",
 	"github",
 	"gitlab",
@@ -66,8 +68,10 @@ var auditedConnectors = []string{
 	"okta",
 	"onedrive",
 	"outlook",
+	"pagerduty",
 	"personio",
 	"pipedrive",
+	"quip",
 	"rss",
 	"s3",
 	"salesforce",
@@ -82,6 +86,7 @@ var auditedConnectors = []string{
 	"webex",
 	"workday",
 	"zendesk",
+	"zoho_desk",
 }
 
 type auditCheck struct {
@@ -97,9 +102,10 @@ var requiredChecks = []auditCheck{
 }
 
 // TestConnectorAudit_Round15 enforces the connector-completeness
-// contract first introduced in Round 15 and re-extended in
-// Round 20 to all 49 first-class connectors (excluding the
-// google_shared_drives wrapper).
+// contract first introduced in Round 15, re-extended in Round 20
+// to 49 first-class connectors, and lifted in Round 24 to all 53
+// first-class connectors (excluding the google_shared_drives
+// wrapper).
 func TestConnectorAudit_Round15(t *testing.T) {
 	t.Parallel()
 	for _, name := range auditedConnectors {

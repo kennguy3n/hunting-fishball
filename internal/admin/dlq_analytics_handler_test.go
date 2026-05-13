@@ -201,3 +201,41 @@ func TestDLQAnalytics_TruncatesMultibyteUTF8(t *testing.T) {
 		t.Fatalf("expected 201 runes (200 + ellipsis), got %d (%q)", got, resp.TopErrors[0].ErrorText)
 	}
 }
+
+// TestDLQAnalytics_ByConnectorCategory — Round-24 Task 11.
+//
+// Asserts the nested connector→category→count rollup so on-call
+// can pin a single noisy connector and the specific failure
+// class it is producing without a second query.
+func TestDLQAnalytics_ByConnectorCategory(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := &fakeAnalyticsStore{
+		rows: []pipeline.DLQMessage{
+			{ID: "1", TenantID: "t1", Category: pipeline.DLQCategoryTransient, ErrorText: "rate", FailedAt: now.Add(-30 * time.Minute), Payload: []byte(`{"connector":"slack"}`)},
+			{ID: "2", TenantID: "t1", Category: pipeline.DLQCategoryTransient, ErrorText: "rate", FailedAt: now.Add(-1 * time.Hour), Payload: []byte(`{"connector":"slack"}`)},
+			{ID: "3", TenantID: "t1", Category: pipeline.DLQCategoryPermanent, ErrorText: "parse", FailedAt: now.Add(-2 * time.Hour), Payload: []byte(`{"connector":"slack"}`)},
+			{ID: "4", TenantID: "t1", Category: pipeline.DLQCategoryPermanent, ErrorText: "parse", FailedAt: now.Add(-3 * time.Hour), Payload: []byte(`{"connector":"github"}`)},
+		},
+	}
+	r := setupAnalyticsRouter(t, store, "t1", now)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/admin/dlq/analytics", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp admin.DLQAnalyticsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := resp.ByConnectorCategory
+	if got["slack"][pipeline.DLQCategoryTransient] != 2 {
+		t.Fatalf("slack/transient=%d, want 2 (%+v)", got["slack"][pipeline.DLQCategoryTransient], got)
+	}
+	if got["slack"][pipeline.DLQCategoryPermanent] != 1 {
+		t.Fatalf("slack/permanent=%d, want 1 (%+v)", got["slack"][pipeline.DLQCategoryPermanent], got)
+	}
+	if got["github"][pipeline.DLQCategoryPermanent] != 1 {
+		t.Fatalf("github/permanent=%d, want 1 (%+v)", got["github"][pipeline.DLQCategoryPermanent], got)
+	}
+}

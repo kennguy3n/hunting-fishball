@@ -29,18 +29,20 @@ import (
 // googledrive package and is already audited there).
 //
 // Round 20 lifts the floor to 49 first-class connectors (50
-// minus the wrapper).
+// minus the wrapper). Round 24 raises that to 53 by adding
+// quip, freshservice, pagerduty, and zoho_desk.
 var bootstrapAuditConnectors = []string{
 	"airtable", "asana", "azure_blob", "bamboohr", "bitbucket",
 	"bookstack", "box", "clickup", "coda", "confluence",
 	"confluence_server", "discord", "dropbox", "egnyte",
-	"entra_id", "freshdesk", "gcs", "github", "gitlab", "gmail",
-	"google_workspace", "googledrive", "hubspot", "intercom",
-	"jira", "kchat", "linear", "mattermost", "monday", "notion",
-	"okta", "onedrive", "outlook", "personio", "pipedrive",
+	"entra_id", "freshdesk", "freshservice", "gcs", "github",
+	"gitlab", "gmail", "google_workspace", "googledrive",
+	"hubspot", "intercom", "jira", "kchat", "linear",
+	"mattermost", "monday", "notion", "okta", "onedrive",
+	"outlook", "pagerduty", "personio", "pipedrive", "quip",
 	"rss", "s3", "salesforce", "servicenow", "sharepoint",
 	"sharepoint_onprem", "sitemap", "teams", "trello",
-	"webex", "workday", "zendesk",
+	"webex", "workday", "zendesk", "zoho_desk",
 }
 
 // bootstrapMarkers are the textual signals that a connector's

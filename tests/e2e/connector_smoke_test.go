@@ -11,10 +11,11 @@
 //   - For DeltaSyncer connectors, DeltaSync returns a fresh cursor.
 //   - For WebhookReceiver connectors, HandleWebhook decodes a sample
 //     payload into at least one DocumentChange.
-//   - The process-global connector registry has exactly 50 entries
+//   - The process-global connector registry has exactly 54 entries
 //     after blank-imports complete (Round-20 catalog expansion adds
 //     zendesk, servicenow, freshdesk, airtable, trello, intercom,
-//     webex, and bitbucket on top of the Round-18 catalog of 42).
+//     webex, and bitbucket on top of the Round-18 catalog of 42;
+//     Round-24 adds quip, freshservice, pagerduty, and zoho_desk).
 //
 // Run via `make test-connector-smoke` (or as part of `make test-e2e`).
 package e2e
@@ -49,6 +50,7 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/egnyte"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/freshdesk"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/freshservice"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gcs"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
@@ -66,8 +68,10 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/okta"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/outlook"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/pagerduty"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/personio"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/quip"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
@@ -82,6 +86,7 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/webex"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/zendesk"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/zoho_desk"
 
 	// Direct imports so each smoke case can call the connector's
 	// `New(With…)` option helpers without going through the registry's
@@ -99,6 +104,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
 	entraid "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/freshdesk"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/freshservice"
 	gh "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/gmail"
@@ -115,8 +121,10 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/okta"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/onedrive"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/outlook"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/pagerduty"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/personio"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/pipedrive"
+	"github.com/kennguy3n/hunting-fishball/internal/connector/quip"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
@@ -129,6 +137,7 @@ import (
 	"github.com/kennguy3n/hunting-fishball/internal/connector/webex"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/workday"
 	"github.com/kennguy3n/hunting-fishball/internal/connector/zendesk"
+	zohodesk "github.com/kennguy3n/hunting-fishball/internal/connector/zoho_desk"
 )
 
 // expectedConnectors is the canonical list of registered connector
@@ -151,6 +160,7 @@ var expectedConnectors = []string{
 	"egnyte",
 	"entra_id",
 	"freshdesk",
+	"freshservice",
 	"gcs",
 	"github",
 	"gitlab",
@@ -169,8 +179,10 @@ var expectedConnectors = []string{
 	"okta",
 	"onedrive",
 	"outlook",
+	"pagerduty",
 	"personio",
 	"pipedrive",
+	"quip",
 	"rss",
 	"s3",
 	"salesforce",
@@ -185,6 +197,7 @@ var expectedConnectors = []string{
 	"webex",
 	"workday",
 	"zendesk",
+	"zoho_desk",
 }
 
 func TestConnectorSmoke_RegistryHasAllConnectors(t *testing.T) {
@@ -1511,6 +1524,98 @@ func TestConnectorSmoke_Bitbucket(t *testing.T) {
 	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
 	conn, _ := runListNamespacesAndFetch(t, c, cfg)
 	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "ws/r"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Quip(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/1/users/current", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"u1"}`)
+	})
+	mux.HandleFunc("/1/threads/recent", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"abc":{"thread":{"id":"abc","title":"Spec","updated_usec":1717200000000000,"created_usec":1717100000000000},"html":"<p>hi</p>"}}`)
+	})
+	mux.HandleFunc("/1/threads/abc", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"thread":{"id":"abc","title":"Spec","updated_usec":1717200000000000,"created_usec":1717100000000000},"html":"<p>hi</p>"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := quip.New(quip.WithBaseURL(srv.URL), quip.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(quip.Credentials{AccessToken: "tok"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "threads"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_Freshservice(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/agents/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":1}`)
+	})
+	mux.HandleFunc("/api/v2/tickets", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"tickets":[{"id":11,"subject":"Outage","updated_at":"2024-06-01T00:00:00Z","created_at":"2024-05-01T00:00:00Z"}]}`)
+	})
+	mux.HandleFunc("/api/v2/tickets/11", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"ticket":{"id":11,"subject":"Outage","description_text":"down","updated_at":"2024-06-01T00:00:00Z","created_at":"2024-05-01T00:00:00Z"}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := freshservice.New(freshservice.WithBaseURL(srv.URL), freshservice.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(freshservice.Credentials{Domain: "acme", APIKey: "k"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "tickets"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_PagerDuty(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"user":{}}`)
+	})
+	mux.HandleFunc("/incidents", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"incidents":[{"id":"P1","title":"DB down","summary":"prod","last_status_change_at":"2024-06-01T00:00:00Z","created_at":"2024-05-01T00:00:00Z"}],"more":false}`)
+	})
+	mux.HandleFunc("/incidents/P1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"incident":{"id":"P1","title":"DB down","summary":"prod","last_status_change_at":"2024-06-01T00:00:00Z","created_at":"2024-05-01T00:00:00Z"}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := pagerduty.New(pagerduty.WithBaseURL(srv.URL), pagerduty.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(pagerduty.Credentials{APIKey: "k"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "incidents"}, ""); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+}
+
+func TestConnectorSmoke_ZohoDesk(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/myinfo", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	})
+	mux.HandleFunc("/api/v1/tickets", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"id":"Z1","subject":"Reset","modifiedTime":"2024-06-01T00:00:00Z","createdTime":"2024-05-01T00:00:00Z"}]}`)
+	})
+	mux.HandleFunc("/api/v1/tickets/Z1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"Z1","subject":"Reset","description":"please reset","modifiedTime":"2024-06-01T00:00:00Z","createdTime":"2024-05-01T00:00:00Z"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := zohodesk.New(zohodesk.WithBaseURL(srv.URL), zohodesk.WithHTTPClient(srv.Client()))
+	creds, _ := json.Marshal(zohodesk.Credentials{AccessToken: "tok", OrgID: "1"})
+	cfg := connector.ConnectorConfig{TenantID: "t", SourceID: "s", Credentials: creds}
+	conn, _ := runListNamespacesAndFetch(t, c, cfg)
+	if _, _, err := c.DeltaSync(context.Background(), conn, connector.Namespace{ID: "tickets"}, ""); err != nil {
 		t.Fatalf("delta: %v", err)
 	}
 }

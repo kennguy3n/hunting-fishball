@@ -101,6 +101,10 @@ const (
 	// detector observed a sustained error-rate breach over the
 	// configured sliding window and auto-paused the source.
 	ActionSourceAutoPaused Action = "source.auto_paused"
+
+	// Round-24 Task 24: billing usage webhook lifecycle.
+	ActionBillingWebhookRegistered   Action = "billing_webhook.registered"
+	ActionBillingWebhookUnregistered Action = "billing_webhook.unregistered"
 )
 
 // AuditLog is a single audit event. The table is append-only — there is

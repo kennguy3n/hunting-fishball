@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -86,10 +87,62 @@ func NewConnectorHealthHandler(sources *SourceRepository, healths *HealthReposit
 	return &ConnectorHealthHandler{sources: sources, healths: healths}, nil
 }
 
-// Register mounts GET /v1/admin/connectors/health on rg.
+// Register mounts GET /v1/admin/connectors/health on rg, plus
+// the Round-24 Task 25 analytics view GET
+// /v1/admin/analytics/connector-health which surfaces the same
+// aggregation enriched with the requested time window. Today the
+// time-window field is informational only — the aggregation is
+// always a point-in-time snapshot because we do not persist
+// fleet-health history. Future rounds will plumb a time-series
+// store behind the same response shape so the portal can render
+// a trend chart without a schema break.
 func (h *ConnectorHealthHandler) Register(rg *gin.RouterGroup) {
 	rg.GET("/v1/admin/connectors/health", h.connectorsHealth)
+	rg.GET("/v1/admin/analytics/connector-health", h.analytics)
 }
+
+// AnalyticsConnectorHealthResponse is the JSON shape for the
+// analytics endpoint.
+type AnalyticsConnectorHealthResponse struct {
+	TenantID string                 `json:"tenant_id"`
+	Window   string                 `json:"window"`
+	AsOf     string                 `json:"as_of"`
+	Summary  ConnectorHealthSummary `json:"summary"`
+}
+
+func (h *ConnectorHealthHandler) analytics(c *gin.Context) {
+	tid, _ := c.Get(audit.TenantContextKey)
+	tenantID, _ := tid.(string)
+	if tenantID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing tenant context"})
+
+		return
+	}
+	window := c.DefaultQuery("window", "24h")
+	switch window {
+	case "1h", "24h", "7d", "30d":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "window must be one of 1h, 24h, 7d, 30d"})
+
+		return
+	}
+	ctx := c.Request.Context()
+	summary, err := h.aggregate(ctx, tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+
+		return
+	}
+	c.JSON(http.StatusOK, AnalyticsConnectorHealthResponse{
+		TenantID: tenantID,
+		Window:   window,
+		AsOf:     nowFn().UTC().Format("2006-01-02T15:04:05Z"),
+		Summary:  summary,
+	})
+}
+
+// nowFn is overridable in tests. Default is time.Now.
+var nowFn = func() time.Time { return time.Now() }
 
 func (h *ConnectorHealthHandler) connectorsHealth(c *gin.Context) {
 	tid, _ := c.Get(audit.TenantContextKey)
