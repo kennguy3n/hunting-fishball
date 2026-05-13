@@ -16,7 +16,7 @@ phase.
 | 🟡 partial | Some exit criteria met; gaps tracked in `PROGRESS.md` |
 | ⏳ planned | Not yet started |
 
-> **Phase status snapshot (2026-05-12, post-Round-18/19).** Phases 0,
+> **Phase status snapshot (2026-05-13, post-Round-20/21).** Phases 0,
 > 1, 2, 3, 7, and 8 are **functionally complete** — every exit
 > criterion has shipped to `main` and the supporting tests /
 > runbooks / metrics are in place. Phases 7 and 8 carry the
@@ -30,6 +30,40 @@ phase.
 > `uneycom/skytrack-*`, `kennguy3n/knowledge`). See
 > [`PROGRESS.md`](PROGRESS.md) for the per-task status and
 > [`README.md`](../README.md) for the round-by-round changelog.
+>
+> **Round 20/21** expands the connector catalog from 42 to
+> **50** production connectors and layers production hardening
+> plus CI optimisation on top. Eight new Phase-2+ targets ship:
+> Zendesk (Support, `/api/v2/incremental/tickets.json?start_time`),
+> ServiceNow (ITSM, `sysparm_query=sys_updated_on>` against
+> `/api/now/table/`), Freshdesk (Support, API key as basic-auth
+> user + `updated_since` page walk), Airtable (DB, PAT/OAuth +
+> `filterByFormula=LAST_MODIFIED_TIME()>'<ISO8601>'`), Trello
+> (PM, API key + token query + `/1/boards/<id>/actions?since`),
+> Intercom (Support, `POST /conversations/search` with
+> `updated_at > <unix>`), Webex (Chat, Bearer +
+> `/v1/messages?roomId=<id>` `before`/`max` pagination), and
+> Bitbucket Cloud (VCS, App password / OAuth +
+> `q=updated_on>"<ISO8601>"`). Round 20/21 lifts the connector
+> completeness audit floor 41 → 49 and the smoke-registry pin
+> 42 → 50, ships 8 new runbooks under `docs/runbooks/`, adds
+> `tests/e2e/round20_test.go` + the Round-19/20 regression
+> manifest, the unified connector health dashboard
+> (`GET /v1/admin/connectors/health`), connector config schema
+> validation in `POST /v1/admin/sources/preview`, pipeline
+> graceful backpressure on auto-paused sources via the
+> `PausedSourceFilter` Stage-1 gate, retrieval cache tag
+> completeness audit covering the Round-19
+> `InvalidateBySources` surface, OpenAPI updates for the new
+> endpoint, migration 043 `connector_sync_cursors`, explicit
+> Kafka + Qdrant compose healthchecks with a tightened
+> `Wait for stack to settle` gate, and Phase-D CI lane
+> optimisation (`detect-changes` `dorny/paths-filter@v3` job
+> with `fast-connector-unit`, `fast-connector-integration`,
+> `fast-regression` skipping on PRs that don't touch their
+> paths, the `fast-required` aggregator treating `skipped` as
+> `success`, and a unified `${{ runner.os }}-go-build-...`
+> cache key prefix across every fast-lane Go job).
 >
 > **Round 18/19** expands the connector catalog from 36 to
 > **42** production connectors and layers production-grade
@@ -365,7 +399,7 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
 **Exit criteria.**
 
 - [x] At least 12 production connectors at GA (Phase-1 target met).
-      Round 18 expands the catalog to **42**: Phase 1 (Google
+      Round 20/21 expands the catalog to **50**: Phase 1 (Google
       Drive, Slack, KChat) + Phase 7 (SharePoint, OneDrive,
       Dropbox, Box, Notion, Confluence, Jira, GitHub, GitLab,
       Microsoft Teams) + Round-15 Phase-2+ adds (S3, Linear,
@@ -377,7 +411,9 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
       365 Outlook, Workday, BambooHR, Personio, Sitemap, Coda) +
       Round-18 Phase-2+ adds (SharePoint Server / on-prem, Azure
       Blob, Google Cloud Storage, Egnyte, BookStack, signed-
-      upload portal) = **42**; each lives in
+      upload portal) + Round-20/21 Phase-2+ adds (Zendesk,
+      ServiceNow, Freshdesk, Airtable, Trello, Intercom, Webex,
+      Bitbucket Cloud) = **50**; each lives in
       `internal/connector/<name>/` with `httptest`-backed unit
       tests.
 - [x] Each connector has its own runbook for credential rotation,
@@ -393,15 +429,15 @@ behind the `SourceConnector` contract and reuses the existing pipeline.
       Phase 1 introduced — `tests/e2e/connector_smoke_test.go`
       (build tag `e2e`) drives Validate → Connect → ListNamespaces
       → ListDocuments → FetchDocument for every connector and
-      asserts the registry has exactly 42 entries.
+      asserts the registry has exactly 50 entries.
       `make test-connector-smoke`.
 - [x] Connector completeness audit (Round 15, Task 9 — extended
-      in Round 16 and Round 17, Task 9):
+      in Round 16, 17, 18, and 20, Task 9):
       `internal/connector/audit_test.go` is a process-global
       gate that fails CI if any connector source drops
       `ErrInvalidConfig`, `ErrNotSupported`, `ErrRateLimited`,
       or `http.NewRequestWithContext`. The audited list now
-      covers all 35 first-class connectors (excluding the
+      covers all 49 first-class connectors (excluding the
       `google_shared_drives` registry wrapper which delegates
       to the googledrive connector).
 

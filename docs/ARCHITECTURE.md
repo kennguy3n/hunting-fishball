@@ -688,7 +688,7 @@ hunting-fishball/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces (DeltaSyncer / WebhookReceiver /
 │   │   │                      # Provisioner), process-global registry.
-│   │   │                      # 42 connectors after Round 18.
+│   │   │                      # 50 connectors after Round 20/21.
 │   │   ├── googledrive/       # Google Drive connector (Phase 1) +
 │   │   │                      # shared_drives.go (Round 15) which
 │   │   │                      # registers google_shared_drives as a
@@ -792,10 +792,57 @@ hunting-fishball/
 │   │   ├── bookstack/         # BookStack wiki (Round 18, Knowledge);
 │   │   │                      # Token-ID + Token-Secret header on
 │   │   │                      # /api/pages with updated_at filter/sort.
-│   │   └── upload_portal/     # Signed-upload portal (Round 18, Receiver);
-│   │                          # HMAC-verified multipart receiver
-│   │                          # implementing WebhookReceiver, emitting
-│   │                          # SourceDocument events into Kafka.
+│   │   ├── upload_portal/     # Signed-upload portal (Round 18, Receiver);
+│   │   │                      # HMAC-verified multipart receiver
+│   │   │                      # implementing WebhookReceiver, emitting
+│   │   │                      # SourceDocument events into Kafka.
+│   │   ├── zendesk/           # Zendesk Support (Round 20, Support);
+│   │   │                      # API token / OAuth bearer against
+│   │   │                      # {subdomain}.zendesk.com/api/v2; tickets
+│   │   │                      # + Help Center articles; incremental
+│   │   │                      # export at /api/v2/incremental/tickets
+│   │   │                      # .json?start_time=<unix> with
+│   │   │                      # Retry-After honoured on 429.
+│   │   ├── servicenow/        # ServiceNow Table API (Round 20, ITSM);
+│   │   │                      # basic/OAuth against
+│   │   │                      # {instance}.service-now.com; incident /
+│   │   │                      # change / kb_knowledge via
+│   │   │                      # /api/now/table/<table>; delta via
+│   │   │                      # sysparm_query=sys_updated_on>javascript:
+│   │   │                      # gs.dateGenerate(...) with sysparm_offset
+│   │   │                      # page walk.
+│   │   ├── freshdesk/         # Freshdesk REST v2 (Round 20, Support);
+│   │   │                      # API key as basic-auth user (password
+│   │   │                      # "X", same pattern as BambooHR); tickets
+│   │   │                      # via /api/v2/tickets?updated_since=
+│   │   │                      # <ISO8601>&page=<n>.
+│   │   ├── airtable/          # Airtable REST (Round 20, DB); Bearer
+│   │   │                      # PAT/OAuth against /v0/<baseId>/
+│   │   │                      # <tableIdOrName>; delta via
+│   │   │                      # filterByFormula=LAST_MODIFIED_TIME()>
+│   │   │                      # '<ISO8601>' + offset continuation.
+│   │   ├── trello/            # Trello REST (Round 20, PM); API key +
+│   │   │                      # token query params; cards by board
+│   │   │                      # via /1/boards/<id>/cards; delta via
+│   │   │                      # /1/boards/<id>/actions?since=
+│   │   │                      # <ISO8601> with before cursor.
+│   │   ├── intercom/          # Intercom REST v2 (Round 20, Support);
+│   │   │                      # Bearer token; conversations +
+│   │   │                      # articles; delta via POST
+│   │   │                      # /conversations/search with
+│   │   │                      # updated_at > <unix>.
+│   │   ├── webex/             # Webex Messages (Round 20, Chat);
+│   │   │                      # Bearer Bot or Integration OAuth;
+│   │   │                      # messages by room via /v1/messages?
+│   │   │                      # roomId=<id> with before/max cursor
+│   │   │                      # pagination + created timestamp filter.
+│   │   └── bitbucket/         # Bitbucket Cloud (Round 20, VCS); App
+│   │                          # password basic-auth or OAuth consumer;
+│   │                          # pullrequests + issues via
+│   │                          # /2.0/repositories/<workspace>/<repo>/
+│   │                          # pullrequests; delta via
+│   │                          # q=updated_on>"<ISO8601>" + pagelen +
+│   │                          # next link pagination.
 │   ├── credential/            # AES-256-GCM envelope encryption for
 │   │                          # connector credentials
 │   ├── audit/                 # AuditLog model, repository (transactional
@@ -3104,3 +3151,213 @@ and the existing GORM + Gin + Redis stack.
   ARCHITECTURE are all updated to reflect the 42-connector
   floor and the Round-18/19 capability additions. Migration
   count on disk is now `042`.
+
+### Tech choices added in Round 20
+
+Round 20 lands eight new Phase-2+ connectors and Phase-C
+production hardening on top of Phase-A. No new third-party
+runtime dependencies — every connector uses stdlib `net/http`
++ `http.NewRequestWithContext` and the existing
+`internal/connector` registry; the only new infrastructure
+piece is migration `043_connector_sync_cursors.sql`.
+
+- **Zendesk Support (Task 1).** New `internal/connector/zendesk/`
+  with API token / OAuth bearer against
+  `{subdomain}.zendesk.com/api/v2`. Documents are tickets and
+  Help Center articles; delta sync uses the official
+  incremental export endpoint
+  `/api/v2/incremental/tickets.json?start_time=<unix>` which
+  returns `end_time` for cursor advancement and
+  `next_page=null` for completion. HTTP 429 is wrapped as
+  `connector.ErrRateLimited` and the `Retry-After` header is
+  honoured.
+
+- **ServiceNow Table API (Task 2).** New
+  `internal/connector/servicenow/` with basic-auth or OAuth
+  bearer against `{instance}.service-now.com/api/now/table/
+  <table>`. Documents are `incident` / `change_request` /
+  `kb_knowledge` rows; delta uses
+  `sysparm_query=sys_updated_on>javascript:gs.dateGenerate(
+  '<YYYY-MM-DD HH:MM:SS>','UTC')` with `sysparm_offset`
+  pagination. Empty-cursor bootstrap returns a `now()`-stamped
+  cursor without backfilling.
+
+- **Freshdesk REST v2 (Task 3).** New
+  `internal/connector/freshdesk/` with API-key-as-basic-auth-user
+  (password `X`, same pattern as the BambooHR connector).
+  Documents are tickets via `/api/v2/tickets?updated_since=
+  <ISO8601>&page=<n>`; the connector walks `page` until an
+  empty response and advances the cursor to the latest
+  `updated_at`.
+
+- **Airtable REST (Task 4).** New
+  `internal/connector/airtable/` with Bearer token (PAT or
+  OAuth). Documents are records per `/v0/<baseId>/
+  <tableIdOrName>`; delta uses
+  `filterByFormula=LAST_MODIFIED_TIME()>'<ISO8601>'` with
+  `offset=<continuation>` follow-up tokens.
+
+- **Trello REST (Task 5).** New `internal/connector/trello/`
+  with API key + token query-parameter auth. Documents are
+  cards by board via `/1/boards/<id>/cards`; delta uses
+  `/1/boards/<id>/actions?since=<ISO8601>` with the `before`
+  cursor walking older actions in descending order.
+
+- **Intercom REST v2 (Task 6).** New
+  `internal/connector/intercom/` with Bearer token.
+  Documents are conversations and articles; conversation
+  delta uses `POST /conversations/search` with the body
+  `{ "query": { "operator": ">", "field": "updated_at",
+  "value": <unix> } }` and walks the cursor-based
+  `pagination.next`.
+
+- **Webex Messages (Task 7).** New `internal/connector/webex/`
+  with Bearer Bot or Integration OAuth. Documents are messages
+  by room via `/v1/messages?roomId=<id>`; delta uses
+  `before=<msgId>` / `max=<count>` cursor pagination plus a
+  `created` timestamp filter so the connector stops once it
+  passes the stored cursor.
+
+- **Bitbucket Cloud REST v2 (Task 8).** New
+  `internal/connector/bitbucket/` with App password basic-auth
+  or OAuth consumer. Documents are pull requests and issues
+  per `/2.0/repositories/<workspace>/<repo>/pullrequests` and
+  `/2.0/repositories/<workspace>/<repo>/issues`; delta uses
+  `q=updated_on>"<ISO8601>"` query plus `pagelen` and the
+  `next` link Bitbucket returns in each response.
+
+- **Catalogue gates lifted to 50 (Tasks 9-12).**
+  `internal/connector/audit_test.go` floor 41 → 49,
+  `tests/e2e/connector_smoke_test.go` registry pin 42 → 50
+  with per-connector smoke tests for all 8 new connectors,
+  `docs/runbooks/runbook_test.go` floor 42 → 50 with 8 new
+  per-connector runbook markdown files
+  (`zendesk.md` / `servicenow.md` / `freshdesk.md` /
+  `airtable.md` / `trello.md` / `intercom.md` / `webex.md` /
+  `bitbucket.md`) covering credential rotation, quota /
+  rate-limit incidents, outage detection, and error codes.
+  `tests/e2e/round20_test.go` (build tag `e2e`) drives a
+  full Zendesk incremental-export lifecycle and a Bitbucket
+  PR-query lifecycle plus a 429-propagation sweep against
+  all 8 new connectors. `tests/regression/round1920_manifest.go`
+  catalogues every Round-18/19/20 fix with a meta-test
+  asserting each `TestRef` resolves on disk.
+  `tests/integration/connector_contract_test.go` adds
+  compile-time `SourceConnector` + `DeltaSyncer` assertions
+  for all 8 new structs plus
+  `TestConnectorContract_Round20_DeltaSyncerEmptyCursor`
+  table-driven coverage for Zendesk incremental-export,
+  ServiceNow `sys_updated_on`, and Bitbucket `q=` query
+  bootstrap surfaces.
+
+- **Stale connector cleanup + bootstrap audit (Task 13).**
+  `internal/connector/bootstrap_audit_test.go` enumerates the
+  registry and exercises `DeltaSync` with an empty cursor on
+  every connector that satisfies `DeltaSyncer`, asserting the
+  returned cursor is non-empty and (when the connector also
+  exposes `MinIncrementalWindow`) within the bootstrap
+  contract. Connectors caught backfilling are fixed in place.
+
+- **Migration 043 `connector_sync_cursors` (Task 14).** New
+  `migrations/043_connector_sync_cursors.sql` (and
+  `migrations/rollback/043_connector_sync_cursors.down.sql`)
+  carves a dedicated `(tenant_id, source_id, namespace_id) →
+  cursor` table out of the source config blob. The pipeline
+  now reads / writes cursors against this table instead of
+  rewriting the config JSON on every sync, eliminating a
+  per-event optimistic-lock write and avoiding stale
+  credentials in cursor commits.
+
+- **Connector health dashboard (Task 15).** New
+  `internal/admin/connector_health_handler.go` mounts
+  `GET /v1/admin/connectors/health` which joins `sources`
+  and `source_health` and groups by `connector_type`. The
+  response includes per-type counts (healthy / degraded /
+  failing / unknown / paused / removing / removed), average
+  sync lag, average error count, and failing-or-degraded
+  fraction. Backs the portal's connector fleet view.
+
+- **Connector config schema validator (Task 16).** New
+  `internal/connector/schema_validator.go` exposes a
+  `CredentialSchemaProvider` interface (`CredentialSchema()
+  []byte`) and a `ValidateCredentialsErr(raw, schema)` helper
+  that validates the credential blob against the JSON-Schema
+  subset (object / required / properties / type / enum /
+  additionalProperties). Wired into
+  `POST /v1/admin/sources/preview` so configuration errors
+  surface as HTTP 422 with precise field-level messages
+  before `Validate()` is called.
+
+- **Pipeline graceful backpressure (Task 17).** New
+  `PausedSourceFilter` interface on
+  `pipeline.CoordinatorConfig` lets Stage 1 short-circuit
+  when a source has been auto-paused — the event is
+  drained cleanly (Skipped+Completed metrics, OnSuccess
+  fires for offset commit) without calling FetchEvent
+  against the paused upstream.
+
+- **Retrieval cache tag completeness audit (Task 18).**
+  `internal/retrieval/cache_invalidation_test.go` is
+  extended to recognise both the Round-12
+  `Invalidate(chunkIDs)` and the Round-19
+  `InvalidateBySources(sourceIDs)` companion calls, and a
+  new structural test (`TestCacheInvalidation_TagBasedSurfaceExists`)
+  parses `internal/storage/redis_cache.go` to guarantee
+  both surfaces remain on `SemanticCache`.
+
+- **OpenAPI completeness (Task 19).** `docs/openapi.yaml`
+  documents the new `GET /v1/admin/connectors/health`
+  endpoint including the per-connector-type aggregate
+  schema; `docs/openapi_test.go` adds the path to
+  `requiredPaths` so the gate fails if either side drifts.
+
+- **Lint / vet / vuln / cleanup (Tasks 20-21).** Zero
+  `TODO` / `FIXME` / `HACK` markers in newly-added code.
+  `go vet ./...` clean, `golangci-lint run` reports 0
+  issues, `go mod tidy` produces no diff, `go mod verify`
+  green, `govulncheck ./...` reports 0 callable
+  vulnerabilities.
+
+- **Docker compose healthcheck tuning (Task 22).** Explicit
+  `kafka-broker-api-versions.sh` healthcheck on the Kafka
+  container (10s interval, 30s start period, 30 retries) and
+  a TCP healthcheck on Qdrant. The CI `Wait for stack to
+  settle` loop is updated to additionally probe Redis
+  (`redis-cli ping`) and Kafka so a stack-failure surfaces
+  which service is unready.
+
+### Tech choices added in Round 21
+
+Round 21 is the CI-and-docs companion to Round 20 — no new
+runtime code or migrations; all changes are wholly within
+`.github/workflows/`, `docs/`, and `README.md`.
+
+- **Path-filtered CI lanes (Tasks 23-24).** A new
+  `detect-changes` job using
+  [`dorny/paths-filter@v3`](https://github.com/dorny/paths-filter)
+  emits a `connector` and a `regression` output. The
+  `fast-connector-unit`, `fast-connector-integration`, and
+  `fast-regression` jobs depend on `detect-changes` and gate
+  on `if: github.event_name != 'pull_request' ||
+  needs.detect-changes.outputs.<filter> == 'true'`, so doc-
+  only or unrelated PRs skip them. The `fast-required`
+  aggregator is updated to treat `skipped` as `success`
+  ([the loop now branches on
+  `[ "$r" != "success" ] && [ "$r" != "skipped" ]`](../.github/workflows/ci.yml))
+  so branch protection still passes.
+
+- **Unified Go build cache (Task 25).** Every fast-lane Go
+  job now uses the same primary cache key
+  `${{ runner.os }}-go-build-${{ hashFiles('**/go.sum') }}`
+  with the previous job-specific suffix retained as a
+  `restore-keys` fallback. Any green `fast-check` /
+  `fast-test` / `fast-build` / `fast-connector-*` /
+  `fast-regression` run can now warm the build cache for
+  every other job in the same lane.
+
+- **Documentation refresh (Tasks 26-30).**
+  PROGRESS.md / PHASES.md / ARCHITECTURE.md / README.md are
+  refreshed to the post-Round-20/21 state — 50 connectors,
+  43 migrations on disk, the new endpoints and lane
+  optimisation called out. Audit floor 41 → 49; smoke
+  registry pin 42 → 50; runbook gate 42 → 50.

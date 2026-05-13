@@ -952,6 +952,46 @@ paths:
         - $ref: '#/components/parameters/TenantHeader'
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DashboardResponse' } } } }
+  /v1/admin/connectors/health:
+    get:
+      summary: Per-connector-type fleet health (Round-20/21 Task 15).
+      description: |
+        Aggregates the requesting tenant's sources by connector_type.
+        For each type returns the count of sources, the per-status
+        breakdown (healthy / degraded / failing / unknown / paused /
+        removing / removed), the average sync lag, the average error
+        count, and the failing-or-degraded fraction. Backs the
+        portal's connector fleet view.
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_id: { type: string }
+                  total_sources: { type: integer }
+                  connectors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        connector_type: { type: string }
+                        total:          { type: integer }
+                        healthy:        { type: integer }
+                        degraded:       { type: integer }
+                        failing:        { type: integer }
+                        unknown:        { type: integer }
+                        paused:         { type: integer }
+                        removing:       { type: integer }
+                        removed:        { type: integer }
+                        avg_lag:        { type: number }
+                        avg_error_count: { type: number }
+                        error_rate:      { type: number }
+        '401': { description: Missing tenant context }
   /v1/admin/dlq:
     get:
       summary: List dead-letter messages.

@@ -226,7 +226,7 @@ This document tracks the *actual* state of the platform. The shape mirrors
 
 ## Phase 7 — Catalog expansion
 
-**Status.** ✅ shipped | ~100% — Round 18 expands the catalog from 36 → **42** production connectors (SharePoint on-prem, Azure Blob, Google Cloud Storage, Egnyte, BookStack, signed-upload portal on top of the Round 17 set). Per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
+**Status.** ✅ shipped | ~100% — Round 20/21 expands the catalog from 42 → **50** production connectors (Zendesk, ServiceNow, Freshdesk, Airtable, Trello, Intercom, Webex, Bitbucket on top of the Round 18 set). Per-connector runbooks under `docs/runbooks/`, end-to-end smoke green per connector (`tests/e2e/connector_smoke_test.go`, `make test-connector-smoke`), capability matrix below.
 
 - [x] ≥ 12 production connectors at GA — Phase 1 (Google Drive,
       Slack, KChat) + Phase 7 (SharePoint, OneDrive, Dropbox,
@@ -239,7 +239,9 @@ This document tracks the *actual* state of the platform. The shape mirrors
       Workspace Directory, Microsoft 365 Outlook, Workday,
       BambooHR, Personio, Sitemap, Coda) + Round-18 Phase-2+
       adds (SharePoint on-prem, Azure Blob, Google Cloud Storage,
-      Egnyte, BookStack, signed-upload portal) = **42**
+      Egnyte, BookStack, signed-upload portal) + Round-20/21
+      Phase-2+ adds (Zendesk, ServiceNow, Freshdesk, Airtable,
+      Trello, Intercom, Webex, Bitbucket) = **50**
 - [x] Per-connector runbooks (`docs/runbooks/` —
       one Markdown file per connector covering credential rotation,
       quota / rate-limit incidents, outage detection / recovery, and
@@ -469,10 +471,119 @@ ships, the matrix is empty. Each row records:
 | Egnyte | ✅ (OAuth) | ✅ (`/pubapi/v1/fs/<path>`) | ❌ | ✅ (events `/pubapi/v2/events/cursor`) | ❌ | ✅ Round-18 (Phase 2+, ECM) |
 | BookStack | ✅ (Token-ID + Token-Secret) | ✅ (`/api/pages`) | ❌ | ✅ (`updated_at` filter + sort) | ❌ | ✅ Round-18 (Phase 2+, Knowledge) |
 | Upload portal | ✅ (HMAC) | ➖ webhook receiver | ❌ | ➖ webhook-driven | ✅ (signed-URL upload + HMAC sig) | ✅ Round-18 (Phase 2+, Receiver) |
+| Zendesk | ✅ (API token / OAuth bearer) | ✅ (tickets + Help Center articles) | ❌ (planned) | ✅ (`/api/v2/incremental/tickets.json?start_time=<unix>`) | ❌ | ✅ Round-20 (Phase 2+, Support) |
+| ServiceNow | ✅ (Basic / OAuth) | ✅ (incident / change / kb_knowledge via `/api/now/table`) | ❌ | ✅ (`sysparm_query=sys_updated_on>javascript:gs.dateGenerate(...)`) | ❌ | ✅ Round-20 (Phase 2+, ITSM) |
+| Freshdesk | ✅ (API key as basic-auth user) | ✅ (tickets via `/api/v2/tickets`) | ❌ | ✅ (`updated_since=<ISO8601>` + `page`) | ❌ | ✅ Round-20 (Phase 2+, Support) |
+| Airtable | ✅ (PAT / OAuth bearer) | ✅ (records per `/v0/<base>/<table>`) | ❌ | ✅ (`filterByFormula=LAST_MODIFIED_TIME()>'<ISO8601>'` + `offset`) | ❌ | ✅ Round-20 (Phase 2+, DB) |
+| Trello | ✅ (API key + token query) | ✅ (cards by board) | ❌ | ✅ (`/1/boards/<id>/actions?since=<ISO8601>` + `before`) | ❌ | ✅ Round-20 (Phase 2+, PM) |
+| Intercom | ✅ (Bearer token) | ✅ (conversations + articles) | ❌ (planned) | ✅ (`POST /conversations/search` with `updated_at > <unix>`) | ❌ | ✅ Round-20 (Phase 2+, Support) |
+| Webex | ✅ (Bearer token) | ✅ (messages by room) | ❌ (planned) | ✅ (`/v1/messages?roomId=<id>` + `before`/`max`) | ❌ | ✅ Round-20 (Phase 2+, Chat) |
+| Bitbucket | ✅ (App password / OAuth) | ✅ (pullrequests + issues per `/2.0/repositories/<ws>/<repo>`) | ❌ (planned) | ✅ (`q=updated_on>"<ISO8601>"` + `pagelen` + `next`) | ❌ | ✅ Round-20 (Phase 2+, VCS) |
 
 ---
 
 ## Changelog
+
+- 2026-05-13: **Round 20/21: Connector catalog expansion — 42 →
+  50 production connectors + production hardening + CI lane
+  optimisation.** Phase A Tasks 1-8 add Zendesk (Support REST
+  API, `/api/v2/incremental/tickets.json?start_time=<unix>`
+  incremental-export cursor + `Retry-After` 429), ServiceNow
+  (Table API basic/OAuth against `{instance}.service-now.com`,
+  `sysparm_query=sys_updated_on>javascript:gs.dateGenerate(...)`
+  cursor with `sysparm_offset` pagination), Freshdesk (API key as
+  basic-auth user with password `X`, `/api/v2/tickets` +
+  `updated_since` ISO-8601 + `page`), Airtable (Bearer PAT/OAuth
+  against `/v0/<baseId>/<tableIdOrName>` with
+  `filterByFormula=LAST_MODIFIED_TIME()>'<ISO8601>'` and
+  `offset` continuation), Trello (API key + token query,
+  `/1/boards/<id>/cards` + `/1/boards/<id>/actions?since` with
+  `before` cursor), Intercom (Bearer, `POST /conversations/search`
+  with `updated_at > <unix>` plus `/articles` walk), Webex
+  (Bearer Bot/OAuth, `/v1/messages?roomId=<id>` + `before`/`max`
+  cursor pagination), and Bitbucket Cloud (App password / OAuth,
+  `/2.0/repositories/<ws>/<repo>/pullrequests` + issues with
+  `q=updated_on>"<ISO8601>"` and `next` link pagination). Each
+  connector ships a stdlib `net/http` client with
+  `http.NewRequestWithContext`, wraps HTTP 429 as
+  `connector.ErrRateLimited`, references `connector.ErrInvalidConfig`
+  / `connector.ErrNotSupported`, exposes `SourceConnector` +
+  `DeltaSyncer`, and is httptest-backed with full
+  Validate/Connect/ListNamespaces/ListDocuments/FetchDocument +
+  DeltaSync bootstrap/incremental/429 test sweeps. Blank-imports
+  added to `cmd/api/main.go` and `cmd/ingest/main.go`. Phase B
+  Tasks 9-12 lift the catalogue gates: audit floor 41 → 49
+  (`internal/connector/audit_test.go`), smoke registry pin
+  42 → 50 (`tests/e2e/connector_smoke_test.go`) with new per-
+  connector smoke entries, runbook floor 42 → 50 plus 8 new
+  runbook markdown files under `docs/runbooks/` (zendesk,
+  servicenow, freshdesk, airtable, trello, intercom, webex,
+  bitbucket — each covering credential rotation, quota / rate-
+  limit incidents, outage detection, and error codes), Round-20
+  e2e suite (`tests/e2e/round20_test.go`, build tag `e2e`) with
+  the 50-connector registry pin, two full-lifecycle scripts
+  (Zendesk incremental export and Bitbucket PR query), and a
+  429-propagation sweep across all 8 new connectors,
+  Round-19/20 regression manifest (`tests/regression/round1920_manifest.go`
+  + `_test.go`) cataloguing every Round-18/19/20 fix (registry
+  expansion to 50, per-connector DeltaSync bootstrap contract,
+  upload_portal per-connection webhook fix, azure_blob HMAC
+  fix, source auto-pauser retry fix, DLQ analytics UTF-8 fix,
+  semantic cache singleflight fix, cross-encoder tail demotion)
+  plus a meta-test asserting every `TestRef` resolves on disk,
+  and an integration contract test expansion
+  (`tests/integration/connector_contract_test.go`) with compile-
+  time `SourceConnector` + `DeltaSyncer` assertions for all 8
+  new structs plus `TestConnectorContract_Round20_DeltaSyncerEmptyCursor`
+  table-driven coverage for Zendesk incremental-export,
+  ServiceNow `sys_updated_on`, and Bitbucket `q=` query bootstrap
+  surfaces. Phase C Tasks 13-22 ship the production-hardening
+  layer: stale-connector cleanup sweep
+  (`internal/connector/bootstrap_audit_test.go`) verifying every
+  connector's `DeltaSync` honours the empty-cursor → "now"
+  bootstrap contract without backfilling, migration 043
+  (`migrations/043_connector_sync_cursors.sql` + rollback)
+  carving a dedicated `connector_sync_cursors` table out of the
+  source config blob, the unified connector health dashboard
+  endpoint `GET /v1/admin/connectors/health`
+  (`internal/admin/connector_health_handler.go`) aggregating
+  per-connector-type healthy/degraded/failing/paused counts plus
+  avg lag and error rate, the connector config schema validator
+  (`internal/connector/schema_validator.go` exposing
+  `CredentialSchemaProvider` + `ValidateCredentialsErr` and the
+  JSON-Schema subset of object/required/properties/type/enum/
+  additionalProperties wired into `POST /v1/admin/sources/preview`
+  before `Validate()` is called), pipeline graceful backpressure
+  on auto-paused sources
+  (`internal/pipeline/coordinator.go` adds the
+  `PausedSourceFilter` interface so Stage 1 drains in-flight
+  events cleanly without retrying against the paused upstream),
+  the retrieval cache tag completeness audit
+  (`internal/retrieval/cache_invalidation_test.go` extended to
+  recognise both `Invalidate(chunkIDs)` and the Round-19
+  `InvalidateBySources(sourceIDs)` tag-based surface, with a new
+  structural test guaranteeing both methods remain on
+  `SemanticCache`), the OpenAPI completeness pass adding the new
+  health endpoint to `docs/openapi.yaml` and
+  `docs/openapi_test.go`'s requiredPaths, the dead-code +
+  `go vet` + `golangci-lint` pass (0 issues), the go.mod
+  dependency audit (`go mod tidy`, `go mod verify`, `govulncheck`
+  green), and Docker-compose healthcheck tuning (explicit
+  `kafka-broker-api-versions.sh` healthcheck on Kafka and a TCP
+  probe on Qdrant, plus a `Wait for stack to settle` loop that
+  also waits on Redis and Kafka). Phase D Tasks 23-25 land the
+  CI optimisation: a `detect-changes` job (`dorny/paths-filter@v3`)
+  that gates `fast-connector-unit`, `fast-connector-integration`,
+  and `fast-regression` behind their actual paths on PRs (with
+  push/schedule/dispatch forcing them to run), the
+  `fast-required` aggregator updated to treat `skipped` as
+  `success` so path-filtered lanes do not block doc-only PRs,
+  and a unified `${{ runner.os }}-go-build-${{ hashFiles(...) }}`
+  cache key prefix across every fast-lane Go job so any job can
+  prime the build cache for the others (job-specific suffixes
+  retained as `restore-keys` fallback). Phase E Tasks 26-30
+  refreshes PROGRESS.md / PHASES.md / ARCHITECTURE.md / README.md
+  to reflect the post-Round-20/21 state.
 
 - 2026-05-12: **Round 18/19: Connector catalog expansion — 36 →
   42 production connectors + production hardening.** Tasks 1-8

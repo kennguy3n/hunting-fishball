@@ -21,9 +21,11 @@ import (
 
 	// Blank-imports mirror cmd/api/main.go so the registry is
 	// populated before ListSourceConnectors runs.
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/airtable"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/asana"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/azure_blob"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bitbucket"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bookstack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
@@ -34,6 +36,7 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/egnyte"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/freshdesk"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gcs"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
@@ -41,6 +44,7 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/google_workspace"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/intercom"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/kchat"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/linear"
@@ -55,13 +59,17 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/servicenow"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint_onprem"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sitemap"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/trello"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/upload_portal"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/webex"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/workday"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/zendesk"
 )
 
 // runbookFilename maps a registry name to its expected runbook
@@ -105,8 +113,8 @@ var requiredSections = []string{
 func TestConnectorRunbooks_ExistAndCoverRequiredSections(t *testing.T) {
 	t.Parallel()
 	names := connector.ListSourceConnectors()
-	if len(names) < 42 {
-		t.Fatalf("expected at least 42 connectors registered; got %d (%v)", len(names), names)
+	if len(names) < 50 {
+		t.Fatalf("expected at least 50 connectors registered; got %d (%v)", len(names), names)
 	}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {

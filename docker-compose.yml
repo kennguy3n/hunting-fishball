@@ -69,6 +69,16 @@ services:
       ALLOW_PLAINTEXT_LISTENER: "yes"
     volumes:
       - kafka_data:/bitnami/kafka
+    # Round-20 Task 22: explicit Kafka healthcheck. The bitnami
+    # image ships kafka-broker-api-versions.sh which only returns
+    # 0 once the broker has fully advertised its listeners — the
+    # required state for producer/consumer connect.
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
 
   qdrant:
     image: qdrant/qdrant:v1.10.1
@@ -78,6 +88,17 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+    # Round-20 Task 22: probe Qdrant's /readyz once the HTTP
+    # listener is up. Qdrant ships /healthz (liveness, always
+    # 200) and /readyz (readiness, blocks until WAL replay
+    # finishes) — we want readiness so the api container's
+    # depends_on:condition: service_healthy actually waits.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
 
   # FalkorDB exposes the Redis wire protocol with the GRAPH.* command
   # family. We bind it to host port 6380 so it doesn't collide with

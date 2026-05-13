@@ -67,9 +67,11 @@ import (
 	// hooks register each implementation under the global registry
 	// so admin source-management can mint Connection objects from
 	// the connector name alone.
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/airtable"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/asana"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/azure_blob"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bamboohr"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bitbucket"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/bookstack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/box"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/clickup"
@@ -80,6 +82,7 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/dropbox"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/egnyte"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/entra_id"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/freshdesk"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gcs"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/github"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/gitlab"
@@ -87,6 +90,7 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/google_workspace"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/googledrive"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/hubspot"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/intercom"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/jira"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/kchat"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/linear"
@@ -101,13 +105,17 @@ import (
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/rss"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/s3"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/salesforce"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/servicenow"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sharepoint_onprem"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/sitemap"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/slack"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/teams"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/trello"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/upload_portal"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/webex"
 	_ "github.com/kennguy3n/hunting-fishball/internal/connector/workday"
+	_ "github.com/kennguy3n/hunting-fishball/internal/connector/zendesk"
 )
 
 func main() {
@@ -485,6 +493,15 @@ func run() error {
 		return fmt.Errorf("dashboard handler: %w", err)
 	}
 	dashboardHandler.Register(api)
+
+	// Round-20 Task 15: connector-type aggregate health dashboard.
+	// Joins sources × source_health and reports per-connector_type
+	// healthy/degraded/failing/paused counts + avg lag + error rate.
+	connectorHealth, err := admin.NewConnectorHealthHandler(sourceRepo, healthRepo)
+	if err != nil {
+		return fmt.Errorf("connector health handler: %w", err)
+	}
+	connectorHealth.Register(api)
 
 	// Phase 8 / Task 14: per-namespace sync progress endpoint.
 	syncProgressStore := admin.NewSyncProgressStoreGORM(db)

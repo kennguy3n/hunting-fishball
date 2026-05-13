@@ -1,13 +1,52 @@
 # hunting-fishball
 
-> **Status (2026-05-12, post-Round-18/19).** Phases 0-3 and 7-8 are
+> **Status (2026-05-13, post-Round-20/21).** Phases 0-3 and 7-8 are
 > **functionally complete** in `main`; Phases 4-6 are
 > **server-side complete** with only client-side rendering left in
 > external repos. See [`docs/PROGRESS.md`](docs/PROGRESS.md) for
 > the live checklist and the Round-by-round changelog below.
-> Migration count is at **042**. **Round 18/19 expands the
-> connector catalog from 36 → 42** and layers production-grade
-> hardening on top. Six new Phase-2+ targets ship: SharePoint
+> Migration count is at **043**. **Round 20/21 expands the
+> connector catalog from 42 → 50** and layers production
+> hardening + CI optimisation on top. Eight new Phase-2+
+> targets ship: Zendesk (Support, API token / OAuth bearer +
+> `/api/v2/incremental/tickets.json?start_time=<unix>` export
+> cursor), ServiceNow (ITSM, Table API +
+> `sysparm_query=sys_updated_on>` cursor), Freshdesk (Support,
+> API key as basic-auth user + `updated_since` page walk),
+> Airtable (DB, PAT/OAuth +
+> `filterByFormula=LAST_MODIFIED_TIME()>'<ISO8601>'`), Trello
+> (PM, API key + token query +
+> `/1/boards/<id>/actions?since`), Intercom (Support,
+> `POST /conversations/search` with `updated_at > <unix>`),
+> Webex (Chat, Bearer Bot/OAuth + `before`/`max` cursor on
+> `/v1/messages?roomId=`), and Bitbucket Cloud (VCS, App
+> password / OAuth + `q=updated_on>"<ISO8601>"`). Round 20
+> also lifts the connector audit floor 41 → 49, the smoke
+> registry pin 42 → 50, the runbook gate 42 → 50, adds the
+> unified connector health dashboard at
+> `GET /v1/admin/connectors/health`, the connector config
+> schema validator (`POST /v1/admin/sources/preview` now
+> rejects malformed credential blobs with HTTP 422 before
+> calling `Validate()`), pipeline graceful backpressure on
+> auto-paused sources via a Stage-1 `PausedSourceFilter` gate,
+> a retrieval cache tag completeness audit covering the
+> Round-19 `InvalidateBySources` surface, migration 043
+> (`connector_sync_cursors`), and explicit Kafka + Qdrant
+> docker-compose healthchecks with a tightened
+> `Wait for stack to settle` gate. Round 21 lands the CI lane
+> optimisation: a `detect-changes` job using
+> `dorny/paths-filter@v3` gates `fast-connector-unit`,
+> `fast-connector-integration`, and `fast-regression` behind
+> their actual paths on PRs (push/schedule/dispatch still
+> force them on); the `fast-required` aggregator treats
+> `skipped` as `success`; and every fast-lane Go job now
+> shares a unified `${{ runner.os }}-go-build-...` build
+> cache key prefix so any job can prime the cache for the
+> others.
+>
+> Round 18/19 (previous round) expanded the catalog from 36 →
+> 42 and layered the Round-19 advanced retrieval + ops
+> features on top. Six new Phase-2+ targets shipped: SharePoint
 > Server / on-prem (ECM, NTLM / app-password REST,
 > `Modified gt datetime'<ISO8601>'` cursor), Azure Blob (Storage,
 > SAS-signed REST + `x-ms-blob-last-modified` cursor), Google
@@ -416,6 +455,75 @@ The full set of public + admin endpoints is documented in
   catches Postgres-specific syntax (JSONB / TIMESTAMPTZ /
   `ADD COLUMN IF NOT EXISTS`) that the SQLite dry-run misses
   (Task 20, `scripts/migrate-dry-run-pg.sh`).
+
+**Round 20/21 additions:**
+
+- Connector catalog expansion (42 → 50):
+  - `zendesk` — Zendesk Support (Support).
+    `internal/connector/zendesk/`. API token / OAuth bearer
+    against `{subdomain}.zendesk.com/api/v2`; tickets +
+    Help Center articles; delta via the incremental export
+    endpoint `/api/v2/incremental/tickets.json?start_time=
+    <unix>` with `Retry-After` honoured on 429.
+  - `servicenow` — ServiceNow Table API (ITSM).
+    `internal/connector/servicenow/`. Basic / OAuth against
+    `{instance}.service-now.com/api/now/table/<table>`;
+    delta via
+    `sysparm_query=sys_updated_on>javascript:gs.dateGenerate
+    (...)` with `sysparm_offset` page walk.
+  - `freshdesk` — Freshdesk REST v2 (Support).
+    `internal/connector/freshdesk/`. API key as basic-auth
+    user (password `X`); tickets via
+    `/api/v2/tickets?updated_since=<ISO8601>&page=<n>`.
+  - `airtable` — Airtable REST (DB).
+    `internal/connector/airtable/`. Bearer PAT / OAuth
+    against `/v0/<baseId>/<tableIdOrName>`; delta via
+    `filterByFormula=LAST_MODIFIED_TIME()>'<ISO8601>'` +
+    `offset` continuation.
+  - `trello` — Trello REST (PM).
+    `internal/connector/trello/`. API key + token query
+    params; cards by board via `/1/boards/<id>/cards`; delta
+    via `/1/boards/<id>/actions?since=<ISO8601>` + `before`
+    cursor.
+  - `intercom` — Intercom REST v2 (Support).
+    `internal/connector/intercom/`. Bearer token;
+    conversations + articles; delta via
+    `POST /conversations/search` with `updated_at > <unix>`.
+  - `webex` — Webex Messages (Chat).
+    `internal/connector/webex/`. Bearer Bot or Integration
+    OAuth; messages by room via `/v1/messages?roomId=<id>`
+    + `before`/`max` cursor pagination.
+  - `bitbucket` — Bitbucket Cloud (VCS).
+    `internal/connector/bitbucket/`. App password basic-auth
+    or OAuth consumer; pull requests + issues via
+    `/2.0/repositories/<workspace>/<repo>/pullrequests`;
+    delta via `q=updated_on>"<ISO8601>"` + `pagelen` +
+    `next` link pagination.
+- Catalogue gates lifted to 50: audit floor 41 → 49
+  (`internal/connector/audit_test.go`), smoke registry pin
+  42 → 50 (`tests/e2e/connector_smoke_test.go`), runbook
+  gate 42 → 50 (`docs/runbooks/runbook_test.go`) + 8 new
+  per-connector runbook markdown files under
+  `docs/runbooks/` (credential rotation, quota / rate-limit
+  incidents, outage detection, error codes).
+- New endpoint `GET /v1/admin/connectors/health` exposes the
+  per-connector-type fleet health
+  (`internal/admin/connector_health_handler.go`).
+- Connector config schema validator
+  (`internal/connector/schema_validator.go`) wired into
+  `POST /v1/admin/sources/preview`.
+- Pipeline graceful backpressure on auto-paused sources via
+  `pipeline.CoordinatorConfig.PausedSourceFilter`.
+- Retrieval cache tag completeness audit recognises both
+  `Invalidate(chunkIDs)` and `InvalidateBySources(sourceIDs)`.
+- Migration 043 `connector_sync_cursors` carves cursor state
+  out of the source config blob.
+- Explicit Kafka + Qdrant docker-compose healthchecks +
+  tightened CI `Wait for stack to settle` loop.
+- Path-filtered CI lanes via `detect-changes` +
+  `dorny/paths-filter@v3`; aggregator treats `skipped` as
+  `success`; unified `go-build` cache key prefix shared
+  across all fast-lane Go jobs.
 
 **Round 18/19 additions:**
 
@@ -1165,7 +1273,7 @@ hunting-fishball/
 ├── internal/
 │   ├── connector/             # SourceConnector interface, optional
 │   │   │                      # interfaces, process-global registry.
-│   │   │                      # 42 connectors after Round 18:
+│   │   │                      # 50 connectors after Round 20/21:
 │   │   ├── googledrive/       # Google Drive (Phase 1) +
 │   │   │                      # google_shared_drives registry entry
 │   │   │                      # (Round 15) for shared-drive-only sync
@@ -1227,9 +1335,31 @@ hunting-fishball/
 │   │   ├── bookstack/         # BookStack wiki — Token-ID + Token-Secret
 │   │   │                      # header + /api/pages updated_at sort
 │   │   │                      # (Round 18, Knowledge)
-│   │   └── upload_portal/     # Signed-upload portal — HMAC-verified
-│   │                          # multipart WebhookReceiver
-│   │                          # (Round 18, Receiver)
+│   │   ├── upload_portal/     # Signed-upload portal — HMAC-verified
+│   │   │                      # multipart WebhookReceiver
+│   │   │                      # (Round 18, Receiver)
+│   │   ├── zendesk/           # Zendesk Support — incremental export
+│   │   │                      # (Round 20, Support)
+│   │   ├── servicenow/        # ServiceNow Table API — sysparm_query
+│   │   │                      # sys_updated_on> cursor
+│   │   │                      # (Round 20, ITSM)
+│   │   ├── freshdesk/         # Freshdesk REST v2 — API key basic-auth
+│   │   │                      # + updated_since page walk
+│   │   │                      # (Round 20, Support)
+│   │   ├── airtable/          # Airtable REST — filterByFormula
+│   │   │                      # LAST_MODIFIED_TIME() cursor
+│   │   │                      # (Round 20, DB)
+│   │   ├── trello/            # Trello REST — actions?since cursor
+│   │   │                      # (Round 20, PM)
+│   │   ├── intercom/          # Intercom REST v2 — conversations/search
+│   │   │                      # with updated_at > <unix>
+│   │   │                      # (Round 20, Support)
+│   │   ├── webex/             # Webex Messages — before/max cursor on
+│   │   │                      # /v1/messages?roomId=
+│   │   │                      # (Round 20, Chat)
+│   │   └── bitbucket/         # Bitbucket Cloud — q=updated_on>
+│   │                          # "<ISO8601>" pagination
+│   │                          # (Round 20, VCS)
 │   ├── credential/            # AES-256-GCM envelope encryption
 │   ├── audit/                 # audit_logs model + repository + Kafka
 │   │                          # outbox + Gin handler
